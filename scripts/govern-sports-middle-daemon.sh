@@ -6,8 +6,9 @@
 #   - Always allow clean sub-1 packages.
 #   - Deploy capital into 1.10-1.25 packages.
 #   - Do not trade >1.25.
-#   - Start at $50/package, with max-open-packages sized to approximate an $8k
-#     open-capital ceiling from a $10k bankroll.
+#   - Trade at $20/package.
+#   - If available pUSD drops below one package, keep scanning but skip entries
+#     until current positions resolve and capital recycles.
 #
 # Usage:
 #   bash scripts/govern-sports-middle-daemon.sh plan
@@ -23,7 +24,7 @@ SERVICE_NAME="${POLYMARKET_ARB_SERVICE:-polymarket-arb-daemon.service}"
 CONFIG_NAME="${SPORTS_DAEMON_CONFIG_NAME:-sports-middle-10k-v1}"
 EXECUTION_PAIR_CONFIG="${SPORTS_EXECUTION_PAIR_CONFIG:-sports-cheap-first-breakeven-prewarm}"
 
-PACKAGE_USD="${SPORTS_PACKAGE_USD:-50}"
+PACKAGE_USD="${SPORTS_PACKAGE_USD:-20}"
 OPEN_CAP_USD="${SPORTS_OPEN_CAP_USD:-8000}"
 MAX_DAILY_USD="${SPORTS_MAX_DAILY_USD:-8000}"
 COST_RANGES="${SPORTS_ALLOWED_COST_RANGES:-<1.00,1.10-1.25}"

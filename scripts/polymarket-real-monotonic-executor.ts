@@ -68,15 +68,16 @@ const HARD_DISABLED = process.env.DISABLE_REAL_PM_TRADING === "1";
 const DRY_RUN = process.argv.includes("--dry-run") || process.env.MONOTONIC_ARB_REAL_PM_DRY_RUN === "1" || !ENABLED || HARD_DISABLED;
 const PROBE_ONLY = process.argv.includes("--probe-only");
 const BUILD_ONLY = process.argv.includes("--build-only") || process.env.MONOTONIC_ARB_REAL_PM_BUILD_ONLY === "1";
-const MAX_PACKAGE_USD = Number(process.env.MONOTONIC_ARB_REAL_PM_MAX_PACKAGE_USD ?? 1);
+const DEFAULT_PACKAGE_USD = Number(process.env.SPORTS_ARB_PACKAGE_USD ?? 20);
+const MAX_PACKAGE_USD = Number(process.env.MONOTONIC_ARB_REAL_PM_MAX_PACKAGE_USD ?? DEFAULT_PACKAGE_USD);
 // Polymarket enforces a per-market minimum order size (default 5 shares). A
 // 5-share arb at ~$1/share costs ~$5, which exceeds MAX_PACKAGE_USD ($1). This
 // ceiling lets the per-package budget auto-expand just enough to satisfy the
 // exchange minimum, while still hard-bounding spend. Defaults to whichever is
 // larger: the configured per-package cap, or $6 (covers ~5 shares near $1).
-const MAX_PACKAGE_USD_CEILING = Number(process.env.MONOTONIC_ARB_REAL_PM_MAX_PACKAGE_USD_CEILING ?? Math.max(MAX_PACKAGE_USD, 6));
-const MAX_DAILY_USD = Number(process.env.MONOTONIC_ARB_REAL_PM_MAX_DAILY_USD ?? 5);
-const MAX_OPEN_PACKAGES = Number(process.env.MONOTONIC_ARB_REAL_PM_MAX_OPEN_PACKAGES ?? 20);
+const MAX_PACKAGE_USD_CEILING = Number(process.env.MONOTONIC_ARB_REAL_PM_MAX_PACKAGE_USD_CEILING ?? MAX_PACKAGE_USD);
+const MAX_DAILY_USD = Number(process.env.MONOTONIC_ARB_REAL_PM_MAX_DAILY_USD ?? process.env.SPORTS_ARB_MAX_DAILY_USD ?? 200);
+const MAX_OPEN_PACKAGES = Number(process.env.MONOTONIC_ARB_REAL_PM_MAX_OPEN_PACKAGES ?? process.env.SPORTS_ARB_MAX_OPEN_PACKAGES ?? 50);
 const MAX_PACKAGES_PER_RUN = Number(process.env.MONOTONIC_ARB_REAL_PM_MAX_PER_RUN ?? 1);
 const MIN_EDGE = Number(process.env.MONOTONIC_ARB_REAL_PM_MIN_EDGE ?? 0.001);
 const MIN_LIQUIDITY = Number(process.env.MONOTONIC_ARB_REAL_PM_MIN_LIQUIDITY ?? 10_000);
@@ -935,7 +936,10 @@ async function runExecutor() {
 
   if (!DRY_RUN && (!client || !signer || !probe)) throw new Error("Real mode requires initialized wallet/client");
   if (!DRY_RUN) {
-    if (!proxyProbe || proxyProbe.collateralBalance < MAX_PACKAGE_USD) throw new Error(`Insufficient funder pUSD balance for cap $${MAX_PACKAGE_USD}`);
+    if (!proxyProbe || proxyProbe.collateralBalance < MAX_PACKAGE_USD) {
+      console.log(`Skip: funder pUSD balance $${(proxyProbe?.collateralBalance ?? 0).toFixed(6)} is below package budget $${MAX_PACKAGE_USD}; waiting for open positions to resolve.`);
+      return;
+    }
     if (proxyProbe.exchangeV2Allowance < MAX_PACKAGE_USD) throw new Error(`Insufficient funder Exchange V2 allowance for cap $${MAX_PACKAGE_USD}`);
   }
 

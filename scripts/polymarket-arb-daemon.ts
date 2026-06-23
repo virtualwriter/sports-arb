@@ -1857,7 +1857,7 @@ function perMinuteCapReached(): boolean {
 
 function lowBalance(): boolean {
   if (!balanceKnown) return false;
-  return spendableUsdAfterReservations() < MIN_MARKETABLE_BUY_USD;
+  return spendableUsdAfterReservations() < MAX_PACKAGE_USD;
 }
 
 function spendableUsdAfterReservations(): number {
@@ -2129,10 +2129,10 @@ async function tryExecuteInner(pkg: WatchPackage, legs: LiveLegs): Promise<void>
   }
   if (lowBalance()) {
     if (!pausedForLowBalanceLogged) {
-      log(`paused: cached funder balance=${cachedFunderBalance.toFixed(4)} allowance=${cachedFunderAllowance.toFixed(2)} < min marketable buy $${MIN_MARKETABLE_BUY_USD}; skipping new entries until refresh`);
+      log(`paused: cached funder balance=${cachedFunderBalance.toFixed(4)} allowance=${cachedFunderAllowance.toFixed(2)} < package budget $${MAX_PACKAGE_USD}; scanning but skipping new entries until cash recycles`);
       pausedForLowBalanceLogged = true;
     }
-    emitCapture(capture, "low_balance", `cached funder balance=${cachedFunderBalance.toFixed(4)} allowance=${cachedFunderAllowance.toFixed(2)} < min marketable buy $${MIN_MARKETABLE_BUY_USD}`);
+    emitCapture(capture, "low_balance", `cached funder balance=${cachedFunderBalance.toFixed(4)} allowance=${cachedFunderAllowance.toFixed(2)} < package budget $${MAX_PACKAGE_USD}`);
     return;
   }
 
