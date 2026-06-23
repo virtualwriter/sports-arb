@@ -1,0 +1,15 @@
+{
+  "T-1778707778058-9nsi": "hourly LLM close had authority over rule-owned funding trade",
+  "T-1778718867328-1tjp": "one-touch NO inherited generic 2% Polymarket stop instead of 100% hold-to-expiry stop",
+  "T-1779049817841-htfg": "strike-IV-skew data-quality artifact; excluded from live trader totals",
+  "T-1779478230785-kc6x": "sub-cent one-sided Polymarket entry artifact outside the trader thesis",
+  "MA-1780370911047-6nrr": "monotonic-arb pm_package was incorrectly migrated to single-leg SOL pm_yes and stopped out",
+  "MA-1780374515923-uyg6": "monotonic-arb pm_package was incorrectly migrated to single-leg SOL pm_yes and stopped out",
+  "MA-1780378118406-879l": "monotonic-arb pm_package was incorrectly migrated to single-leg SOL pm_yes and stopped out",
+  "MA-1780381711795-isvt": "monotonic-arb pm_package was incorrectly migrated to single-leg SOL pm_yes and stopped out",
+  "MA-1780385312342-g1yt": "monotonic-arb pm_package was incorrectly migrated to single-leg SOL pm_yes and stopped out",
+  "MA-1780388910954-3mwm": "monotonic-arb pm_package was incorrectly migrated to single-leg SOL pm_yes and stopped out",
+  "MA-1780392517115-yp3c": "monotonic-arb pm_package was incorrectly migrated to single-leg SOL pm_yes and stopped out",
+  "MA-1780396112962-p4un": "monotonic-arb pm_package was incorrectly migrated to single-leg SOL pm_yes and stopped out",
+  "MA-1780399715181-hk50": "monotonic-arb pm_package was incorrectly migrated to single-leg SOL pm_yes and stopped out"
+}

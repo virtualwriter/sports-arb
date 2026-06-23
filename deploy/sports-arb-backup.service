@@ -1,0 +1,10 @@
+[Unit]
+Description=Sports Arb state backup
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/sports-arb
+EnvironmentFile=/etc/sports-arb.env
+ExecStart=/usr/bin/env npm run backup
+User=sports-arb
+Group=sports-arb

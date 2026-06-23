@@ -1,0 +1,11 @@
+---
+description: Sports arb daemon event lifecycle
+globs: scripts/**/*monotonic*.ts,scripts/polymarket-arb-daemon.ts,scripts/lib/monotonic-arb-core.ts
+alwaysApply: false
+---
+
+# Sports Arb Event Lifecycle
+
+- For NBA/MLB monotonic arb scanning, resolved or past-date sports game markets should age out of the watchlist.
+- Current/future NBA and MLB game slugs should be discovered automatically from Gamma instead of relying only on static env slugs.
+- Do not keep trading or scanning a resolved sports game just because it remains in an env var.

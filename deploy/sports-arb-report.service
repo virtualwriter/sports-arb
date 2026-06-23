@@ -1,0 +1,13 @@
+[Unit]
+Description=Sports Arb daily report and Telegram digest
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/sports-arb
+EnvironmentFile=/etc/sports-arb.env
+ExecStart=/usr/bin/env npm run report:daily
+ExecStartPost=/usr/bin/env npm run telegram:daily
+User=sports-arb
+Group=sports-arb

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Sports Arb daily report
+
+[Timer]
+OnCalendar=*-*-* 23:55:00
+Persistent=true
+Unit=sports-arb-report.service
+
+[Install]
+WantedBy=timers.target

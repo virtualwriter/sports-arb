@@ -1,0 +1,20 @@
+[Unit]
+Description=Sports Arb live engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/sports-arb
+EnvironmentFile=/etc/sports-arb.env
+ExecStart=/usr/bin/env npm run engine
+Restart=always
+RestartSec=10
+User=sports-arb
+Group=sports-arb
+StateDirectory=sports-arb
+RuntimeDirectory=sports-arb
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

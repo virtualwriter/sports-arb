@@ -1,0 +1,43 @@
+{
+  "name": "sports-arb",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "scan": "tsx scripts/market-scanner.ts",
+    "engine": "tsx scripts/trading-engine.ts",
+    "engine:dry-run": "tsx scripts/trading-engine.ts --dry-run",
+    "report:daily": "tsx scripts/daily-sports-arb-report.ts",
+    "llm:learn": "tsx scripts/llm-sports-arb-learning.ts",
+    "telegram:daily": "tsx scripts/telegram-sports-arb-bot.ts daily",
+    "telegram:status": "tsx scripts/telegram-sports-arb-bot.ts status",
+    "backup": "bash scripts/backup-sports-arb-state.sh",
+    "monotonic:live-scan": "tsx scripts/monotonic-arb-live-scanner.ts",
+    "monotonic:middle-report": "python3 scripts/monotonic_middle_report.py",
+    "monotonic:capture-report": "python3 scripts/monotonic_capture_report.py",
+    "monotonic:real-pm": "tsx scripts/polymarket-real-monotonic-executor.ts",
+    "sports:daemon": "bash scripts/govern-sports-middle-daemon.sh",
+    "daemon": "tsx scripts/polymarket-arb-daemon.ts",
+    "updown:collector": "tsx scripts/updown-5m-book-collector.ts",
+    "updown:maker-guess": "tsx scripts/updown-5m-maker-guess-test.ts",
+    "updown:ws-test": "tsx scripts/updown-5m-market-ws-test.ts",
+    "ranked-sports:test": "tsx scripts/ranked-sports-test.ts",
+    "test": "vitest run",
+    "build": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@polymarket/clob-client-v2": "^1.0.6",
+    "dotenv": "^16.4.0",
+    "ethers": "^5.8.0",
+    "socks-proxy-agent": "^9.0.0",
+    "undici": "^8.4.1",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.5"
+  }
+}

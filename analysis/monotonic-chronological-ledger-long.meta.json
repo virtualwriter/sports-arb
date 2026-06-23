@@ -1,0 +1,28 @@
+{
+  "output": "/tmp/monotonic-chronological-ledger-long.csv",
+  "packages_output": "/tmp/monotonic-chronological-packages-long.csv",
+  "scan_files": {
+    "data/monotonic-middle-audit.jsonl": {
+      "lines": 10928674,
+      "eligible_rows": 10928601,
+      "bad_json": 0
+    },
+    "data/monotonic-candidate-snapshots.jsonl": {
+      "lines": 2746947,
+      "eligible_rows": 2746947,
+      "bad_json": 0
+    },
+    "data/monotonic-capture-audit.jsonl": {
+      "lines": 2721587,
+      "eligible_rows": 664714,
+      "bad_json": 1
+    }
+  },
+  "packages": 6700,
+  "resolved_packages": 4458,
+  "unknown_ended_packages": 63,
+  "ended_slugs": 129,
+  "min_observed": "2026-06-16T22:34:44.994000Z",
+  "max_observed": "2026-06-22T20:27:12.017000Z",
+  "generated_at": "2026-06-22T20:07:53.849776Z"
+}
