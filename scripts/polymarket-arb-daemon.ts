@@ -1425,12 +1425,22 @@ function strategySummary(decision: SportsStrategyGate) {
   };
 }
 
+function strictLiveStrategyFailures(decision: SportsStrategyGate): string[] {
+  return decision.gateFailures.filter((failure) =>
+    failure.startsWith("soccer_")
+    || failure.startsWith("mlb_")
+    || failure === "unsupported_sport"
+    || failure.startsWith("adapter_")
+  );
+}
+
 function sportsStrategyGate(candidate: Candidate): { decision: SportsStrategyGate; reason: string | null } {
   const decision = evaluateSportsStrategy(candidate);
-  if (!ENFORCE_SPORTS_STRATEGY_LIVE || !isSportsCandidate(candidate) || decision.liveEligible) {
+  const strategyFailures = strictLiveStrategyFailures(decision);
+  if (!ENFORCE_SPORTS_STRATEGY_LIVE || !isSportsCandidate(candidate) || strategyFailures.length === 0) {
     return { decision, reason: null };
   }
-  return { decision, reason: `strict_strategy_gate_failed:${decision.gateFailures.join("+") || "not_live_eligible"}` };
+  return { decision, reason: `strict_strategy_gate_failed:${strategyFailures.join("+")}` };
 }
 
 function recordNearMiss(candidate: Candidate) {
