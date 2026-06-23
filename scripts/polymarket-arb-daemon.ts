@@ -167,6 +167,13 @@ const SPORTS_MIN_EDGE = Number(process.env.ARB_DAEMON_SPORTS_MIN_EDGE ?? 0);
 const SPORTS_MIN_AVAILABLE_SHARES = Number(process.env.ARB_DAEMON_SPORTS_MIN_AVAILABLE_SHARES ?? 0);
 const SPORTS_MAX_SPREAD = Number(process.env.ARB_DAEMON_SPORTS_MAX_SPREAD ?? 0.04);
 const SPORTS_MAX_PAIRED_SHARES = Number(process.env.ARB_DAEMON_SPORTS_MAX_PAIRED_SHARES ?? 0);
+const SPORTS_MAX_ENTRY_LEG_PRICE = Number(process.env.ARB_DAEMON_SPORTS_MAX_ENTRY_LEG_PRICE ?? 0.98);
+const SOCCER_MIN_NARROW_YES_BID = Number(process.env.ARB_DAEMON_SOCCER_MIN_NARROW_YES_BID ?? 0.02);
+const SOCCER_MAX_NARROW_YES_BID = Number(process.env.ARB_DAEMON_SOCCER_MAX_NARROW_YES_BID ?? 0.10);
+const MLB_MIN_NARROW_YES_BID = Number(process.env.ARB_DAEMON_MLB_MIN_NARROW_YES_BID ?? 0.30);
+const SPORTS_MAX_EVENT_USD = Number(process.env.ARB_DAEMON_SPORTS_MAX_EVENT_USD ?? 50);
+const SPORTS_MAX_EVENT_PACKAGES = Math.max(1, Number(process.env.ARB_DAEMON_SPORTS_MAX_EVENT_PACKAGES ?? 3));
+const SPORTS_BLOCK_EVENT_OVERLAP = process.env.ARB_DAEMON_SPORTS_BLOCK_EVENT_OVERLAP !== "0";
 const SPORTS_PRICE_SLIPPAGE = Number(process.env.ARB_DAEMON_SPORTS_PRICE_SLIPPAGE ?? 0);
 // Hedge completion (knock out the ~290ms preflight reprice → naked-leg failure
 // mode). The cheap leg fills first; if the hedge ask ticks up past the stale
@@ -231,9 +238,10 @@ const BALANCE_HEADROOM_MULTIPLIER = Number(
   ?? process.env.ARB_DAEMON_SPORTS_BALANCE_HEADROOM_MULTIPLIER
   ?? 1.03,
 );
-// 0 means live sports are allowed after the scheduled start/endDate. Set a
-// positive value to block entries within that many ms before start.
-const SPORTS_ENTRY_CUTOFF_MS = Number(process.env.ARB_DAEMON_SPORTS_ENTRY_CUTOFF_MS ?? 0);
+// Block sports entries close to the scheduled event/market start. Sports top of
+// book becomes especially stale near kickoff; default to a 15-minute no-entry
+// buffer unless explicitly overridden.
+const SPORTS_ENTRY_CUTOFF_MS = Number(process.env.ARB_DAEMON_SPORTS_ENTRY_CUTOFF_MS ?? 15 * 60_000);
 // Non-sports keep reserve depth because stale or vanishing displayed liquidity
 // produced uneven partial-fill orphans. Sports execution now buys the cheap leg
 // first and sizes the hedge to the actual fill, so default to using the full
@@ -381,7 +389,9 @@ type CaptureTerminalStatus =
   | "already_open"
   | "quarantined"
   | "shared_token_in_flight"
+  | "sports_event_in_flight"
   | "sports_blocked"
+  | "sports_event_cap"
   | "per_minute_cap"
   | "low_balance"
   | "max_open_packages"
@@ -392,8 +402,11 @@ type CaptureTerminalStatus =
   | "sizing_rejected"
   | "dry_run"
   | "post_preflight_lock"
+  | "post_preflight_event_lock"
   | "post_refresh_lock"
+  | "post_refresh_event_lock"
   | "fresh_sizing_rejected"
+  | "fresh_sports_event_cap"
   | "balance_headroom"
   | "submitted_result"
   | "execution_error";
@@ -482,6 +495,7 @@ const packages = new Map<string, WatchPackage>();
 // Idempotency / caps
 const inFlight = new Set<string>();
 const tokensInFlight = new Set<string>();
+const eventsInFlight = new Set<string>();
 const evaluatingPackages = new Set<string>();
 let alreadyOpen = new Set<string>();
 const submitTimestamps: number[] = [];
@@ -1054,6 +1068,45 @@ function daemonOpenPackageCount(rows: LivePackage[]): number {
   return rows.filter(isDaemonOpenPackage).length;
 }
 
+function activeSportsEventPackages(rows: LivePackage[], eventSlug: string): LivePackage[] {
+  return rows.filter((row) =>
+    row.eventSlug === eventSlug
+    && (isDaemonOpenPackage(row) || isCompletedPackagePosition(row))
+    && (isSportsAsset(row.asset) || isSportsSlug(row.eventSlug))
+  );
+}
+
+function activeSportsEventCost(rows: LivePackage[], eventSlug: string): number {
+  return activeSportsEventPackages(rows, eventSlug).reduce((sum, row) => {
+    const actual = Number(row.actualCost ?? 0);
+    const intended = Number(row.intendedCost ?? 0);
+    return sum + (actual > 0 ? actual : intended > 0 ? intended : 0);
+  }, 0);
+}
+
+function sharesExecutionLeg(candidate: Candidate, row: LivePackage): boolean {
+  return row.tokenIds?.broadYes === candidate.broad.yesTokenId
+    || row.tokenIds?.narrowNo === candidate.narrow.noTokenId
+    || row.tokenIds?.broadYes === candidate.narrow.noTokenId
+    || row.tokenIds?.narrowNo === candidate.broad.yesTokenId;
+}
+
+function sportsEventExposureBlock(candidate: Candidate, rows: LivePackage[], nextCost = 0): string | null {
+  if (!isSportsCandidate(candidate)) return null;
+  const active = activeSportsEventPackages(rows, candidate.eventSlug);
+  if (active.length >= SPORTS_MAX_EVENT_PACKAGES) {
+    return `sports_event_package_cap event=${candidate.eventSlug} open=${active.length} cap=${SPORTS_MAX_EVENT_PACKAGES}`;
+  }
+  const eventCost = activeSportsEventCost(rows, candidate.eventSlug);
+  if (SPORTS_MAX_EVENT_USD > 0 && eventCost + Math.max(0, nextCost) > SPORTS_MAX_EVENT_USD + EPSILON) {
+    return `sports_event_usd_cap event=${candidate.eventSlug} openCost=${eventCost.toFixed(2)} next=${Math.max(0, nextCost).toFixed(2)} cap=${SPORTS_MAX_EVENT_USD.toFixed(2)}`;
+  }
+  if (SPORTS_BLOCK_EVENT_OVERLAP && active.some((row) => sharesExecutionLeg(candidate, row))) {
+    return `sports_event_overlap event=${candidate.eventSlug} shared execution leg with active package`;
+  }
+  return null;
+}
+
 // ─── Live candidate + evaluation ───
 
 function isTrueMiddleCandidate(candidate: Candidate): boolean {
@@ -1132,6 +1185,22 @@ function sportsExecutionBlocked(candidate: Candidate): string | null {
   }
   const entryBlock = sportsEntryBlocked(candidate);
   if (entryBlock) return entryBlock;
+  const maxEntryLeg = Math.max(candidate.broad.yesBook.ask, candidate.narrow.noBook.ask);
+  if (SPORTS_MAX_ENTRY_LEG_PRICE > 0 && maxEntryLeg + EPSILON >= SPORTS_MAX_ENTRY_LEG_PRICE) {
+    return `sports max entry leg price exceeded maxLeg=${maxEntryLeg.toFixed(4)} cap=${SPORTS_MAX_ENTRY_LEG_PRICE.toFixed(4)}`;
+  }
+  const narrowYesBid = Math.max(0, Math.min(1, 1 - candidate.narrow.noBook.ask));
+  if (candidate.asset === "SOCCER") {
+    if (SOCCER_MIN_NARROW_YES_BID > 0 && narrowYesBid + EPSILON < SOCCER_MIN_NARROW_YES_BID) {
+      return `soccer narrow yes bid below live band bid=${narrowYesBid.toFixed(4)} min=${SOCCER_MIN_NARROW_YES_BID.toFixed(4)}`;
+    }
+    if (SOCCER_MAX_NARROW_YES_BID > 0 && narrowYesBid - EPSILON > SOCCER_MAX_NARROW_YES_BID) {
+      return `soccer narrow yes bid above live band bid=${narrowYesBid.toFixed(4)} max=${SOCCER_MAX_NARROW_YES_BID.toFixed(4)}`;
+    }
+  }
+  if (candidate.asset === "MLB" && MLB_MIN_NARROW_YES_BID > 0 && narrowYesBid + EPSILON < MLB_MIN_NARROW_YES_BID) {
+    return `mlb narrow yes bid below live band bid=${narrowYesBid.toFixed(4)} min=${MLB_MIN_NARROW_YES_BID.toFixed(4)}`;
+  }
   if (ENABLE_NBA_BATCH_EXECUTION) return null;
   if (ALLOW_NBA_NON_ATOMIC_EXECUTION) return null;
   return "NBA requires batched/tightly-coupled two-leg execution; separate FAK legs can leave naked inventory";
@@ -2183,6 +2252,16 @@ async function tryExecuteInner(pkg: WatchPackage, legs: LiveLegs): Promise<void>
     emitCapture(capture, "shared_token_in_flight", "shared token already executing");
     return;
   }
+  if (isSportsCandidate(pkg.base) && eventsInFlight.has(pkg.base.eventSlug)) {
+    const now = Date.now();
+    const last = lastSkipLogAt.get(`${pkg.key}:event_in_flight`) ?? 0;
+    if (now - last >= SKIP_LOG_THROTTLE_MS) {
+      lastSkipLogAt.set(`${pkg.key}:event_in_flight`, now);
+      log(`skip ${pkg.key}: sports event already executing ${pkg.base.eventSlug}`);
+    }
+    emitCapture(capture, "sports_event_in_flight", "sports event already executing");
+    return;
+  }
   const sportsBlock = sportsExecutionBlocked(pkg.base);
   if (sportsBlock) {
     const now = Date.now();
@@ -2217,6 +2296,17 @@ async function tryExecuteInner(pkg: WatchPackage, legs: LiveLegs): Promise<void>
       log(`skip ${pkg.key}: max_open_packages open=${openCount} cap=${MAX_OPEN_PACKAGES}`);
     }
     emitCapture(capture, "max_open_packages", `max_open_packages open=${openCount} cap=${MAX_OPEN_PACKAGES}`);
+    return;
+  }
+  const eventPreflightBlock = sportsEventExposureBlock(pkg.base, packageRows);
+  if (eventPreflightBlock) {
+    const now = Date.now();
+    const last = lastSkipLogAt.get(`${pkg.key}:event_cap`) ?? 0;
+    if (now - last >= SKIP_LOG_THROTTLE_MS) {
+      lastSkipLogAt.set(`${pkg.key}:event_cap`, now);
+      log(`skip ${pkg.key}: ${eventPreflightBlock}`);
+    }
+    emitCapture(capture, "sports_event_cap", eventPreflightBlock);
     return;
   }
 
@@ -2361,6 +2451,17 @@ async function tryExecuteInner(pkg: WatchPackage, legs: LiveLegs): Promise<void>
     emitCapture(capture, "sizing_rejected", sized.reason);
     return;
   }
+  const eventSizedBlock = sportsEventExposureBlock(executionCandidate, packageRows, sized.cost);
+  if (eventSizedBlock) {
+    const now = Date.now();
+    const last = lastSkipLogAt.get(`${pkg.key}:event_sized_cap`) ?? 0;
+    if (now - last >= SKIP_LOG_THROTTLE_MS) {
+      lastSkipLogAt.set(`${pkg.key}:event_sized_cap`, now);
+      log(`skip ${pkg.key}: ${eventSizedBlock}`);
+    }
+    emitCapture(capture, "sports_event_cap", eventSizedBlock);
+    return;
+  }
 
   if (DRY_RUN) {
     log(`DRY_RUN arb ${pkg.key} edge=${(c.lockedEdge * 100).toFixed(2)}c size=${c.availableSize.toFixed(2)} shares=${sized.shares.toFixed(2)} cost=$${sized.cost.toFixed(4)}`);
@@ -2374,12 +2475,22 @@ async function tryExecuteInner(pkg: WatchPackage, legs: LiveLegs): Promise<void>
     emitCapture(capture, "post_preflight_lock", "execution lock acquired by another tick after preflight");
     return;
   }
+  if (isSportsCandidate(executionCandidate) && eventsInFlight.has(executionCandidate.eventSlug)) {
+    log(`skip ${pkg.key}: sports event lock acquired after preflight ${executionCandidate.eventSlug}`);
+    emitCapture(capture, "post_preflight_event_lock", "sports event lock acquired after preflight");
+    return;
+  }
   await refreshBalance();
   const freshPackageRows = readJsonArray<LivePackage>(PACKAGES_PATH);
   refreshAlreadyOpen();
   if (alreadyOpen.has(pkg.key) || inFlight.has(pkg.key) || executionTokens.some((tokenId) => tokensInFlight.has(tokenId))) {
     log(`skip ${pkg.key}: blocked after fresh preflight (open package/orphan or shared token)`);
     emitCapture(capture, "post_refresh_lock", "blocked after balance refresh/open state refresh");
+    return;
+  }
+  if (isSportsCandidate(executionCandidate) && eventsInFlight.has(executionCandidate.eventSlug)) {
+    log(`skip ${pkg.key}: sports event lock acquired after balance refresh ${executionCandidate.eventSlug}`);
+    emitCapture(capture, "post_refresh_event_lock", "sports event lock acquired after balance refresh");
     return;
   }
   const freshSpendableUsd = spendableUsdAfterReservations();
@@ -2404,6 +2515,17 @@ async function tryExecuteInner(pkg: WatchPackage, legs: LiveLegs): Promise<void>
     emitCapture(capture, "fresh_sizing_rejected", freshSized.reason);
     return;
   }
+  const freshEventBlock = sportsEventExposureBlock(executionCandidate, freshPackageRows, freshSized.cost);
+  if (freshEventBlock) {
+    const now = Date.now();
+    const last = lastSkipLogAt.get(`${pkg.key}:fresh_event_cap`) ?? 0;
+    if (now - last >= SKIP_LOG_THROTTLE_MS) {
+      lastSkipLogAt.set(`${pkg.key}:fresh_event_cap`, now);
+      log(`skip ${pkg.key}: ${freshEventBlock}`);
+    }
+    emitCapture(capture, "fresh_sports_event_cap", freshEventBlock);
+    return;
+  }
   const freshReservedUsd = reservedUsdForSized(freshSized.cost);
   if (Number.isFinite(freshSpendableUsd) && freshReservedUsd > freshSpendableUsd + EPSILON) {
     const now = Date.now();
@@ -2418,6 +2540,7 @@ async function tryExecuteInner(pkg: WatchPackage, legs: LiveLegs): Promise<void>
   reservedSpendUsd += freshReservedUsd;
   alreadyOpen.add(pkg.key);
   inFlight.add(pkg.key);
+  if (isSportsCandidate(executionCandidate)) eventsInFlight.add(executionCandidate.eventSlug);
   for (const tokenId of executionTokens) tokensInFlight.add(tokenId);
   submitTimestamps.push(Date.now());
   try {
@@ -2438,6 +2561,7 @@ async function tryExecuteInner(pkg: WatchPackage, legs: LiveLegs): Promise<void>
   } finally {
     reservedSpendUsd = Math.max(0, reservedSpendUsd - freshReservedUsd);
     inFlight.delete(pkg.key);
+    if (isSportsCandidate(executionCandidate)) eventsInFlight.delete(executionCandidate.eventSlug);
     for (const tokenId of executionTokens) tokensInFlight.delete(tokenId);
     refreshAlreadyOpen();
   }

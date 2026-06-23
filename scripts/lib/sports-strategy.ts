@@ -42,15 +42,38 @@ function middleWidth(candidate: Candidate): number {
   return Math.abs(candidate.narrow.strike - candidate.broad.strike);
 }
 
+const SPORTS_MAX_ENTRY_LEG_PRICE = Number(process.env.ARB_DAEMON_SPORTS_MAX_ENTRY_LEG_PRICE ?? 0.98);
+const SOCCER_MIN_NARROW_YES_BID = Number(process.env.ARB_DAEMON_SOCCER_MIN_NARROW_YES_BID ?? 0.02);
+const SOCCER_MAX_NARROW_YES_BID = Number(process.env.ARB_DAEMON_SOCCER_MAX_NARROW_YES_BID ?? 0.10);
+const MLB_MIN_NARROW_YES_BID = Number(process.env.ARB_DAEMON_MLB_MIN_NARROW_YES_BID ?? 0.30);
+
+function maxEntryLeg(candidate: Candidate): number {
+  return Math.max(candidate.broad.yesBook.ask, candidate.narrow.noBook.ask);
+}
+
+function impliedNarrowYesBid(candidate: Candidate): number {
+  return Math.max(0, Math.min(1, 1 - candidate.narrow.noBook.ask));
+}
+
 function soccerLive(candidate: Candidate, marketType: MarketType): string[] {
   const failures: string[] = [];
   const cost = candidate.packageCost;
   const width = middleWidth(candidate);
+  const narrowYesBid = impliedNarrowYesBid(candidate);
   const allowedCost = within(cost, 1.05, 1.22) || (within(cost, 1.25, 1.35) && (marketType === "match_total" || marketType === "spread"));
   if (!allowedCost && cost >= 1) failures.push("soccer_cost_bucket_not_live");
   if (!(marketType === "match_total" || marketType === "spread")) failures.push("soccer_market_shape_not_live");
   if (marketType === "spread" && !(width >= 1 && width <= 3)) failures.push("soccer_spread_width_not_preferred");
   if (marketType === "match_total" && !(width >= 1 && width <= 5)) failures.push("soccer_total_width_not_preferred");
+  if (SPORTS_MAX_ENTRY_LEG_PRICE > 0 && maxEntryLeg(candidate) >= SPORTS_MAX_ENTRY_LEG_PRICE) {
+    failures.push("soccer_max_entry_leg_price_exceeded");
+  }
+  if (SOCCER_MIN_NARROW_YES_BID > 0 && narrowYesBid < SOCCER_MIN_NARROW_YES_BID) {
+    failures.push("soccer_narrow_yes_bid_too_low");
+  }
+  if (SOCCER_MAX_NARROW_YES_BID > 0 && narrowYesBid > SOCCER_MAX_NARROW_YES_BID) {
+    failures.push("soccer_narrow_yes_bid_too_high");
+  }
   return failures;
 }
 
@@ -59,11 +82,18 @@ function mlbLive(candidate: Candidate, marketType: MarketType): string[] {
   const cost = candidate.packageCost;
   const family = normalizeLineFamily(candidate);
   const width = middleWidth(candidate);
+  const narrowYesBid = impliedNarrowYesBid(candidate);
   const preferredTotals = new Set(["5.5-7.5", "5.5-8.5", "6.5-7.5", "6.5-8.5"]);
   if (!within(cost, 1.19, 1.22) && cost >= 1) failures.push("mlb_cost_bucket_not_live");
   if (!(marketType === "game_total" || marketType === "spread")) failures.push("mlb_market_shape_not_live");
   if (marketType === "game_total" && !preferredTotals.has(family)) failures.push("mlb_total_line_family_not_preferred");
   if (marketType === "spread" && width !== 1) failures.push("mlb_spread_width_not_preferred");
+  if (SPORTS_MAX_ENTRY_LEG_PRICE > 0 && maxEntryLeg(candidate) >= SPORTS_MAX_ENTRY_LEG_PRICE) {
+    failures.push("mlb_max_entry_leg_price_exceeded");
+  }
+  if (MLB_MIN_NARROW_YES_BID > 0 && narrowYesBid < MLB_MIN_NARROW_YES_BID) {
+    failures.push("mlb_narrow_yes_bid_too_low");
+  }
   return failures;
 }
 
