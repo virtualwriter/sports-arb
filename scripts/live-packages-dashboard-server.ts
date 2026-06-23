@@ -13,6 +13,66 @@ const remoteTs = `
 import { readFileSync } from 'node:fs';
 async function main() {
 const CLOB_HOST = process.env.POLYMARKET_CLOB_HOST ?? 'https://clob.polymarket.com';
+const HISTORICAL_MIDDLE_HIT_RATE: Record<string, Record<string, number>> = {
+  MLB: {
+    '<1.000': 2.7,
+    '1.000-1.005': 3.4,
+    '1.005-1.010': 0.0,
+    '1.010-1.015': 7.7,
+    '1.020-1.035': 10.3,
+    '1.035-1.050': 5.9,
+    '1.050-1.075': 5.7,
+    '1.075-1.100': 8.7,
+    '1.100-1.130': 10.4,
+    '1.130-1.160': 12.5,
+    '1.160-1.190': 14.6,
+    '1.190-1.220': 29.9,
+    '1.220-1.250': 18.3,
+    '1.250-1.350': 27.6,
+    '1.350-1.500': 41.1,
+  },
+  SOCCER: {
+    '<1.000': 4.5,
+    '1.000-1.005': 1.7,
+    '1.005-1.010': 0.0,
+    '1.010-1.015': 3.1,
+    '1.015-1.020': 4.9,
+    '1.020-1.035': 4.3,
+    '1.035-1.050': 14.1,
+    '1.050-1.075': 20.3,
+    '1.075-1.100': 9.0,
+    '1.100-1.130': 32.1,
+    '1.130-1.160': 32.2,
+    '1.160-1.190': 38.9,
+    '1.190-1.220': 30.6,
+    '1.220-1.250': 30.4,
+    '1.250-1.350': 45.5,
+    '1.350-1.500': 46.2,
+    '1.500-1.750': 66.9,
+    '1.750-2.000': 87.8,
+  },
+};
+function costBucket(cost:number) {
+  if (cost < 1) return '<1.000';
+  if (cost <= 1.005) return '1.000-1.005';
+  if (cost <= 1.010) return '1.005-1.010';
+  if (cost <= 1.015) return '1.010-1.015';
+  if (cost <= 1.020) return '1.015-1.020';
+  if (cost <= 1.035) return '1.020-1.035';
+  if (cost <= 1.050) return '1.035-1.050';
+  if (cost <= 1.075) return '1.050-1.075';
+  if (cost <= 1.100) return '1.075-1.100';
+  if (cost <= 1.130) return '1.100-1.130';
+  if (cost <= 1.160) return '1.130-1.160';
+  if (cost <= 1.190) return '1.160-1.190';
+  if (cost <= 1.220) return '1.190-1.220';
+  if (cost <= 1.250) return '1.220-1.250';
+  if (cost <= 1.350) return '1.250-1.350';
+  if (cost <= 1.500) return '1.350-1.500';
+  if (cost <= 1.750) return '1.500-1.750';
+  if (cost <= 2.000) return '1.750-2.000';
+  return '>2.000';
+}
 function bestLevel(levels:any[] | undefined, side:'bid'|'ask') {
   const rows = Array.isArray(levels) ? levels : [];
   const nums = rows.map((row:any) => ({ price: Number(row.price), size: Number(row.size) }))
@@ -47,6 +107,8 @@ for (const r of rows) {
   } catch {}
   const sh = +(r.filledShares ?? 0);
   const cost = +(r.actualCost ?? 0);
+  const packageCost = +(r.prices?.packageCost ?? 0);
+  const bucket = costBucket(packageCost);
   const proceeds = sh * bb + sh * nb;
   const pnl = proceeds - cost;
   pkgs.push({
@@ -55,7 +117,10 @@ for (const r of rows) {
     e: r.eventSlug,
     sh,
     cost: +cost.toFixed(4),
-    pc: +(r.prices?.packageCost ?? 0).toFixed(3),
+    pc: +packageCost.toFixed(3),
+    mp: +(r.jackpotPayout ?? (sh * 2)).toFixed(4),
+    hb: bucket,
+    hh: HISTORICAL_MIDDLE_HIT_RATE[r.asset]?.[bucket] ?? null,
     bs: r.broadStrike,
     ns: r.narrowStrike,
     end: r.settlementWindow?.endDate ?? '',

@@ -29,7 +29,7 @@
     main { padding: 20px 28px 32px; }
     .stats {
       display: grid;
-      grid-template-columns: repeat(6, minmax(140px, 1fr));
+      grid-template-columns: repeat(7, minmax(140px, 1fr));
       gap: 12px;
       margin-bottom: 18px;
     }
@@ -138,6 +138,8 @@
             <th data-sort="shares" class="num">Shares</th>
             <th data-sort="packageCost" class="num">Cost/Share</th>
             <th data-sort="cost" class="num">Actual Cost</th>
+            <th data-sort="middlePayout" class="num">Middle Payout</th>
+            <th data-sort="histHit" class="num">Hist Middle Hit</th>
             <th data-sort="broadBid" class="num">Broad Bid</th>
             <th data-sort="narrowBid" class="num">Narrow Bid</th>
             <th data-sort="mark" class="num">Mark Proceeds</th>
@@ -174,6 +176,9 @@
         event: p.e,
         shares: p.sh,
         packageCost: p.pc,
+        middlePayout: p.mp,
+        histBucket: p.hb,
+        histHit: p.hh,
         broadBid: p.bb,
         narrowBid: p.nb,
         mark: p.pro,
@@ -185,9 +190,12 @@
       const cost = list.reduce((s, p) => s + p.cost, 0);
       const mark = list.reduce((s, p) => s + p.mark, 0);
       const pnl = list.reduce((s, p) => s + p.pnl, 0);
+      const middle = list.reduce((s, p) => s + (p.middlePayout || 0), 0);
+      const weightedHitNumerator = list.reduce((s, p) => s + ((p.histHit ?? 0) * (p.cost || 0)), 0);
       const avgRoi = cost ? (pnl / cost) * 100 : 0;
+      const weightedHit = cost ? weightedHitNumerator / cost : 0;
       const positive = list.filter((p) => p.pnl > 0).length;
-      return { cost, mark, pnl, avgRoi, positive };
+      return { cost, mark, pnl, avgRoi, positive, middle, weightedHit };
     }
 
     function renderStats(list) {
@@ -198,6 +206,8 @@
         ["Marked Exit Value", fmtUsd(s.mark), ""],
         ["Marked P&L", fmtUsd(s.pnl), s.pnl >= 0 ? "good" : "bad"],
         ["Marked ROI", fmtPct(s.avgRoi), s.avgRoi >= 0 ? "good" : "bad"],
+        ["Middle Payout", fmtUsd(s.middle), "good"],
+        ["Weighted Hist Hit", fmtPct(s.weightedHit), "warn"],
         ["Positive Marks", `${s.positive}/${list.length}`, s.positive ? "good" : ""],
       ];
       document.getElementById("stats").innerHTML = cards.map(([label, value, cls]) => `
@@ -234,6 +244,8 @@
           <td class="num">${fmtNum(p.shares, 2)}</td>
           <td class="num">${fmtNum(p.packageCost, 3)}</td>
           <td class="num">${fmtUsd(p.cost)}</td>
+          <td class="num good">${fmtUsd(p.middlePayout || 0)}</td>
+          <td class="num warn" title="${p.histBucket || ""}">${p.histHit == null ? "" : fmtPct(p.histHit)}</td>
           <td class="num">${fmtNum(p.broadBid, 3)}</td>
           <td class="num">${fmtNum(p.narrowBid, 3)}</td>
           <td class="num">${fmtUsd(p.mark)}</td>
