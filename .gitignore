@@ -1,0 +1,16 @@
+node_modules/
+dist/
+coverage/
+.vite/
+.turbo/
+
+.env
+config.env
+*.local
+
+.runtime/
+data/
+exports/
+
+*.log
+.DS_Store
