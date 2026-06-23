@@ -296,6 +296,14 @@ const ORPHAN_COMPLETION_SKIP_LOG_MS = Number(process.env.ARB_DAEMON_ORPHAN_COMPL
 // CTF balances can lag matched CLOB responses. A fresh orphan must not be
 // marked closed just because the first reconcile sees zero before settlement.
 const ORPHAN_BALANCE_SETTLE_GRACE_MS = Number(process.env.ARB_DAEMON_ORPHAN_BALANCE_SETTLE_GRACE_MS ?? 30_000);
+// Sports orphan repair is allowed to be more permissive than new-entry gating:
+// if the only alternative is naked directional exposure, buy the complement
+// immediately when the repaired package cost lands in a historically positive
+// sport/cost bucket. Source: monotonic strategy significance canvas.
+const SPORTS_ORPHAN_REPAIR_ENABLED = process.env.ARB_DAEMON_SPORTS_ORPHAN_REPAIR_ENABLED !== "0";
+const SPORTS_ORPHAN_REPAIR_MAX_COST = Number(process.env.ARB_DAEMON_SPORTS_ORPHAN_REPAIR_MAX_COST ?? 1.35);
+const SPORTS_ORPHAN_REPAIR_MIN_RESOLVED = Number(process.env.ARB_DAEMON_SPORTS_ORPHAN_REPAIR_MIN_RESOLVED ?? 30);
+const SPORTS_ORPHAN_REPAIR_MIN_ROI_PCT = Number(process.env.ARB_DAEMON_SPORTS_ORPHAN_REPAIR_MIN_ROI_PCT ?? 0);
 const ORPHANS_PATH = join(dirname(PACKAGES_PATH), "polymarket-live-orphans.json");
 const CANDIDATE_SNAPSHOTS_PATH = join(dirname(PACKAGES_PATH), "monotonic-candidate-snapshots.jsonl");
 const MIDDLE_AUDIT_PATH = join(dirname(PACKAGES_PATH), "monotonic-middle-audit.jsonl");
@@ -2607,26 +2615,28 @@ async function executeLive(pkg: WatchPackage, c: Candidate, shares: number): Pro
         orphanId: orphan.id,
         legErrors,
       });
-      if (sportsCandidate) {
-        pauseEventEntries(c.eventSlug, `sports_large_naked_leg_detected: ${nakedRole}=${nakedShares}; live sports execution is unsafe without atomic fills (scoped to this event; other events keep trading)`, {
-          packageId: record.packageId,
-          eventSlug: c.eventSlug,
-          asset: c.asset,
-          role: nakedRole,
-          nakedShares,
-          matched,
-          intendedShares: shares,
-          orphanId: orphan.id,
-          legErrors,
-        });
-      }
     }
     if (sportsCandidate) {
       orphanInFlight.add(orphan.id);
       try {
-        await doSportsImmediateUnwind(orphan, `sports_imbalance matched=${matched} intended=${shares}`);
+        const { pick, reason } = immediateSportsRepairPick(orphan, c);
+        const repaired = pick ? await doFastSportsRepairCompletion(orphan, pick, reason) : false;
+        if (!repaired || (orphan.status !== "completed" && orphan.shares >= SPORTS_ORPHAN_DUST_SHARES)) {
+          await doSportsImmediateUnwind(orphan, `sports_imbalance matched=${matched} intended=${shares} repair=${reason}`);
+        }
       } finally {
         orphanInFlight.delete(orphan.id);
+      }
+      if (orphan.status === "stranded" && orphan.shares > SPORTS_ORPHAN_DUST_SHARES) {
+        pauseEventEntries(c.eventSlug, `sports residual could not be repaired or cut immediately: ${nakedRole}=${orphan.shares} (scoped to this event; other events keep trading)`, {
+          packageId: record.packageId,
+          eventSlug: c.eventSlug,
+          asset: c.asset,
+          role: nakedRole,
+          residualShares: orphan.shares,
+          orphanId: orphan.id,
+          legErrors,
+        });
       }
     }
   }
@@ -2806,7 +2816,11 @@ async function executeSportsCheapFirst(pkg: WatchPackage, c: Candidate, shares: 
     });
     orphanInFlight.add(orphan.id);
     try {
-      await doSportsImmediateUnwind(orphan, `sports_cheap_first_residual matched=${matched} intended=${shares}`);
+      const { pick, reason } = immediateSportsRepairPick(orphan, c);
+      const repaired = pick ? await doFastSportsRepairCompletion(orphan, pick, reason) : false;
+      if (!repaired || (orphan.status !== "completed" && orphan.shares >= SPORTS_ORPHAN_DUST_SHARES)) {
+        await doSportsImmediateUnwind(orphan, `sports_cheap_first_residual matched=${matched} intended=${shares} repair=${reason}`);
+      }
     } finally {
       orphanInFlight.delete(orphan.id);
     }
@@ -3127,6 +3141,85 @@ interface CompletionPick {
   complementAsk: number;
   completionShares: number;
   completionEdge: number;
+  repairedPackageCost?: number;
+  repairEvidence?: SportRepairBucketEvidence;
+}
+
+interface SportRepairBucketEvidence {
+  sport: string;
+  bucket: string;
+  min: number;
+  max: number;
+  resolved: number;
+  roiPct: number;
+}
+
+const SPORTS_REPAIR_BUCKET_EVIDENCE: SportRepairBucketEvidence[] = [
+  { sport: "MLB", bucket: "<1.000", min: Number.NEGATIVE_INFINITY, max: 1.000, resolved: 37, roiPct: 5.1 },
+  { sport: "MLB", bucket: "1.000-1.005", min: 1.000, max: 1.005, resolved: 29, roiPct: 3.4 },
+  { sport: "MLB", bucket: "1.005-1.010", min: 1.005, max: 1.010, resolved: 1, roiPct: -0.8 },
+  { sport: "MLB", bucket: "1.010-1.015", min: 1.010, max: 1.015, resolved: 13, roiPct: 6.6 },
+  { sport: "MLB", bucket: "1.020-1.035", min: 1.020, max: 1.035, resolved: 29, roiPct: 7.5 },
+  { sport: "MLB", bucket: "1.035-1.050", min: 1.035, max: 1.050, resolved: 34, roiPct: 1.5 },
+  { sport: "MLB", bucket: "1.050-1.075", min: 1.050, max: 1.075, resolved: 246, roiPct: -0.6 },
+  { sport: "MLB", bucket: "1.075-1.100", min: 1.075, max: 1.100, resolved: 323, roiPct: 0.1 },
+  { sport: "MLB", bucket: "1.100-1.130", min: 1.100, max: 1.130, resolved: 201, roiPct: -0.4 },
+  { sport: "MLB", bucket: "1.130-1.160", min: 1.130, max: 1.160, resolved: 184, roiPct: -1.5 },
+  { sport: "MLB", bucket: "1.160-1.190", min: 1.160, max: 1.190, resolved: 302, roiPct: -2.0 },
+  { sport: "MLB", bucket: "1.190-1.220", min: 1.190, max: 1.220, resolved: 137, roiPct: 8.5 },
+  { sport: "MLB", bucket: "1.220-1.250", min: 1.220, max: 1.250, resolved: 93, roiPct: -3.9 },
+  { sport: "MLB", bucket: "1.250-1.350", min: 1.250, max: 1.350, resolved: 369, roiPct: -0.7 },
+  { sport: "MLB", bucket: "1.350-1.500", min: 1.350, max: 1.500, resolved: 282, roiPct: 0.2 },
+  { sport: "SOCCER", bucket: "<1.000", min: Number.NEGATIVE_INFINITY, max: 1.000, resolved: 22, roiPct: 5.8 },
+  { sport: "SOCCER", bucket: "1.000-1.005", min: 1.000, max: 1.005, resolved: 118, roiPct: 1.5 },
+  { sport: "SOCCER", bucket: "1.005-1.010", min: 1.005, max: 1.010, resolved: 137, roiPct: -0.7 },
+  { sport: "SOCCER", bucket: "1.010-1.015", min: 1.010, max: 1.015, resolved: 32, roiPct: 1.9 },
+  { sport: "SOCCER", bucket: "1.015-1.020", min: 1.015, max: 1.020, resolved: 41, roiPct: 3.1 },
+  { sport: "SOCCER", bucket: "1.020-1.035", min: 1.020, max: 1.035, resolved: 69, roiPct: 1.6 },
+  { sport: "SOCCER", bucket: "1.035-1.050", min: 1.035, max: 1.050, resolved: 64, roiPct: 9.4 },
+  { sport: "SOCCER", bucket: "1.050-1.075", min: 1.050, max: 1.075, resolved: 69, roiPct: 13.1 },
+  { sport: "SOCCER", bucket: "1.075-1.100", min: 1.075, max: 1.100, resolved: 67, roiPct: 0.2 },
+  { sport: "SOCCER", bucket: "1.100-1.130", min: 1.100, max: 1.130, resolved: 53, roiPct: 18.6 },
+  { sport: "SOCCER", bucket: "1.130-1.160", min: 1.130, max: 1.160, resolved: 59, roiPct: 15.7 },
+  { sport: "SOCCER", bucket: "1.160-1.190", min: 1.160, max: 1.190, resolved: 54, roiPct: 18.1 },
+  { sport: "SOCCER", bucket: "1.190-1.220", min: 1.190, max: 1.220, resolved: 49, roiPct: 8.6 },
+  { sport: "SOCCER", bucket: "1.220-1.250", min: 1.220, max: 1.250, resolved: 46, roiPct: 5.9 },
+  { sport: "SOCCER", bucket: "1.250-1.350", min: 1.250, max: 1.350, resolved: 154, roiPct: 12.2 },
+  { sport: "SOCCER", bucket: "1.350-1.500", min: 1.350, max: 1.500, resolved: 158, roiPct: 4.1 },
+  { sport: "SOCCER", bucket: "1.500-1.750", min: 1.500, max: 1.750, resolved: 166, roiPct: 3.9 },
+];
+
+function repairBucketEvidence(asset: string, repairedPackageCost: number): SportRepairBucketEvidence | null {
+  return SPORTS_REPAIR_BUCKET_EVIDENCE.find((row) =>
+    row.sport === asset
+    && (row.bucket === "<1.000" ? repairedPackageCost < 1 : repairedPackageCost >= row.min - EPSILON)
+    && repairedPackageCost <= row.max + EPSILON
+  ) ?? null;
+}
+
+function repairShapeBlockers(candidate: Candidate): string[] {
+  return evaluateSportsStrategy(candidate).gateFailures.filter((failure) =>
+    failure.includes("shape")
+    || failure.includes("family")
+    || failure.includes("width")
+    || failure === "unsupported_sport"
+    || failure.startsWith("adapter_")
+  );
+}
+
+function repairEvidenceAllowed(asset: string, repairedPackageCost: number): { evidence: SportRepairBucketEvidence | null; reason: string | null } {
+  const evidence = repairBucketEvidence(asset, repairedPackageCost);
+  if (!evidence) return { evidence: null, reason: `no_repair_bucket cost=${repairedPackageCost.toFixed(4)}` };
+  if (repairedPackageCost > SPORTS_ORPHAN_REPAIR_MAX_COST + EPSILON) {
+    return { evidence, reason: `repair_cost_above_cap cost=${repairedPackageCost.toFixed(4)} cap=${SPORTS_ORPHAN_REPAIR_MAX_COST.toFixed(4)}` };
+  }
+  if (evidence.resolved < SPORTS_ORPHAN_REPAIR_MIN_RESOLVED) {
+    return { evidence, reason: `repair_bucket_sample_too_small bucket=${evidence.bucket} resolved=${evidence.resolved}` };
+  }
+  if (evidence.roiPct <= SPORTS_ORPHAN_REPAIR_MIN_ROI_PCT) {
+    return { evidence, reason: `repair_bucket_roi_not_positive bucket=${evidence.bucket} roi=${evidence.roiPct.toFixed(1)}%` };
+  }
+  return { evidence, reason: null };
 }
 
 function hasAtMostDecimals(value: number, decimals: number): boolean {
@@ -3193,6 +3286,118 @@ function findCompletion(o: Orphan, quotes: MarketQuote[]): { pick: CompletionPic
     }
   }
   return { pick: best, structuralCount };
+}
+
+function immediateSportsRepairPick(o: Orphan, candidate: Candidate): { pick: CompletionPick | null; reason: string } {
+  if (!SPORTS_ORPHAN_REPAIR_ENABLED) return { pick: null, reason: "sports_orphan_repair_disabled" };
+  const shapeBlockers = repairShapeBlockers(candidate);
+  if (shapeBlockers.length > 0) return { pick: null, reason: `repair_shape_blocked:${shapeBlockers.join("+")}` };
+  const complementBook = o.role === "broad_yes" ? candidate.narrow.noBook : candidate.broad.yesBook;
+  const complementToken = o.role === "broad_yes" ? candidate.narrow.noTokenId : candidate.broad.yesTokenId;
+  const complementAsk = complementBook.ask;
+  if (!(complementAsk > 0)) return { pick: null, reason: "repair_no_complement_ask" };
+  const repairedPackageCost = o.fillPrice + complementAsk;
+  const { evidence, reason } = repairEvidenceAllowed(o.asset, repairedPackageCost);
+  if (reason) return { pick: null, reason };
+  const completionShares = precisionSafeCompletionShares(
+    complementAsk,
+    complementBook.minOrderSize,
+    Math.min(o.shares, complementBook.askSize),
+  );
+  if (!completionShares) {
+    return {
+      pick: null,
+      reason: `repair_size_unavailable ask=${complementAsk.toFixed(4)} askSize=${complementBook.askSize.toFixed(4)} shares=${o.shares.toFixed(4)}`,
+    };
+  }
+  return {
+    pick: {
+      candidate,
+      complementToken,
+      complementAsk,
+      completionShares,
+      completionEdge: 1 - repairedPackageCost,
+      repairedPackageCost,
+      repairEvidence: evidence ?? undefined,
+    },
+    reason: "repair_allowed",
+  };
+}
+
+async function doFastSportsRepairCompletion(o: Orphan, pick: CompletionPick, reason: string): Promise<boolean> {
+  if (!clob || DRY_RUN) return false;
+  const client = clob.client;
+  const buyShares = pick.completionShares;
+  o.attempts += 1;
+  log(`orphan ${o.id} FAST_REPAIR (${reason}): buy complement ${pick.complementToken.slice(0, 10)}… ask=${pick.complementAsk.toFixed(4)} repairedCost=${(pick.repairedPackageCost ?? (o.fillPrice + pick.complementAsk)).toFixed(4)} bucket=${pick.repairEvidence?.bucket ?? "unknown"} roi=${pick.repairEvidence?.roiPct ?? "unknown"}% shares=${buyShares}`);
+  let resp: unknown;
+  try {
+    resp = await postFakBuy(client, pick.complementToken, pick.complementAsk, buyShares);
+    assertOrderResponse(resp, "sports_fast_repair");
+  } catch (err: any) {
+    resp = { error: err?.message ?? String(err) };
+    log(`orphan ${o.id} fast repair order error: ${err?.message ?? String(err)}`);
+  }
+  const filled = roundShares(responseBuyShares(resp));
+  const matched = roundShares(Math.min(o.shares, filled));
+  const order: LiveOrder = {
+    packageId: pick.candidate.packageId,
+    createdAt: new Date().toISOString(),
+    role: "completion",
+    tokenId: pick.complementToken,
+    side: "BUY",
+    price: pick.complementAsk,
+    size: filled,
+    orderType: "FAK_FAST_REPAIR",
+    response: {
+      response: resp,
+      repairedPackageCost: pick.repairedPackageCost,
+      repairEvidence: pick.repairEvidence,
+      manualReason: "sports orphan repaired by positive historical ROI bucket",
+    },
+  };
+
+  if (matched >= SPORTS_ORPHAN_DUST_SHARES) {
+    const existing = readJsonArray<LivePackage>(PACKAGES_PATH).find((row) => row.packageId === pick.candidate.packageId && row.status === "unwind_required");
+    const record = packageRecord(pick.candidate, reconcileAddress, matched, false);
+    if (existing) record.id = existing.id;
+    record.status = "package_complete";
+    record.createdAt = existing?.createdAt ?? record.createdAt;
+    record.filledShares = matched;
+    record.actualCost = matched * o.fillPrice + filled * pick.complementAsk;
+    record.guaranteedFloor = matched;
+    record.lockedFloorProfit = matched * pick.completionEdge;
+    record.jackpotPayout = matched * pick.candidate.jackpotPayoutPerShare;
+    record.prices.packageCost = pick.repairedPackageCost ?? (o.fillPrice + pick.complementAsk);
+    if (o.role === "broad_yes") {
+      record.prices.broadYesAsk = o.fillPrice;
+      record.prices.narrowNoAsk = pick.complementAsk;
+      if (record.packageLegs[0]) record.packageLegs[0].entryPrice = o.fillPrice;
+      if (record.packageLegs[1]) record.packageLegs[1].entryPrice = pick.complementAsk;
+    } else {
+      record.prices.broadYesAsk = pick.complementAsk;
+      record.prices.narrowNoAsk = o.fillPrice;
+      if (record.packageLegs[0]) record.packageLegs[0].entryPrice = pick.complementAsk;
+      if (record.packageLegs[1]) record.packageLegs[1].entryPrice = o.fillPrice;
+    }
+    record.failureReason = `sports_fast_repair_from_orphan ${o.id} bucket=${pick.repairEvidence?.bucket ?? "unknown"} roi=${pick.repairEvidence?.roiPct ?? "unknown"}%`;
+    record.updatedAt = new Date().toISOString();
+    persist(record, [order]);
+    o.shares = roundShares(o.shares - matched);
+    o.note = `fast_repaired matched=${matched} ask=${pick.complementAsk.toFixed(4)} repairedCost=${record.prices.packageCost.toFixed(4)} residual=${o.shares}`;
+    if (o.shares + EPSILON < SPORTS_ORPHAN_DUST_SHARES) o.status = "completed";
+    o.updatedAt = new Date().toISOString();
+    saveOrphans();
+    log(`orphan ${o.id} FAST_REPAIR result matched=${matched} filled=${filled} residual=${o.shares} status=${o.status}`);
+    return true;
+  }
+
+  appendJsonArray(ORDERS_PATH, [order]);
+  o.note = `fast_repair filled=0 ask=${pick.complementAsk.toFixed(4)}; falling back to immediate unwind`;
+  o.updatedAt = new Date().toISOString();
+  saveOrphans();
+  log(`orphan ${o.id} FAST_REPAIR filled=0; falling back to immediate unwind`);
+  return false;
 }
 
 async function processOrphan(o: Orphan) {
