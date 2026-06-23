@@ -2120,7 +2120,8 @@ function loadQuarantine() {
     const entries = JSON.parse(readFileSync(QUARANTINE_PATH, "utf8")) as QuarantineEntry[];
     for (const entry of Array.isArray(entries) ? entries : []) {
       if (entry.packageId) quarantinedPackages.add(entry.packageId);
-      for (const tokenId of entry.tokenIds ?? []) quarantinedTokens.add(tokenId);
+      const tokenIds = Array.isArray(entry.tokenIds) ? entry.tokenIds : [];
+      for (const tokenId of tokenIds) quarantinedTokens.add(tokenId);
     }
     log(`quarantine loaded: packages=${quarantinedPackages.size} tokens=${quarantinedTokens.size}`);
   } catch (err: any) {
