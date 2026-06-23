@@ -25,6 +25,7 @@ import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 import { OrderType, Side, type TickSize } from "@polymarket/clob-client-v2";
 import { VpnGuard } from "./lib/VpnGuard.js";
+import { evaluateSportsStrategy } from "./lib/sports-strategy.js";
 import {
   type Candidate,
   type Direction,
@@ -110,6 +111,7 @@ const GIT_PUSH = process.env.ARB_DAEMON_GIT_PUSH === "1";
 const HTTP_KEEP_ALIVE = process.env.ARB_DAEMON_HTTP_KEEP_ALIVE !== "0";
 const MONOTONIC_POST_MODE = (process.env.ARB_DAEMON_POST_MODE ?? "batch").toLowerCase();
 const RESPONSE_FILL_FIRST = process.env.ARB_DAEMON_RESPONSE_FILL_FIRST !== "0";
+const ENFORCE_SPORTS_STRATEGY_LIVE = process.env.ARB_DAEMON_ENFORCE_SPORTS_STRATEGY_LIVE !== "0";
 // Sports markets can partially fill paired FAK orders asymmetrically even when
 // posted in one CLOB batch. Keep sports in discovery/telemetry, but do not trade
 // them live unless the operator explicitly accepts non-atomic execution risk.
@@ -1406,6 +1408,31 @@ function passesDynamicGate(candidate: Candidate): boolean {
   return true;
 }
 
+type SportsStrategyGate = ReturnType<typeof evaluateSportsStrategy>;
+
+function strategySummary(decision: SportsStrategyGate) {
+  return {
+    sportId: decision.adapter?.sportId ?? "UNKNOWN",
+    marketType: decision.marketType,
+    lineFamily: decision.lineFamily,
+    middleWidth: decision.middleWidth,
+    costBucket: decision.costBucket,
+    comparisonGroup: decision.comparisonGroup,
+    liveEligible: decision.liveEligible,
+    shadowEligible: decision.shadowEligible,
+    shadowPurpose: decision.shadowPurpose,
+    gateFailures: decision.gateFailures,
+  };
+}
+
+function sportsStrategyGate(candidate: Candidate): { decision: SportsStrategyGate; reason: string | null } {
+  const decision = evaluateSportsStrategy(candidate);
+  if (!ENFORCE_SPORTS_STRATEGY_LIVE || !isSportsCandidate(candidate) || decision.liveEligible) {
+    return { decision, reason: null };
+  }
+  return { decision, reason: `strict_strategy_gate_failed:${decision.gateFailures.join("+") || "not_live_eligible"}` };
+}
+
 function recordNearMiss(candidate: Candidate) {
   nearMissObservations += 1;
   const minShares = requiredDisplayedTouch(candidate);
@@ -1487,6 +1514,7 @@ function captureCandidateFields(candidate: Candidate) {
   const minShares = requiredDisplayedTouch(candidate);
   const farDatedBlock = farDatedExecutionBlock(candidate);
   const rangeBlock = juneBreakevenRangeBlock(candidate);
+  const strategy = evaluateSportsStrategy(candidate);
   const blockers = [
     candidate.lockedEdge + EPSILON >= minEdgeFor(candidate) ? "" : "edge",
     candidate.maxSpread - EPSILON <= maxSpreadFor(candidate) ? "" : "spread",
@@ -1515,6 +1543,7 @@ function captureCandidateFields(candidate: Candidate) {
     executableGate: blockers.length === 0,
     farDatedBlock,
     rangeBlock,
+    strategy: strategySummary(strategy),
     broad: {
       marketId: candidate.broad.marketId,
       question: candidate.broad.question,
@@ -1591,7 +1620,13 @@ function emitCapture(
   }]);
 }
 
-async function emitShadowCapture(pkg: WatchPackage, candidate: Candidate) {
+type ShadowCaptureOptions = {
+  reason?: string;
+  strategyDecision?: SportsStrategyGate;
+  abTestArm?: "coarse_shadow" | "legacy_shadow";
+};
+
+async function emitShadowCapture(pkg: WatchPackage, candidate: Candidate, options: ShadowCaptureOptions = {}) {
   const executionTokens = [pkg.broadYesToken, pkg.narrowNoToken].filter(Boolean);
   const ctx = beginCapture(candidate, executionTokens);
   if (!ctx) return;
@@ -1609,9 +1644,13 @@ async function emitShadowCapture(pkg: WatchPackage, candidate: Candidate) {
       ?? farDatedExecutionBlock(candidate)
       ?? juneBreakevenRangeBlock(candidate);
     if (hardInitialBlock) {
+      const strategy = strategySummary(options.strategyDecision ?? evaluateSportsStrategy(candidate));
       emitCapture(ctx, "shadow_gate_blocked", hardInitialBlock, {
         shadow: true,
         wouldTrade: false,
+        abTestArm: options.abTestArm ?? "legacy_shadow",
+        shadowReason: options.reason,
+        strategy,
         liveGateBlockers: initialFields.blockers,
         note: "shadow-only capture: hard execution block; no order was submitted",
       });
@@ -1629,9 +1668,13 @@ async function emitShadowCapture(pkg: WatchPackage, candidate: Candidate) {
           fetchMs,
           error: err?.message ?? String(err),
         };
+        const strategy = strategySummary(options.strategyDecision ?? evaluateSportsStrategy(c));
         emitCapture(ctx, "shadow_preflight_failed", err?.message ?? String(err), {
           shadow: true,
           wouldTrade: false,
+          abTestArm: options.abTestArm ?? "legacy_shadow",
+          shadowReason: options.reason,
+          strategy,
           note: "shadow-only capture: fresh sports book failed; no order was submitted",
         });
         return;
@@ -1651,11 +1694,15 @@ async function emitShadowCapture(pkg: WatchPackage, candidate: Candidate) {
     }
 
     const freshFields = captureCandidateFields(c);
+    const strategyDecision = options.strategyDecision ?? evaluateSportsStrategy(c);
+    const strategy = strategySummary(strategyDecision);
     const hardFreshBlock = farDatedExecutionBlock(c) ?? juneBreakevenRangeBlock(c);
     if (hardFreshBlock) {
       emitCapture(ctx, "shadow_gate_blocked", hardFreshBlock, {
         shadow: true,
         wouldTrade: false,
+        abTestArm: options.abTestArm ?? "legacy_shadow",
+        strategy,
         liveGateBlockers: freshFields.blockers,
         note: "shadow-only capture: hard execution block after fresh book; no order was submitted",
       });
@@ -1686,15 +1733,21 @@ async function emitShadowCapture(pkg: WatchPackage, candidate: Candidate) {
       emitCapture(ctx, "shadow_sizing_rejected", sized.reason || balanceHeadroomReason, {
         shadow: true,
         wouldTrade: false,
+        abTestArm: options.abTestArm ?? "legacy_shadow",
+        shadowReason: options.reason,
+        strategy,
         liveGateBlockers: freshFields.blockers,
         note: "shadow-only capture: candidate was not sizable under current caps/balance; no order was submitted",
       });
       return;
     }
 
-    emitCapture(ctx, "shadow_would_submit", "shadow candidate passed fresh preflight and sizing", {
+    emitCapture(ctx, "shadow_would_submit", options.reason ?? "shadow candidate passed fresh preflight and sizing", {
       shadow: true,
       wouldTrade: false,
+      abTestArm: options.abTestArm ?? "legacy_shadow",
+      shadowReason: options.reason,
+      strategy,
       liveGateBlockers: freshFields.blockers,
       executableIfGateRelaxed: freshFields.blockers.every((blocker) => blocker === "edge"),
       note: "shadow-only capture: no order was submitted",
@@ -2200,6 +2253,48 @@ async function tryExecuteInner(pkg: WatchPackage, legs: LiveLegs): Promise<void>
       emitCapture(capture, "sports_preflight_rejected", "fresh sports candidate failed dynamic gate");
       return;
     }
+    const strategyGate = sportsStrategyGate(c);
+    if (strategyGate.reason) {
+      sportsPreflightRejected += 1;
+      const executionCandidate = executionSizingCandidate(c);
+      const spendableUsd = spendableUsdAfterReservations();
+      const shadowSized = sizeForCandidate(
+        executionCandidate,
+        packageRows,
+        sizingSpendableUsd(spendableUsd) * budgetFactorForCandidate(executionCandidate),
+      );
+      if (capture) {
+        capture.sizing = {
+          stage: "shadow",
+          shares: shadowSized.shares,
+          cost: shadowSized.cost,
+          reason: shadowSized.reason,
+          spendableUsd,
+        };
+      }
+      const now = Date.now();
+      const last = lastSkipLogAt.get(`${pkg.key}:strategy`) ?? 0;
+      if (now - last >= SKIP_LOG_THROTTLE_MS) {
+        lastSkipLogAt.set(`${pkg.key}:strategy`, now);
+        log(`shadow ${pkg.key}: fresh_${strategyGate.reason} fetchMs=${fetchMs} cost=${c.packageCost.toFixed(4)} strategy=${strategyGate.decision.comparisonGroup}`);
+      }
+      if (capture?.preflight) capture.preflight = { ...capture.preflight, status: "rejected_strategy" };
+      emitCapture(
+        capture,
+        shadowSized.reason ? "shadow_sizing_rejected" : "shadow_would_submit",
+        shadowSized.reason ?? strategyGate.reason,
+        {
+          shadow: true,
+          wouldTrade: false,
+          abTestArm: "coarse_shadow",
+          shadowReason: strategyGate.reason,
+          strategy: strategySummary(strategyGate.decision),
+          liveGateBlockers: [`strategy:${strategyGate.decision.gateFailures.join("+") || "not_live_eligible"}`],
+          note: "coarse-range A/B shadow: candidate passed coarse daemon gate but failed strict sports strategy; no order was submitted",
+        },
+      );
+      return;
+    }
     sportsPreflightPassed += 1;
     if (capture?.preflight) capture.preflight = { ...capture.preflight, status: "passed" };
     log(`sports_preflight_pass ${pkg.key}: fetchMs=${fetchMs} wsCost=${wsCandidate.packageCost.toFixed(4)} wsSpread=${wsCandidate.maxSpread.toFixed(4)} freshCost=${c.packageCost.toFixed(4)} freshSpread=${c.maxSpread.toFixed(4)} edge=${(c.lockedEdge * 100).toFixed(2)}c size=${c.availableSize.toFixed(2)}`);
@@ -2310,10 +2405,18 @@ async function tryExecuteInner(pkg: WatchPackage, legs: LiveLegs): Promise<void>
   try {
     const result = await executeLive(pkg, executionCandidate, freshSized.shares);
     if (capture) capture.execution = result;
-    emitCapture(capture, "submitted_result", result.recordStatus, { freshReservedUsd });
+    emitCapture(capture, "submitted_result", result.recordStatus, {
+      freshReservedUsd,
+      abTestArm: isSportsCandidate(c) ? "strict_live" : "live",
+      strategy: strategySummary(evaluateSportsStrategy(c)),
+    });
   } catch (err: any) {
     log(`execute ${pkg.key} failed: ${err?.message ?? String(err)}`);
-    emitCapture(capture, "execution_error", err?.message ?? String(err), { freshReservedUsd });
+    emitCapture(capture, "execution_error", err?.message ?? String(err), {
+      freshReservedUsd,
+      abTestArm: isSportsCandidate(c) ? "strict_live" : "live",
+      strategy: strategySummary(evaluateSportsStrategy(c)),
+    });
   } finally {
     reservedSpendUsd = Math.max(0, reservedSpendUsd - freshReservedUsd);
     inFlight.delete(pkg.key);
@@ -3553,8 +3656,23 @@ function evaluateToken(tokenId: string) {
       void emitShadowCapture(pkg, candidate);
       continue;
     }
+    const strategyGate = sportsStrategyGate(candidate);
+    if (strategyGate.reason) {
+      const now = Date.now();
+      const last = lastSkipLogAt.get(`${pkg.key}:strategy`) ?? 0;
+      if (now - last >= SKIP_LOG_THROTTLE_MS) {
+        lastSkipLogAt.set(`${pkg.key}:strategy`, now);
+        log(`shadow ${pkg.key}: ${strategyGate.reason} cost=${candidate.packageCost.toFixed(4)} strategy=${strategyGate.decision.comparisonGroup}`);
+      }
+      void emitShadowCapture(pkg, candidate, {
+        reason: strategyGate.reason,
+        strategyDecision: strategyGate.decision,
+        abTestArm: "coarse_shadow",
+      });
+      continue;
+    }
     if (isSportsCandidate(candidate)) {
-      log(`sports_ws_gate_pass ${pkg.key}: wsCost=${candidate.packageCost.toFixed(4)} wsSpread=${candidate.maxSpread.toFixed(4)} edge=${(candidate.lockedEdge * 100).toFixed(2)}c size=${candidate.availableSize.toFixed(2)}`);
+      log(`sports_ws_gate_pass ${pkg.key}: wsCost=${candidate.packageCost.toFixed(4)} wsSpread=${candidate.maxSpread.toFixed(4)} edge=${(candidate.lockedEdge * 100).toFixed(2)}c size=${candidate.availableSize.toFixed(2)} strategy=${strategyGate.decision.comparisonGroup}`);
     }
     void tryExecute(pkg, legs);
   }
