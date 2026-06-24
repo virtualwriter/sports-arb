@@ -55,16 +55,41 @@ function impliedNarrowYesBid(candidate: Candidate): number {
   return Math.max(0, Math.min(1, 1 - candidate.narrow.noBook.ask));
 }
 
+const SOCCER_MATCH_TOTAL_LINE_FAMILIES = new Set(["2.5-4.5", "2.5-5.5", "3.5-5.5", "3.5-6.5"]);
+const SOCCER_SPREAD_BROAD_MIN = 1.5;
+const SOCCER_SPREAD_BROAD_MAX = 3.5;
+
+function isFullGameMatchTotal(candidate: Candidate): boolean {
+  return candidate.broad.ladderKey.includes(":total:full-game")
+    && candidate.narrow.ladderKey.includes(":total:full-game");
+}
+
+function isFullGameSpread(candidate: Candidate): boolean {
+  return candidate.broad.ladderKey.includes(":spread:full-game")
+    && candidate.narrow.ladderKey.includes(":spread:full-game");
+}
+
 function soccerLive(candidate: Candidate, marketType: MarketType): string[] {
   const failures: string[] = [];
   const cost = candidate.packageCost;
+  const family = normalizeLineFamily(candidate);
   const width = middleWidth(candidate);
   const narrowYesBid = impliedNarrowYesBid(candidate);
   const allowedCost = within(cost, 1.05, 1.22) || (within(cost, 1.25, 1.35) && (marketType === "match_total" || marketType === "spread"));
   if (!allowedCost && cost >= 1) failures.push("soccer_cost_bucket_not_live");
   if (!(marketType === "match_total" || marketType === "spread")) failures.push("soccer_market_shape_not_live");
-  if (marketType === "spread" && !(width >= 1 && width <= 3)) failures.push("soccer_spread_width_not_preferred");
-  if (marketType === "match_total" && !(width >= 1 && width <= 5)) failures.push("soccer_total_width_not_preferred");
+  if (marketType === "match_total") {
+    if (!isFullGameMatchTotal(candidate)) failures.push("soccer_total_not_full_game");
+    if (!(width === 2 || width === 3)) failures.push("soccer_total_width_not_historical_winner");
+    if (!SOCCER_MATCH_TOTAL_LINE_FAMILIES.has(family)) failures.push("soccer_total_line_family_not_historical_winner");
+  }
+  if (marketType === "spread") {
+    if (!isFullGameSpread(candidate)) failures.push("soccer_spread_not_full_game");
+    if (!(width === 2 || width === 3)) failures.push("soccer_spread_width_not_historical_winner");
+    if (!(candidate.broad.strike >= SOCCER_SPREAD_BROAD_MIN && candidate.broad.strike <= SOCCER_SPREAD_BROAD_MAX)) {
+      failures.push("soccer_spread_line_family_not_historical_winner");
+    }
+  }
   if (SPORTS_MAX_ENTRY_LEG_PRICE > 0 && maxEntryLeg(candidate) >= SPORTS_MAX_ENTRY_LEG_PRICE) {
     failures.push("soccer_max_entry_leg_price_exceeded");
   }

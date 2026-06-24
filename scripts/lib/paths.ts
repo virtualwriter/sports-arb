@@ -37,9 +37,13 @@ export const PATHS = {
   operatorActions: join(RUNTIME_DIR, "sports-arb-operator-actions.jsonl"),
   killSwitch: join(RUNTIME_DIR, "sports-arb-paused.json"),
   lockFile: join(RUNTIME_DIR, "sports-arb.lock"),
+  daemonLivePackages: join(DATA_DIR, "polymarket-live-packages.json"),
+  daemonLiveOrders: join(DATA_DIR, "polymarket-live-orders.json"),
   dailyMarkdown: join(REPORTS_DIR, "sports-arb-daily.md"),
   dailyCsv: join(REPORTS_DIR, "sports-arb-daily.csv"),
   excelManifest: join(REPORTS_DIR, "sports-arb-excel-manifest.json"),
+  pnlReportHtml: join(REPORTS_DIR, "sports-pnl-report", "index.html"),
+  pnlReportJson: join(REPORTS_DIR, "sports-pnl-report", "summary.json"),
 };
 
 export function ensureParent(path: string): void {

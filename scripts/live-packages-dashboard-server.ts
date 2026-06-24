@@ -11,6 +11,7 @@ const HTML_PATH = resolve("live-packages-dashboard.html");
 
 const remoteTs = `
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 async function main() {
 const CLOB_HOST = process.env.POLYMARKET_CLOB_HOST ?? 'https://clob.polymarket.com';
 const HISTORICAL_MIDDLE_HIT_RATE: Record<string, Record<string, number>> = {
@@ -100,7 +101,8 @@ async function book(tokenId:string | undefined) {
   const bid = bestLevel(json.bids, 'bid');
   return { bid: bid.price, bidSize: bid.size };
 }
-const rows = JSON.parse(readFileSync('data/polymarket-live-packages.json', 'utf8'))
+const dataDir = process.env.SPORTS_ARB_DATA_DIR ?? 'data';
+const rows = JSON.parse(readFileSync(join(dataDir, 'polymarket-live-packages.json'), 'utf8'))
   .filter((r:any)=>r.status==='package_complete'&&(r.filledShares??0)>0&&(r.actualCost??0)>0)
   .sort((a:any,b:any)=>String(a.settlementWindow?.endDate??'').localeCompare(String(b.settlementWindow?.endDate??''))||String(a.eventSlug).localeCompare(String(b.eventSlug)));
 const pkgs = [];

@@ -163,9 +163,11 @@ function normalizedOutcomeIndexes(outcomes: string[]): { yesIndex: number; noInd
   return yesIndex >= 0 && noIndex >= 0 ? { yesIndex, noIndex } : null;
 }
 
-function sportsSlugKind(eventSlug: string): "nba" | "mlb" | "soccer" | null {
+function sportsSlugKind(eventSlug: string): "nba" | "mlb" | "soccer" | "tennis" | "womens-tennis" | null {
   if (eventSlug.startsWith("nba-")) return "nba";
   if (eventSlug.startsWith("mlb-")) return "mlb";
+  if (eventSlug.startsWith("atp-") || eventSlug.includes("tennis")) return "tennis";
+  if (eventSlug.startsWith("wta-")) return "womens-tennis";
   if (eventSlug.startsWith("fifwc-")
     || eventSlug.startsWith("mls-")
     || eventSlug.includes("soccer")
@@ -198,6 +200,20 @@ function parseSportsMarket(eventSlug: string, question: string, outcomes: string
       ladderKey: `sports:${slugKey}:total:full-game`,
       ...outcomeIndexes,
     };
+  }
+
+  const tennisMatchTotal = question.match(/^.+?\s+vs\.?\s+.+?:\s*Match\s+O\/U\s+([0-9]+(?:\.5)?)$/i);
+  if ((sport === "tennis" || sport === "womens-tennis") && tennisMatchTotal && outcomeIndexes) {
+    return {
+      strike: parseNumber(tennisMatchTotal[1]),
+      direction: "above",
+      ladderKey: `sports:${slugKey}:total:match`,
+      ...outcomeIndexes,
+    };
+  }
+
+  if ((sport === "tennis" || sport === "womens-tennis") && /\bSet\s+\d+\s+Games\s+O\/U\s+[0-9]/i.test(question)) {
+    return null;
   }
 
   const scopedTotal = question.match(/^.+?\s+vs\.?\s+.+?:\s*(1H|1st Half|First Half|2H|2nd Half|Second Half)\s+O\/U\s+([0-9]+(?:\.5)?)$/i);
@@ -275,6 +291,8 @@ function parseMarket(eventSlug: string, question: string, groupItemTitle: string
 export function polymarketAssetForSlug(slug: string): string | null {
   if (slug.startsWith("nba-")) return "NBA";
   if (slug.startsWith("mlb-")) return "MLB";
+  if (slug.startsWith("atp-") || slug.includes("tennis")) return "TENNIS";
+  if (slug.startsWith("wta-")) return "WOMENS_TENNIS";
   if (sportsSlugKind(slug) === "soccer") return "SOCCER";
   if (slug.includes("spacex-ipo-closing-market-cap-above")) return "FINANCE";
   if (slug.includes("bitcoin")) return "BTC";

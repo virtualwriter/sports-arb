@@ -48,6 +48,39 @@ function candidate(overrides: Partial<Candidate> = {}): Candidate {
   };
 }
 
+function soccerCandidate(overrides: Partial<Candidate> = {}): Candidate {
+  const broad = quote({
+    eventSlug: "fifwc-che-can-2026-06-24-more-markets",
+    eventTitle: "Switzerland vs. Canada",
+    marketId: "soccer-broad",
+    ladderKey: "sports:soccer:fifwc-che-can-2026-06-24-more-markets:total:full-game",
+    question: "Switzerland vs. Canada: O/U 2.5",
+    strike: 2.5,
+    yesBook: { tokenId: "yes-broad", bid: 0.3, bidSize: 20, ask: 0.25, askSize: 20, spread: 0.01, minOrderSize: 1 },
+  });
+  const narrow = quote({
+    eventSlug: "fifwc-che-can-2026-06-24-more-markets",
+    eventTitle: "Switzerland vs. Canada",
+    marketId: "soccer-narrow",
+    ladderKey: "sports:soccer:fifwc-che-can-2026-06-24-more-markets:total:full-game",
+    question: "Switzerland vs. Canada: O/U 5.5",
+    strike: 5.5,
+    noTokenId: "no-narrow",
+    noBook: { tokenId: "no-narrow", bid: 0.9, bidSize: 20, ask: 0.93, askSize: 20, spread: 0.01, minOrderSize: 1 },
+  });
+  return {
+    ...candidate({
+      asset: "SOCCER",
+      eventSlug: "fifwc-che-can-2026-06-24-more-markets",
+      eventTitle: "Switzerland vs. Canada",
+      broad,
+      narrow,
+      packageCost: 1.18,
+    }),
+    ...overrides,
+  };
+}
+
 describe("sports strategy", () => {
   it("allows the preferred MLB live bucket", () => {
     const decision = evaluateSportsStrategy(candidate());
@@ -68,5 +101,75 @@ describe("sports strategy", () => {
     const decision = evaluateSportsStrategy(base);
     expect(decision.liveEligible).toBe(false);
     expect(decision.gateFailures).toContain("adapter_shadow_only");
+  });
+
+  it("allows historical-winner full-game soccer match totals", () => {
+    const decision = evaluateSportsStrategy(soccerCandidate());
+    expect(decision.liveEligible).toBe(true);
+    expect(decision.marketType).toBe("match_total");
+    expect(decision.lineFamily).toBe("2.5-5.5");
+    expect(decision.middleWidth).toBe(3);
+  });
+
+  it("allows historical-winner full-game soccer spreads", () => {
+    const broad = quote({
+      eventSlug: "fifwc-che-can-2026-06-24-more-markets",
+      ladderKey: "sports:soccer:fifwc-che-can-2026-06-24-more-markets:spread:full-game:canada",
+      question: "Spread: Canada (-1.5)",
+      strike: 1.5,
+      yesBook: { tokenId: "yes-broad", bid: 0.3, bidSize: 20, ask: 0.25, askSize: 20, spread: 0.01, minOrderSize: 1 },
+    });
+    const narrow = quote({
+      eventSlug: "fifwc-che-can-2026-06-24-more-markets",
+      ladderKey: "sports:soccer:fifwc-che-can-2026-06-24-more-markets:spread:full-game:canada",
+      question: "Spread: Canada (-3.5)",
+      strike: 3.5,
+      noBook: { tokenId: "no-narrow", bid: 0.9, bidSize: 20, ask: 0.93, askSize: 20, spread: 0.01, minOrderSize: 1 },
+    });
+    const decision = evaluateSportsStrategy(soccerCandidate({ broad, narrow, packageCost: 1.18 }));
+    expect(decision.liveEligible).toBe(true);
+    expect(decision.marketType).toBe("spread");
+    expect(decision.middleWidth).toBe(2);
+  });
+
+  it("blocks one-goal soccer spread near misses from live entry", () => {
+    const broad = quote({
+      eventSlug: "fifwc-che-can-2026-06-24-more-markets",
+      ladderKey: "sports:soccer:fifwc-che-can-2026-06-24-more-markets:spread:full-game:canada",
+      question: "Spread: Canada (-1.5)",
+      strike: 1.5,
+      yesBook: { tokenId: "yes-broad", bid: 0.3, bidSize: 20, ask: 0.17, askSize: 20, spread: 0.01, minOrderSize: 1 },
+    });
+    const narrow = quote({
+      eventSlug: "fifwc-che-can-2026-06-24-more-markets",
+      ladderKey: "sports:soccer:fifwc-che-can-2026-06-24-more-markets:spread:full-game:canada",
+      question: "Spread: Canada (-2.5)",
+      strike: 2.5,
+      noBook: { tokenId: "no-narrow", bid: 0.9, bidSize: 20, ask: 0.93, askSize: 20, spread: 0.01, minOrderSize: 1 },
+    });
+    const decision = evaluateSportsStrategy(soccerCandidate({ broad, narrow, packageCost: 1.10 }));
+    expect(decision.liveEligible).toBe(false);
+    expect(decision.shadowPurpose).toBe("excluded_shape_probe");
+    expect(decision.gateFailures).toContain("soccer_spread_width_not_historical_winner");
+  });
+
+  it("blocks first-half soccer totals from live entry", () => {
+    const broad = quote({
+      eventSlug: "fifwc-che-can-2026-06-24-more-markets",
+      ladderKey: "sports:soccer:fifwc-che-can-2026-06-24-more-markets:total:first-half",
+      question: "Switzerland vs. Canada: 1st Half O/U 1.5",
+      strike: 1.5,
+      yesBook: { tokenId: "yes-broad", bid: 0.3, bidSize: 20, ask: 0.25, askSize: 20, spread: 0.01, minOrderSize: 1 },
+    });
+    const narrow = quote({
+      eventSlug: "fifwc-che-can-2026-06-24-more-markets",
+      ladderKey: "sports:soccer:fifwc-che-can-2026-06-24-more-markets:total:first-half",
+      question: "Switzerland vs. Canada: 1st Half O/U 3.5",
+      strike: 3.5,
+      noBook: { tokenId: "no-narrow", bid: 0.9, bidSize: 20, ask: 0.93, askSize: 20, spread: 0.01, minOrderSize: 1 },
+    });
+    const decision = evaluateSportsStrategy(soccerCandidate({ broad, narrow, packageCost: 1.18 }));
+    expect(decision.liveEligible).toBe(false);
+    expect(decision.gateFailures).toContain("soccer_total_not_full_game");
   });
 });

@@ -1,0 +1,32 @@
+[Unit]
+Description=Sports Arb always-on websocket daemon
+After=network-online.target
+Wants=network-online.target
+# Repeated crashes within 5 min -> stop trying so we don't burn the API / hammer
+# the CLOB. Reset by a successful long-lived run.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/sports-arb
+EnvironmentFile=/etc/sports-arb.env
+Environment=SPORTS_ARB_STATE_DIR=/var/lib/sports-arb
+Environment=SPORTS_ARB_DATA_DIR=/var/lib/sports-arb/data
+Environment=SPORTS_ARB_RUNTIME_DIR=/var/lib/sports-arb/runtime
+Environment=NODE_NO_WARNINGS=1
+ExecStart=/usr/local/bin/run-sports-arb-daemon
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+KillSignal=SIGTERM
+TimeoutStopSec=30
+User=sports-arb
+Group=sports-arb
+StateDirectory=sports-arb
+RuntimeDirectory=sports-arb
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

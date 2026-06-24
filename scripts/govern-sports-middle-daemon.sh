@@ -18,8 +18,8 @@
 set -euo pipefail
 
 ACTION="${1:-plan}"
-ENV_FILE="${POLYMARKET_PM_ENV_FILE:-/etc/polymarket-pm-executor.env}"
-SERVICE_NAME="${POLYMARKET_ARB_SERVICE:-polymarket-arb-daemon.service}"
+ENV_FILE="${SPORTS_ARB_ENV_FILE:-/etc/sports-arb.env}"
+SERVICE_NAME="${SPORTS_ARB_DAEMON_SERVICE:-sports-arb-daemon.service}"
 
 CONFIG_NAME="${SPORTS_DAEMON_CONFIG_NAME:-sports-middle-10k-v1}"
 EXECUTION_PAIR_CONFIG="${SPORTS_EXECUTION_PAIR_CONFIG:-sports-cheap-first-breakeven-prewarm}"
@@ -156,17 +156,17 @@ apply_env() {
   echo "Wrote governed sports daemon config to $ENV_FILE"
 }
 
-disable_conflicting_services() {
+disable_legacy_sports_services() {
   require_root
-  systemctl disable --now polymarket-real-executor.timer 2>/dev/null || true
-  systemctl disable --now polymarket-real-executor.service 2>/dev/null || true
-  systemctl disable --now polymarket-trader.timer 2>/dev/null || true
-  systemctl disable --now polymarket-trader.service 2>/dev/null || true
+  # Old extractions sometimes installed the sports websocket daemon under a
+  # polymarket-* unit name. Leave the parent polymarket-trader timer alone so
+  # both repos can run their own automatic trader paths.
+  systemctl disable --now polymarket-arb-daemon.service 2>/dev/null || true
 }
 
 restart_daemon() {
   require_root
-  disable_conflicting_services
+  disable_legacy_sports_services
   systemctl daemon-reload
   systemctl restart "$SERVICE_NAME"
   systemctl --no-pager --full status "$SERVICE_NAME" || true

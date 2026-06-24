@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch Sports Arb daemon ledger for P&L report updates
+
+[Path]
+PathChanged=/var/lib/sports-arb/data/polymarket-live-packages.json
+Unit=sports-arb-pnl-report.service
+
+[Install]
+WantedBy=multi-user.target

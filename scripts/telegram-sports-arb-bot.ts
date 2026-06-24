@@ -4,6 +4,7 @@ import { config } from "dotenv";
 import { buildDailyReport } from "./daily-sports-arb-report.js";
 import { PATHS, ensureParent } from "./lib/paths.js";
 import { readJson } from "./lib/storage.js";
+import { sportsPnlTelegramText } from "./sports-pnl-report.js";
 import type { HealthSnapshot, SportsArbPackage } from "./lib/types.js";
 
 config({ path: "config.env" });
@@ -33,7 +34,12 @@ async function main() {
   if (command === "daily") {
     const report = buildDailyReport();
     await sendMessage(report.markdown.slice(0, 3900));
+    await sendMessage((await sportsPnlTelegramText()).slice(0, 3900));
     console.log(`[telegram] sent daily report ${report.markdownPath}`);
+    return;
+  }
+  if (command === "pnl") {
+    await sendMessage((await sportsPnlTelegramText()).slice(0, 3900));
     return;
   }
   if (["pause", "resume", "kill"].includes(command)) {

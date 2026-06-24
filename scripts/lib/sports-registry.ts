@@ -39,6 +39,12 @@ function soccerMarketClassifier(quote: MarketQuote): MarketType {
   return "unknown";
 }
 
+function tennisMarketClassifier(quote: MarketQuote): MarketType {
+  const text = lowerText(quote.question, quote.description, quote.ladderKey);
+  if (text.includes(":total:match") || /\bmatch\s+o\/u\b/i.test(quote.question)) return "match_total";
+  return basicMarketClassifier(quote);
+}
+
 function lineFamily(candidate: Candidate): string {
   return `${candidate.broad.strike}-${candidate.narrow.strike}`;
 }
@@ -89,7 +95,7 @@ export const SPORT_ADAPTERS: SportAdapter[] = [
     slugPatterns: [/tennis/i, /^atp-/i],
     defaultGender: "unknown",
     middleWidthUnit: "games",
-    classifyMarket: basicMarketClassifier,
+    classifyMarket: tennisMarketClassifier,
     lineFamily,
   },
   {
@@ -101,7 +107,7 @@ export const SPORT_ADAPTERS: SportAdapter[] = [
     slugPatterns: [/^wta-/i, /womens?-tennis/i],
     defaultGender: "women",
     middleWidthUnit: "games",
-    classifyMarket: basicMarketClassifier,
+    classifyMarket: tennisMarketClassifier,
     lineFamily,
   },
   {

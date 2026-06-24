@@ -123,9 +123,12 @@ const NBA_LEDGER_ARCHIVE_GRACE_MS = Number(process.env.ARB_DAEMON_NBA_LEDGER_ARC
 const DISCOVER_NBA_GAMES = process.env.ARB_DAEMON_DISCOVER_NBA_GAMES !== "0";
 const DISCOVER_MLB_GAMES = process.env.ARB_DAEMON_DISCOVER_MLB_GAMES !== "0";
 const DISCOVER_SOCCER_GAMES = process.env.ARB_DAEMON_DISCOVER_SOCCER_GAMES !== "0";
+const DISCOVER_TENNIS_GAMES = process.env.ARB_DAEMON_DISCOVER_TENNIS_GAMES === "1";
 const DISCOVER_LADDERS = process.env.ARB_DAEMON_DISCOVER_LADDERS !== "0";
 const LADDER_DISCOVERY_TAGS = (process.env.ARB_DAEMON_LADDER_DISCOVERY_TAGS ?? "crypto,crypto-prices,stocks,commodities,indices,finance")
   .split(",").map((tag) => tag.trim()).filter(Boolean);
+const TENNIS_EVENT_SLUGS = (process.env.ARB_DAEMON_TENNIS_EVENT_SLUGS ?? "")
+  .split(",").map((slug) => slug.trim()).filter(Boolean);
 const SPORTS_DISCOVERY_LIMIT = Number(process.env.ARB_DAEMON_SPORTS_DISCOVERY_LIMIT ?? process.env.ARB_DAEMON_MLB_DISCOVERY_LIMIT ?? 500);
 const SOCCER_DISCOVERY_LIMIT = Number(process.env.ARB_DAEMON_SOCCER_DISCOVERY_LIMIT ?? 300);
 const SPORTS_AUTO_DISCOVERY_DAYS = Number(process.env.ARB_DAEMON_SPORTS_AUTO_DISCOVERY_DAYS ?? 2);
@@ -789,7 +792,7 @@ function registerToken(tokenId: string, key: string) {
 }
 
 function isSportsGameSlug(slug: string): boolean {
-  return /^(?:(?:nba|mlb)-[a-z0-9]+-[a-z0-9]+|(?:fifwc|mls)-[a-z0-9]+-[a-z0-9]+)-\d{4}-\d{2}-\d{2}(?:-more-markets)?$/.test(slug);
+  return /^(?:(?:nba|mlb|atp|wta)-[a-z0-9]+-[a-z0-9]+|(?:fifwc|mls)-[a-z0-9]+-[a-z0-9]+)-\d{4}-\d{2}-\d{2}(?:-more-markets)?$/.test(slug);
 }
 
 function sportsGameDate(slug: string): string | null {
@@ -856,17 +859,19 @@ async function configuredEventSlugs(): Promise<string[]> {
   return out;
 }
 
-type SportsGameKind = "nba" | "mlb" | "soccer";
+type SportsGameKind = "nba" | "mlb" | "soccer" | "tennis";
 
 function sportsGameDiscoveryEnabled(kind: SportsGameKind): boolean {
   if (kind === "nba") return DISCOVER_NBA_GAMES;
   if (kind === "mlb") return DISCOVER_MLB_GAMES;
+  if (kind === "tennis") return DISCOVER_TENNIS_GAMES;
   return DISCOVER_SOCCER_GAMES;
 }
 
 function sportsGameDiscoveryTags(kind: SportsGameKind): string[] {
   if (kind === "nba") return ["nba", "basketball"];
   if (kind === "mlb") return ["mlb", "baseball"];
+  if (kind === "tennis") return ["tennis", "atp", "wta"];
   return ["soccer"];
 }
 
@@ -877,13 +882,14 @@ function sportsGameDiscoveryLimit(kind: SportsGameKind): number {
 function matchesSportsGameKind(slug: string, kind: SportsGameKind): boolean {
   if (kind === "nba") return slug.startsWith("nba-");
   if (kind === "mlb") return slug.startsWith("mlb-");
+  if (kind === "tennis") return slug.startsWith("atp-") || slug.startsWith("wta-") || slug.includes("tennis");
   return slug.startsWith("fifwc-") || slug.startsWith("mls-");
 }
 
 function sportsGameHasLadder(event: GammaEvent): boolean {
   return (event.markets ?? []).some((market) => {
     const question = market.question ?? "";
-    return /\bO\/U\s+[0-9]/i.test(question) || /^Spread:/i.test(question);
+    return /\b(?:Match\s+)?O\/U\s+[0-9]/i.test(question) || /^Spread:/i.test(question);
   });
 }
 
@@ -951,17 +957,19 @@ async function discoverLadderEventSlugs(): Promise<string[]> {
 
 async function currentEventSlugs(): Promise<string[]> {
   const configured = await configuredEventSlugs();
-  const [discoveredNba, discoveredMlb, discoveredSoccer, discoveredLadders] = await Promise.all([
+  const [discoveredNba, discoveredMlb, discoveredSoccer, discoveredTennis, discoveredLadders] = await Promise.all([
     discoverSportsGameSlugs("nba"),
     discoverSportsGameSlugs("mlb"),
     discoverSportsGameSlugs("soccer"),
+    discoverSportsGameSlugs("tennis"),
     discoverLadderEventSlugs(),
   ]);
   if (discoveredNba.length) log(`nba discovery: ${discoveredNba.length} active game slugs`);
   if (discoveredMlb.length) log(`mlb discovery: ${discoveredMlb.length} active game slugs`);
   if (discoveredSoccer.length) log(`soccer discovery: ${discoveredSoccer.length} active game slugs`);
+  if (discoveredTennis.length) log(`tennis discovery: ${discoveredTennis.length} active match slugs`);
   if (discoveredLadders.length) log(`ladder discovery: ${discoveredLadders.length} active ladder events`);
-  return [...configured, ...discoveredNba, ...discoveredMlb, ...discoveredSoccer, ...discoveredLadders].filter((slug, idx, slugs) => slugs.indexOf(slug) === idx);
+  return [...configured, ...TENNIS_EVENT_SLUGS, ...discoveredNba, ...discoveredMlb, ...discoveredSoccer, ...discoveredTennis, ...discoveredLadders].filter((slug, idx, slugs) => slugs.indexOf(slug) === idx);
 }
 
 async function refreshWatchlist(): Promise<void> {
@@ -987,6 +995,10 @@ async function refreshWatchlist(): Promise<void> {
       ["asset_not_allowlisted", "ladder_mismatch", "expiry_mismatch", "resolution_mismatch", "low_liquidity"].includes(reason)
     )
   );
+  const watchAssetCounts = watch.reduce<Record<string, number>>((counts, candidate) => {
+    counts[candidate.asset] = (counts[candidate.asset] ?? 0) + 1;
+    return counts;
+  }, {});
   const seen = new Set<string>();
   let added = 0;
   for (const base of watch) {
@@ -1015,7 +1027,7 @@ async function refreshWatchlist(): Promise<void> {
     }
   }
   refreshAlreadyOpen();
-  log(`watchlist: ${packages.size} packages / ${watchedTokens().length} tokens (added ${added})`);
+  log(`watchlist: ${packages.size} packages / ${watchedTokens().length} tokens (added ${added}) assets=${JSON.stringify(watchAssetCounts)}`);
 }
 
 function refreshAlreadyOpen() {
@@ -4110,7 +4122,9 @@ async function seedBooks(tokens: string[]) {
   const now = Date.now();
   const due = tokens
     .filter((tokenId) => now - (lastBookSeedAt.get(tokenId) ?? 0) >= BOOK_SEED_MIN_INTERVAL_MS)
+    .sort((a, b) => tokenSeedPriority(a) - tokenSeedPriority(b))
     .slice(0, BOOK_SEED_MAX_PER_RECONNECT);
+  const tennisDue = due.filter((tokenId) => tokenSeedPriority(tokenId) === 0).length;
   let seeded = 0;
   let errors = 0;
   for (const tokenId of due) {
@@ -4126,8 +4140,20 @@ async function seedBooks(tokens: string[]) {
     }
   }
   if (due.length || tokens.length) {
-    log(`book seed: seeded=${seeded}/${due.length} errors=${errors} tokens=${tokens.length}${Date.now() < clobRestCooldownUntil ? ` cooldown=${Math.ceil((clobRestCooldownUntil - Date.now()) / 1000)}s` : ""}`);
+    log(`book seed: seeded=${seeded}/${due.length} tennisDue=${tennisDue} errors=${errors} tokens=${tokens.length}${Date.now() < clobRestCooldownUntil ? ` cooldown=${Math.ceil((clobRestCooldownUntil - Date.now()) / 1000)}s` : ""}`);
   }
+}
+
+function tokenSeedPriority(tokenId: string): number {
+  const packageKeys = tokenToPackages.get(tokenId);
+  if (!packageKeys?.size) return 3;
+  let priority = 2;
+  for (const key of packageKeys) {
+    const asset = packages.get(key)?.base.asset;
+    if (asset === "TENNIS" || asset === "WOMENS_TENNIS") return 0;
+    if (asset === "MLB" || asset === "SOCCER") priority = Math.min(priority, 1);
+  }
+  return priority;
 }
 
 // ─── User websocket (instant fills) ───

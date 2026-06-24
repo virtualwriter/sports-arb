@@ -1,18 +1,29 @@
 # Server Paths
 
-## Japan Monotonic Host
+## Sports Arb Host
 
-The repo contains explicit Japan references for the always-on websocket monotonic-arb daemon.
+The sports-arb repo owns the always-on websocket sports monotonic-arb daemon.
+
+- Production repo path: `/opt/sports-arb`
+- Runtime state path: `/var/lib/sports-arb`
+- Env file: `/etc/sports-arb.env`
+- Systemd unit: `sports-arb-daemon.service`
+- Systemd unit source in this extraction: `deploy/sports-arb-daemon.service`
+- Production wrapper path: `/usr/local/bin/run-sports-arb-daemon`
+- Wrapper source in this extraction: `scripts/run-sports-arb-daemon.sh`
+- Governing script: `scripts/govern-sports-middle-daemon.sh`
+
+## Polymarket Trader Host
+
+The parent polymarket-trader repo keeps its own automatic trader path. The
+sports-arb daemon governance script must not disable these units.
 
 - Production repo path: `/opt/polymarket-trader`
 - Runtime state path: `/var/lib/polymarket-trader`
-- Primary monotonic env file: `/etc/polymarket-pm-executor.env`
-- Legacy/shared env file: `/etc/polymarket-trader.env`
-- Systemd unit: `polymarket-arb-daemon.service`
-- Systemd unit source in this extraction: `deploy/polymarket-arb-daemon.service`
-- Production wrapper path: `/usr/local/bin/run-polymarket-arb-daemon`
-- Wrapper source in this extraction: `scripts/run-polymarket-arb-daemon.sh`
-- Governing script: `scripts/govern-sports-middle-daemon.sh`
+- Env file: `/etc/polymarket-trader.env`
+- Hourly trader unit: `polymarket-trader.service`
+- Hourly trader timer: `polymarket-trader.timer`
+- Production wrapper path: `/usr/local/bin/run-polymarket-trader`
 
 ## Dublin / Ireland
 
@@ -23,7 +34,7 @@ Dublin trading VPS identified by operator:
 
 No file in the current repo explicitly names this Dublin server or a Dublin-specific deploy path. The only Ireland-related runtime reference found is `IE` / `Ireland` in `scripts/lib/VpnGuard.ts`, where Ireland is part of the allowed VPN country list.
 
-If the Dublin machine uses the standard VPS layout from `docs/reference/new-machine-live-handoff.md`, the expected paths are the same generic production paths:
+If the Dublin machine uses the standard parent-trader layout from `docs/reference/new-machine-live-handoff.md`, the expected paths are the same generic production paths:
 
 - Repo path: `/opt/polymarket-trader`
 - Runtime state path: `/var/lib/polymarket-trader`

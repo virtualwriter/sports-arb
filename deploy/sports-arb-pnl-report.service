@@ -1,0 +1,10 @@
+[Unit]
+Description=Regenerate Sports Arb P&L report
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/sports-arb
+EnvironmentFile=/etc/sports-arb.env
+ExecStart=/usr/bin/env npm run report:pnl
+User=sports-arb
+Group=sports-arb

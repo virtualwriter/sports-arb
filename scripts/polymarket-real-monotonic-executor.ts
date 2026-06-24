@@ -31,9 +31,13 @@ config({ path: resolve(__dirname, "../../config.env") });
 
 const ROOT = join(import.meta.dirname ?? ".", "..");
 const DEFAULT_LIVE_STATE_DIR = join(ROOT, ".runtime");
-const LIVE_STATE_DIR = process.env.POLYMARKET_TRADER_STATE_DIR ?? DEFAULT_LIVE_STATE_DIR;
-const LIVE_PORTFOLIO_FILE = process.env.POLYMARKET_TRADER_LIVE_PORTFOLIO ?? join(LIVE_STATE_DIR, "portfolio-live.json");
-const DATA_DIR = join(ROOT, "data");
+const LIVE_STATE_DIR = process.env.SPORTS_ARB_STATE_DIR
+  ?? process.env.POLYMARKET_TRADER_STATE_DIR
+  ?? DEFAULT_LIVE_STATE_DIR;
+const LIVE_PORTFOLIO_FILE = process.env.SPORTS_ARB_LIVE_PORTFOLIO
+  ?? process.env.POLYMARKET_TRADER_LIVE_PORTFOLIO
+  ?? join(LIVE_STATE_DIR, "portfolio-live.json");
+const DATA_DIR = process.env.SPORTS_ARB_DATA_DIR ?? join(ROOT, "data");
 const PACKAGES_PATH = join(DATA_DIR, "polymarket-live-packages.json");
 const ORDERS_PATH = join(DATA_DIR, "polymarket-live-orders.json");
 

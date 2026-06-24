@@ -6,8 +6,8 @@
 | `scripts/polymarket-real-monotonic-executor.ts` | Hourly/real Polymarket monotonic executor and shared execution helper exports used by the daemon and Up/Down tools. |
 | `scripts/lib/monotonic-arb-core.ts` | Shared monotonic candidate discovery and pair evaluation core. |
 | `scripts/govern-sports-middle-daemon.sh` | Japan sports monotonic-middle env governance for MLB/SOCCER daemon mode. |
-| `scripts/run-polymarket-arb-daemon.sh` | Japan production wrapper deployed as /usr/local/bin/run-polymarket-arb-daemon. |
-| `deploy/polymarket-arb-daemon.service` | Japan systemd service for the always-on daemon. |
+| `scripts/run-sports-arb-daemon.sh` | Production wrapper deployed as `/usr/local/bin/run-sports-arb-daemon` for the sports-arb daemon. |
+| `deploy/sports-arb-daemon.service` | Systemd service for the sports-arb always-on daemon. |
 | `docs/SPORTS-MONOTONIC-SOCCER-MLB.md` | Soccer and MLB monotonic-middle strategy and ROI evidence. |
 | `scripts/monotonic_middle_report.py` | Sports middle audit report generator. |
 | `scripts/monotonic_capture_report.py` | Daemon capture/conversion audit summarizer. |

@@ -10,8 +10,9 @@ This folder is intended to become its own GitHub repo. It contains copied source
 - `npm run engine:dry-run` consumes scanner output with preflight, idempotency, lifecycle timing, capital gates, and orphan shutdown checks without submitting live orders.
 - `npm run engine` runs the same live engine path. Keep `SPORTS_ARB_LIVE=0` and `DISABLE_REAL_PM_TRADING=1` until operator approval.
 - `npm run report:daily` writes Markdown, CSV, and Excel-compatible report artifacts under `data/reports/`.
+- `npm run report:pnl` writes the daemon lifetime P&L HTML report under `data/reports/sports-pnl-report/`.
 - `npm run llm:learn` runs the DeepSeek learning/journal loop with strict no-trade/no-unpause permissions.
-- `npm run telegram:daily` sends the daily report package to the sports arb Telegram channel.
+- `npm run telegram:daily` sends the daily report and sports daemon P&L summary to the sports arb Telegram channel.
 - `npm run backup` archives state files and prunes old backups.
 - `npm run daemon` runs the always-on websocket monotonic-arb daemon.
 - `npm run monotonic:real-pm` runs the real Polymarket monotonic executor.
@@ -28,6 +29,8 @@ Important files include `sports-arb-live-packages.json`, `sports-arb-shadows.jso
 ## Deployment Paths
 
 See `docs/server-paths.md` for the Japan and Dublin path inventory found during extraction.
+
+The sports-arb automatic path is `sports-arb-daemon.service` -> `/usr/local/bin/run-sports-arb-daemon` -> `/opt/sports-arb`. The parent polymarket-trader automatic path remains separate as `polymarket-trader.timer` -> `/usr/local/bin/run-polymarket-trader` -> `/opt/polymarket-trader`.
 
 ## Notes
 

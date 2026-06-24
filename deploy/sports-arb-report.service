@@ -8,6 +8,7 @@ Type=oneshot
 WorkingDirectory=/opt/sports-arb
 EnvironmentFile=/etc/sports-arb.env
 ExecStart=/usr/bin/env npm run report:daily
+ExecStart=/usr/bin/env npm run report:pnl
 ExecStartPost=/usr/bin/env npm run telegram:daily
 User=sports-arb
 Group=sports-arb
