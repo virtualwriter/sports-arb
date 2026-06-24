@@ -82,6 +82,15 @@ function bestLevel(levels:any[] | undefined, side:'bid'|'ask') {
     ? (row.price > best.price ? row : best)
     : (row.price < best.price ? row : best), nums[0]);
 }
+function marketType(row:any) {
+  const labels = Array.isArray(row.packageLegs)
+    ? row.packageLegs.map((leg:any) => String(leg.instrumentLabel ?? '')).join(' ')
+    : '';
+  if (labels.includes('O/U')) return 'O/U';
+  if (labels.includes('Spread:')) return 'Spread';
+  if (labels.includes('Team Total')) return 'Team Total';
+  return row.direction ?? 'Unknown';
+}
 async function book(tokenId:string | undefined) {
   if (!tokenId) return { bid: 0, bidSize: 0 };
   const url = CLOB_HOST + '/book?' + new URLSearchParams({ token_id: tokenId });
@@ -123,6 +132,7 @@ for (const r of rows) {
     hh: HISTORICAL_MIDDLE_HIT_RATE[r.asset]?.[bucket] ?? null,
     bs: r.broadStrike,
     ns: r.narrowStrike,
+    mt: marketType(r),
     end: r.settlementWindow?.endDate ?? '',
     bb: +bb.toFixed(3),
     nb: +nb.toFixed(3),
