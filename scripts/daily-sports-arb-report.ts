@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import { writeFileSync } from "node:fs";
 import { config } from "dotenv";
+import { loadDaemonSportsArbPackages } from "./lib/llm/daemon-bridge.js";
 import { summarizeEvidence } from "./lib/llm/learning.js";
 import { PATHS, ensureParent, ensureStateDirs } from "./lib/paths.js";
 import { readShadowPackages } from "./lib/shadow-ledger.js";
@@ -93,9 +94,11 @@ function markdownReport(args: {
   ].join("\n");
 }
 
-export function buildDailyReport() {
+export async function buildDailyReport() {
   ensureStateDirs();
-  const live = readJson<SportsArbPackage[]>(PATHS.livePackages, []);
+  const daemonLive = await loadDaemonSportsArbPackages();
+  const legacyLive = readJson<SportsArbPackage[]>(PATHS.livePackages, []);
+  const live = daemonLive.length > 0 ? daemonLive : legacyLive;
   const shadows = readShadowPackages(50_000);
   const health = readJson<HealthSnapshot>(PATHS.health, {
     updatedAt: new Date().toISOString(),
@@ -127,6 +130,12 @@ export function buildDailyReport() {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const report = buildDailyReport();
-  console.log(`[report] markdown=${report.markdownPath} csv=${report.csvPath} excelManifest=${report.excelManifestPath}`);
+  buildDailyReport()
+    .then((report) => {
+      console.log(`[report] markdown=${report.markdownPath} csv=${report.csvPath} excelManifest=${report.excelManifestPath}`);
+    })
+    .catch((error) => {
+      console.error(error);
+      process.exitCode = 1;
+    });
 }

@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import { appendFileSync } from "node:fs";
 import { config } from "dotenv";
+import { loadDaemonSportsArbPackages } from "./lib/llm/daemon-bridge.js";
 import { requestDeepSeek } from "./lib/llm/deepseek.js";
 import { summarizeEvidence, writeLlmJournal } from "./lib/llm/learning.js";
 import { PATHS, ensureParent, ensureStateDirs } from "./lib/paths.js";
@@ -31,7 +32,12 @@ function compactContext(live: SportsArbPackage[], shadows: SportsArbPackage[], h
 
 async function main() {
   ensureStateDirs();
-  const live = readJson<SportsArbPackage[]>(PATHS.livePackages, []);
+  // Primary input is the daemon ledger (bridged into SportsArbPackage shape).
+  // Fall back to the legacy hourly-executor file if the daemon hasn't been
+  // active yet, so we never silently drop history during a transition.
+  const daemonLive = await loadDaemonSportsArbPackages();
+  const legacyLive = readJson<SportsArbPackage[]>(PATHS.livePackages, []);
+  const live = daemonLive.length > 0 ? daemonLive : legacyLive;
   const shadows = readShadowPackages(50_000);
   const health = readJson<HealthSnapshot>(PATHS.health, {
     updatedAt: new Date().toISOString(),

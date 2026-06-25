@@ -32,7 +32,7 @@ function recordOperatorAction(action: string): void {
 async function main() {
   const command = process.argv[2] ?? "daily";
   if (command === "daily") {
-    const report = buildDailyReport();
+    const report = await buildDailyReport();
     await sendMessage(report.markdown.slice(0, 3900));
     await sendMessage((await sportsPnlTelegramText()).slice(0, 3900));
     console.log(`[telegram] sent daily report ${report.markdownPath}`);
