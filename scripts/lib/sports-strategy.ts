@@ -69,6 +69,11 @@ const SOCCER_MATCH_TOTAL_LINE_FAMILIES = new Set(["2.5-4.5", "2.5-5.5", "3.5-5.5
 const SOCCER_MATCH_TOTAL_RELAXED_NYB_FAMILIES = new Set(["2.5-5.5", "3.5-6.5"]);
 const SOCCER_SPREAD_BROAD_MIN = 1.5;
 const SOCCER_SPREAD_BROAD_MAX = 3.5;
+const MLB_GAME_TOTAL_LIVE_COST_RANGES = new Map<string, { lo: number; hi: number }>([
+  ["5.5-7.5", { lo: 1.19, hi: 1.22 }],
+  ["6.5-7.5", { lo: 1.10, hi: 1.16 }],
+  ["6.5-8.5", { lo: 1.16, hi: 1.19 }],
+]);
 
 function isFullGameMatchTotal(candidate: Candidate): boolean {
   return candidate.broad.ladderKey.includes(":total:full-game")
@@ -156,11 +161,19 @@ function mlbLive(candidate: Candidate, marketType: MarketType): string[] {
   const family = normalizeLineFamily(candidate);
   const width = middleWidth(candidate);
   const narrowYesBid = impliedNarrowYesBid(candidate);
-  const preferredTotals = new Set(["5.5-7.5", "5.5-8.5", "6.5-7.5", "6.5-8.5"]);
-  if (!within(cost, 1.19, 1.22) && cost >= 1) failures.push("mlb_cost_bucket_not_live");
   if (!(marketType === "game_total" || marketType === "spread")) failures.push("mlb_market_shape_not_live");
-  if (marketType === "game_total" && !preferredTotals.has(family)) failures.push("mlb_total_line_family_not_preferred");
-  if (marketType === "spread" && width !== 1) failures.push("mlb_spread_width_not_preferred");
+  if (marketType === "game_total") {
+    const liveCostRange = MLB_GAME_TOTAL_LIVE_COST_RANGES.get(family);
+    if (!liveCostRange) {
+      failures.push("mlb_total_line_family_not_preferred");
+    } else if (cost >= 1 && !within(cost, liveCostRange.lo, liveCostRange.hi)) {
+      failures.push("mlb_cost_bucket_not_live");
+    }
+  }
+  if (marketType === "spread") {
+    if (!within(cost, 1.19, 1.22) && cost >= 1) failures.push("mlb_cost_bucket_not_live");
+    if (width !== 1) failures.push("mlb_spread_width_not_preferred");
+  }
   if (SPORTS_MAX_ENTRY_LEG_PRICE > 0 && maxEntryLeg(candidate) >= SPORTS_MAX_ENTRY_LEG_PRICE) {
     failures.push("mlb_max_entry_leg_price_exceeded");
   }

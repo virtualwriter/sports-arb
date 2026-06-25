@@ -82,10 +82,44 @@ function soccerCandidate(overrides: Partial<Candidate> = {}): Candidate {
 }
 
 describe("sports strategy", () => {
-  it("allows the preferred MLB live bucket", () => {
+  it("allows the tight MLB 5.5-7.5 live bucket", () => {
     const decision = evaluateSportsStrategy(candidate());
     expect(decision.liveEligible).toBe(true);
     expect(decision.costBucket).toBe("1.190-1.220");
+  });
+
+  it("allows the lower-cost MLB 6.5-7.5 live bucket", () => {
+    const broad = quote({ strike: 6.5, marketId: "broad", yesTokenId: "yes-broad" });
+    const narrow = quote({ strike: 7.5, marketId: "narrow", noTokenId: "no-narrow" });
+    const decision = evaluateSportsStrategy(candidate({ broad, narrow, packageCost: 1.12 }));
+    expect(decision.liveEligible).toBe(true);
+    expect(decision.lineFamily).toBe("6.5-7.5");
+    expect(decision.costBucket).toBe("1.100-1.160");
+  });
+
+  it("allows the lower-cost MLB 6.5-8.5 live bucket", () => {
+    const broad = quote({ strike: 6.5, marketId: "broad", yesTokenId: "yes-broad" });
+    const narrow = quote({ strike: 8.5, marketId: "narrow", noTokenId: "no-narrow" });
+    const decision = evaluateSportsStrategy(candidate({ broad, narrow, packageCost: 1.18 }));
+    expect(decision.liveEligible).toBe(true);
+    expect(decision.lineFamily).toBe("6.5-8.5");
+    expect(decision.costBucket).toBe("1.160-1.190");
+  });
+
+  it("blocks MLB 6.5-8.5 in the old high-cost bucket", () => {
+    const broad = quote({ strike: 6.5, marketId: "broad", yesTokenId: "yes-broad" });
+    const narrow = quote({ strike: 8.5, marketId: "narrow", noTokenId: "no-narrow" });
+    const decision = evaluateSportsStrategy(candidate({ broad, narrow, packageCost: 1.20 }));
+    expect(decision.liveEligible).toBe(false);
+    expect(decision.gateFailures).toContain("mlb_cost_bucket_not_live");
+  });
+
+  it("blocks MLB total families outside the tight ROI rule", () => {
+    const broad = quote({ strike: 7.5, marketId: "broad", yesTokenId: "yes-broad" });
+    const narrow = quote({ strike: 9.5, marketId: "narrow", noTokenId: "no-narrow" });
+    const decision = evaluateSportsStrategy(candidate({ broad, narrow, packageCost: 1.18 }));
+    expect(decision.liveEligible).toBe(false);
+    expect(decision.gateFailures).toContain("mlb_total_line_family_not_preferred");
   });
 
   it("captures sub-1 packages as universal shadows", () => {
