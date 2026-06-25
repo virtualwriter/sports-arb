@@ -166,7 +166,9 @@ function normalizedOutcomeIndexes(outcomes: string[]): { yesIndex: number; noInd
 function sportsSlugKind(eventSlug: string): "nba" | "mlb" | "soccer" | "tennis" | "womens-tennis" | null {
   if (eventSlug.startsWith("nba-")) return "nba";
   if (eventSlug.startsWith("mlb-")) return "mlb";
-  if (eventSlug.startsWith("atp-") || eventSlug.includes("tennis")) return "tennis";
+  // ITF events are mixed-gender; Polymarket doesn't tag them men/women so we
+  // group them with men's tennis for ladder/strategy purposes (shadow only).
+  if (eventSlug.startsWith("atp-") || eventSlug.startsWith("itf-") || eventSlug.includes("tennis")) return "tennis";
   if (eventSlug.startsWith("wta-")) return "womens-tennis";
   if (eventSlug.startsWith("fifwc-")
     || eventSlug.startsWith("mls-")
@@ -291,7 +293,7 @@ function parseMarket(eventSlug: string, question: string, groupItemTitle: string
 export function polymarketAssetForSlug(slug: string): string | null {
   if (slug.startsWith("nba-")) return "NBA";
   if (slug.startsWith("mlb-")) return "MLB";
-  if (slug.startsWith("atp-") || slug.includes("tennis")) return "TENNIS";
+  if (slug.startsWith("atp-") || slug.startsWith("itf-") || slug.includes("tennis")) return "TENNIS";
   if (slug.startsWith("wta-")) return "WOMENS_TENNIS";
   if (sportsSlugKind(slug) === "soccer") return "SOCCER";
   if (slug.includes("spacex-ipo-closing-market-cap-above")) return "FINANCE";

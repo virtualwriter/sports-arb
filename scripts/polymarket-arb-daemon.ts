@@ -25,6 +25,7 @@ import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 import { OrderType, Side, type TickSize } from "@polymarket/clob-client-v2";
 import { VpnGuard } from "./lib/VpnGuard.js";
+import { adapterForCandidate } from "./lib/sports-registry.js";
 import { evaluateSportsStrategy } from "./lib/sports-strategy.js";
 import {
   type Candidate,
@@ -792,7 +793,11 @@ function registerToken(tokenId: string, key: string) {
 }
 
 function isSportsGameSlug(slug: string): boolean {
-  return /^(?:(?:nba|mlb|atp|wta)-[a-z0-9]+-[a-z0-9]+|(?:fifwc|mls)-[a-z0-9]+-[a-z0-9]+)-\d{4}-\d{2}-\d{2}(?:-more-markets)?$/.test(slug);
+  // Singles tennis / NBA / MLB:   <league>-<a>-<b>-YYYY-MM-DD
+  // Tennis doubles:               (atp|wta)-doubles-<a>-<b>-YYYY-MM-DD
+  // ITF singles:                  itf-<a>-<b>-YYYY-MM-DD
+  // Soccer:                       (fifwc|mls)-<a>-<b>-YYYY-MM-DD(-more-markets)?
+  return /^(?:(?:nba|mlb|atp|wta|itf)-[a-z0-9]+-[a-z0-9]+|(?:atp|wta)-doubles-[a-z0-9]+-[a-z0-9]+|(?:fifwc|mls)-[a-z0-9]+-[a-z0-9]+)-\d{4}-\d{2}-\d{2}(?:-more-markets)?$/.test(slug);
 }
 
 function sportsGameDate(slug: string): string | null {
@@ -871,7 +876,7 @@ function sportsGameDiscoveryEnabled(kind: SportsGameKind): boolean {
 function sportsGameDiscoveryTags(kind: SportsGameKind): string[] {
   if (kind === "nba") return ["nba", "basketball"];
   if (kind === "mlb") return ["mlb", "baseball"];
-  if (kind === "tennis") return ["tennis", "atp", "wta"];
+  if (kind === "tennis") return ["tennis", "atp", "wta", "itf"];
   return ["soccer"];
 }
 
@@ -882,7 +887,7 @@ function sportsGameDiscoveryLimit(kind: SportsGameKind): number {
 function matchesSportsGameKind(slug: string, kind: SportsGameKind): boolean {
   if (kind === "nba") return slug.startsWith("nba-");
   if (kind === "mlb") return slug.startsWith("mlb-");
-  if (kind === "tennis") return slug.startsWith("atp-") || slug.startsWith("wta-") || slug.includes("tennis");
+  if (kind === "tennis") return slug.startsWith("atp-") || slug.startsWith("wta-") || slug.startsWith("itf-") || slug.includes("tennis");
   return slug.startsWith("fifwc-") || slug.startsWith("mls-");
 }
 
@@ -987,14 +992,20 @@ async function refreshWatchlist(): Promise<void> {
   // Keep structurally-valid ladder packages even when they do NOT have a live
   // edge yet. The websocket daemon must subscribe before the arb appears; the
   // dynamic gate (edge/spread/top-of-book size) is re-checked on every delta.
-  // Static deal-breakers (wrong asset, expiry/resolution mismatch, low market
-  // liquidity) stay filtered out.
-  const watch = candidates.filter((c) =>
-    isTrueMiddleCandidate(c)
-    && !c.rejectionReasons.some((reason) =>
-      ["asset_not_allowlisted", "ladder_mismatch", "expiry_mismatch", "resolution_mismatch", "low_liquidity"].includes(reason)
-    )
-  );
+  // Static deal-breakers (wrong asset, expiry/resolution mismatch) always
+  // filter out. The liquidity gate ONLY filters live-tradable adapters; for
+  // shadow-only sports (tennis, ITF, doubles, etc.) we want every ladder in
+  // the watchlist so shadow capture can build a dataset on thin markets too.
+  const watch = candidates.filter((c) => {
+    if (!isTrueMiddleCandidate(c)) return false;
+    const blockers = c.rejectionReasons;
+    if (blockers.some((reason) => ["asset_not_allowlisted", "ladder_mismatch", "expiry_mismatch", "resolution_mismatch"].includes(reason))) return false;
+    if (blockers.includes("low_liquidity")) {
+      const adapter = adapterForCandidate(c);
+      if (adapter?.mode === "live_enabled") return false;
+    }
+    return true;
+  });
   const watchAssetCounts = watch.reduce<Record<string, number>>((counts, candidate) => {
     counts[candidate.asset] = (counts[candidate.asset] ?? 0) + 1;
     return counts;
