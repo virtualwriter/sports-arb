@@ -2293,7 +2293,8 @@ async function tryExecuteInner(pkg: WatchPackage, legs: LiveLegs): Promise<void>
     emitCapture(capture, "sports_event_in_flight", "sports event already executing");
     return;
   }
-  const sportsBlock = sportsExecutionBlocked(pkg.base);
+  // Structural watchlist bases use emptyBook placeholders (ask=0); live prices live on wsCandidate.
+  const sportsBlock = sportsExecutionBlocked(wsCandidate);
   if (sportsBlock) {
     const now = Date.now();
     const last = lastSkipLogAt.get(pkg.key) ?? 0;
