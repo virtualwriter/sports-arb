@@ -26,7 +26,7 @@ import WebSocket from "ws";
 import { OrderType, Side, type TickSize } from "@polymarket/clob-client-v2";
 import { VpnGuard } from "./lib/VpnGuard.js";
 import { adapterForCandidate } from "./lib/sports-registry.js";
-import { evaluateSportsStrategy, soccerEffectiveMinNarrowYesBid } from "./lib/sports-strategy.js";
+import { evaluateSportsStrategy, soccerEffectiveMinNarrowYesBid, sportsEffectiveMaxEntryLegPrice } from "./lib/sports-strategy.js";
 import {
   type Candidate,
   type Direction,
@@ -1211,8 +1211,9 @@ function sportsExecutionBlocked(candidate: Candidate): string | null {
   const entryBlock = sportsEntryBlocked(candidate);
   if (entryBlock) return entryBlock;
   const maxEntryLeg = Math.max(candidate.broad.yesBook.ask, candidate.narrow.noBook.ask);
-  if (SPORTS_MAX_ENTRY_LEG_PRICE > 0 && maxEntryLeg + EPSILON >= SPORTS_MAX_ENTRY_LEG_PRICE) {
-    return `sports max entry leg price exceeded maxLeg=${maxEntryLeg.toFixed(4)} cap=${SPORTS_MAX_ENTRY_LEG_PRICE.toFixed(4)}`;
+  const effectiveLegCap = sportsEffectiveMaxEntryLegPrice(candidate, SPORTS_MAX_ENTRY_LEG_PRICE);
+  if (effectiveLegCap > 0 && maxEntryLeg + EPSILON >= effectiveLegCap) {
+    return `sports max entry leg price exceeded maxLeg=${maxEntryLeg.toFixed(4)} cap=${effectiveLegCap.toFixed(4)}`;
   }
   const narrowYesBid = Math.max(0, Math.min(1, 1 - candidate.narrow.noBook.ask));
   if (candidate.asset === "SOCCER") {
@@ -1374,7 +1375,20 @@ function juneBreakevenRangeBlock(candidate: Candidate): string | null {
 }
 
 function minEdgeFor(candidate: Candidate): number {
-  if (isSportsCandidate(candidate)) return SPORTS_MIN_EDGE;
+  if (isSportsCandidate(candidate)) {
+    // The strict high-cost soccer match-total bypass (sportsCostRangeBlock)
+    // allows cost up to 1.35, but SPORTS_MIN_EDGE=-0.25 caps cost at 1.25 in
+    // the dynamic edge gate, making the bypass dead-code. Loosen the edge
+    // threshold to match the cost-range ceiling for those shapes so 2.5/5.5
+    // and 3.5/6.5 candidates aren't silently filtered before the strategy
+    // log. Note: this does NOT loosen any execution gate; the cost-range
+    // bypass already requires marketType=match_total, full-game scope, width
+    // in {2,3}, and line family in SOCCER_MATCH_TOTAL_LINE_FAMILIES.
+    if (isStrictHighCostSoccerMatchTotal(candidate)) {
+      return Math.min(SPORTS_MIN_EDGE, -0.35);
+    }
+    return SPORTS_MIN_EDGE;
+  }
   // June expiries are allowed at breakeven (cost <= 1.0000) to fish for middles.
   // Sizing/outlay rules remain exactly the normal daemon rules.
   if (isJuneExpiryCandidate(candidate)) return Number(process.env.ARB_DAEMON_JUNE_EXPIRY_MIN_EDGE ?? 0);

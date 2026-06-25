@@ -93,6 +93,28 @@ export function soccerEffectiveMinNarrowYesBid(candidate: Candidate): number {
   return Math.min(SOCCER_MIN_NARROW_YES_BID, SOCCER_RELAXED_MIN_NARROW_YES_BID);
 }
 
+/**
+ * Shape-aware max-entry-leg cap. The narrow-leg cap and the narrow-yes-bid
+ * floor are mathematically the same constraint (narrow YES bid >= X iff
+ * narrow NO ask <= 1 - X). When we relax the floor for a shape, we MUST
+ * relax the leg cap by the matching amount or the two gates shadow each
+ * other and collapse back to the strict bid floor.
+ *
+ * Note: the bump also applies to the broad-leg side of the max(), but
+ * broad asks for the relaxed shapes (2.5-5.5, 3.5-6.5) are always
+ * $0.05-$0.29 -- nowhere near 0.98 -- so the spillover is harmless.
+ */
+export function sportsEffectiveMaxEntryLegPrice(candidate: Candidate, defaultCap: number): number {
+  if (candidate.asset !== "SOCCER") return defaultCap;
+  const minBid = soccerEffectiveMinNarrowYesBid(candidate);
+  if (minBid >= SOCCER_MIN_NARROW_YES_BID) return defaultCap;
+  // Bid floor uses `bid < floor` semantics so bid = floor exactly passes.
+  // The leg cap downstream uses `ask + EPS >= cap` semantics, which would
+  // reject ask = 1 - floor at the boundary. Add a 0.001 tick-aware buffer
+  // (Polymarket books trade in 1c ticks) so the two checks are symmetric.
+  return Math.max(defaultCap, 1 - minBid + 0.001);
+}
+
 function soccerLive(candidate: Candidate, marketType: MarketType): string[] {
   const failures: string[] = [];
   const cost = candidate.packageCost;
@@ -114,7 +136,8 @@ function soccerLive(candidate: Candidate, marketType: MarketType): string[] {
       failures.push("soccer_spread_line_family_not_historical_winner");
     }
   }
-  if (SPORTS_MAX_ENTRY_LEG_PRICE > 0 && maxEntryLeg(candidate) >= SPORTS_MAX_ENTRY_LEG_PRICE) {
+  const soccerLegCap = sportsEffectiveMaxEntryLegPrice(candidate, SPORTS_MAX_ENTRY_LEG_PRICE);
+  if (soccerLegCap > 0 && maxEntryLeg(candidate) >= soccerLegCap) {
     failures.push("soccer_max_entry_leg_price_exceeded");
   }
   const minNarrowYesBid = soccerEffectiveMinNarrowYesBid(candidate);
