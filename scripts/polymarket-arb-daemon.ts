@@ -1391,9 +1391,27 @@ function costInRange(cost: number, range: CostRange): boolean {
   return aboveMin && belowMax;
 }
 
+function isStrictHighCostSoccerMatchTotal(candidate: Candidate): boolean {
+  if (candidate.asset !== "SOCCER" || !costInRange(candidate.packageCost, { label: "1.25-1.35", min: 1.25, max: 1.35, includeMin: true, includeMax: true })) {
+    return false;
+  }
+  const decision = evaluateSportsStrategy(candidate);
+  const shapeFailures = decision.gateFailures.filter((failure) =>
+    failure === "soccer_market_shape_not_live"
+    || failure === "soccer_total_not_full_game"
+    || failure === "soccer_total_width_not_historical_winner"
+    || failure === "soccer_total_line_family_not_historical_winner"
+    || failure.startsWith("soccer_spread_")
+  );
+  return decision.adapter?.sportId === "SOCCER"
+    && decision.marketType === "match_total"
+    && shapeFailures.length === 0;
+}
+
 function sportsCostRangeBlock(candidate: Candidate): string | null {
   if (!isSportsCandidate(candidate) || SPORTS_ALLOWED_COST_RANGES.length === 0) return null;
   if (SPORTS_ALLOWED_COST_RANGES.some((range) => costInRange(candidate.packageCost, range))) return null;
+  if (isStrictHighCostSoccerMatchTotal(candidate)) return null;
   const allowed = SPORTS_ALLOWED_COST_RANGES.map((range) => range.label).join("|");
   return `sports_cost_range cost=${candidate.packageCost.toFixed(4)} allowed=${allowed}`;
 }

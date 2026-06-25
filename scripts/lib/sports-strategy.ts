@@ -75,7 +75,7 @@ function soccerLive(candidate: Candidate, marketType: MarketType): string[] {
   const family = normalizeLineFamily(candidate);
   const width = middleWidth(candidate);
   const narrowYesBid = impliedNarrowYesBid(candidate);
-  const allowedCost = within(cost, 1.05, 1.22) || (within(cost, 1.25, 1.35) && (marketType === "match_total" || marketType === "spread"));
+  const allowedCost = within(cost, 1.05, 1.22) || (within(cost, 1.25, 1.35) && marketType === "match_total");
   if (!allowedCost && cost >= 1) failures.push("soccer_cost_bucket_not_live");
   if (!(marketType === "match_total" || marketType === "spread")) failures.push("soccer_market_shape_not_live");
   if (marketType === "match_total") {
