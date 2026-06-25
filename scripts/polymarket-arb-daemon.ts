@@ -26,7 +26,7 @@ import WebSocket from "ws";
 import { OrderType, Side, type TickSize } from "@polymarket/clob-client-v2";
 import { VpnGuard } from "./lib/VpnGuard.js";
 import { adapterForCandidate } from "./lib/sports-registry.js";
-import { evaluateSportsStrategy } from "./lib/sports-strategy.js";
+import { evaluateSportsStrategy, soccerEffectiveMinNarrowYesBid } from "./lib/sports-strategy.js";
 import {
   type Candidate,
   type Direction,
@@ -172,7 +172,9 @@ const SPORTS_MIN_AVAILABLE_SHARES = Number(process.env.ARB_DAEMON_SPORTS_MIN_AVA
 const SPORTS_MAX_SPREAD = Number(process.env.ARB_DAEMON_SPORTS_MAX_SPREAD ?? 0.04);
 const SPORTS_MAX_PAIRED_SHARES = Number(process.env.ARB_DAEMON_SPORTS_MAX_PAIRED_SHARES ?? 0);
 const SPORTS_MAX_ENTRY_LEG_PRICE = Number(process.env.ARB_DAEMON_SPORTS_MAX_ENTRY_LEG_PRICE ?? 0.98);
-const SOCCER_MIN_NARROW_YES_BID = Number(process.env.ARB_DAEMON_SOCCER_MIN_NARROW_YES_BID ?? 0.02);
+// SOCCER_MIN_NARROW_YES_BID is now shape-aware; resolved per-candidate via
+// soccerEffectiveMinNarrowYesBid() so the strategy gate and execution gate
+// always agree on the floor.
 const SOCCER_MAX_NARROW_YES_BID = Number(process.env.ARB_DAEMON_SOCCER_MAX_NARROW_YES_BID ?? 0.10);
 const MLB_MIN_NARROW_YES_BID = Number(process.env.ARB_DAEMON_MLB_MIN_NARROW_YES_BID ?? 0.30);
 const SPORTS_MAX_EVENT_USD = Number(process.env.ARB_DAEMON_SPORTS_MAX_EVENT_USD ?? 50);
@@ -1214,8 +1216,9 @@ function sportsExecutionBlocked(candidate: Candidate): string | null {
   }
   const narrowYesBid = Math.max(0, Math.min(1, 1 - candidate.narrow.noBook.ask));
   if (candidate.asset === "SOCCER") {
-    if (SOCCER_MIN_NARROW_YES_BID > 0 && narrowYesBid + EPSILON < SOCCER_MIN_NARROW_YES_BID) {
-      return `soccer narrow yes bid below live band bid=${narrowYesBid.toFixed(4)} min=${SOCCER_MIN_NARROW_YES_BID.toFixed(4)}`;
+    const soccerMinNarrowYesBid = soccerEffectiveMinNarrowYesBid(candidate);
+    if (soccerMinNarrowYesBid > 0 && narrowYesBid + EPSILON < soccerMinNarrowYesBid) {
+      return `soccer narrow yes bid below live band bid=${narrowYesBid.toFixed(4)} min=${soccerMinNarrowYesBid.toFixed(4)}`;
     }
     if (SOCCER_MAX_NARROW_YES_BID > 0 && narrowYesBid - EPSILON > SOCCER_MAX_NARROW_YES_BID) {
       return `soccer narrow yes bid above live band bid=${narrowYesBid.toFixed(4)} max=${SOCCER_MAX_NARROW_YES_BID.toFixed(4)}`;

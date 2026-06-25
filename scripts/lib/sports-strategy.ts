@@ -44,6 +44,14 @@ function middleWidth(candidate: Candidate): number {
 
 const SPORTS_MAX_ENTRY_LEG_PRICE = Number(process.env.ARB_DAEMON_SPORTS_MAX_ENTRY_LEG_PRICE ?? 0.98);
 const SOCCER_MIN_NARROW_YES_BID = Number(process.env.ARB_DAEMON_SOCCER_MIN_NARROW_YES_BID ?? 0.02);
+// Shape-aware relax: per per-line-family audit (n=8-24 per shape), narrow legs at
+// 5.5+ goals on match totals are systematically sold cheap (2.5/5.5 historical
+// 33.3% middle hit vs 26.6% market-implied at our last trade; 3.5/6.5 deep-blocked
+// subset +3.4% EV). Other shapes (spreads, halftime totals, 3.5/5.5) showed the
+// 0.02 floor was correctly filtering zero-hit traps, so they keep the strict bid.
+const SOCCER_RELAXED_MIN_NARROW_YES_BID = Number(
+  process.env.ARB_DAEMON_SOCCER_RELAXED_MIN_NARROW_YES_BID ?? 0.015,
+);
 const SOCCER_MAX_NARROW_YES_BID = Number(process.env.ARB_DAEMON_SOCCER_MAX_NARROW_YES_BID ?? 0.10);
 const MLB_MIN_NARROW_YES_BID = Number(process.env.ARB_DAEMON_MLB_MIN_NARROW_YES_BID ?? 0.30);
 
@@ -56,6 +64,9 @@ function impliedNarrowYesBid(candidate: Candidate): number {
 }
 
 const SOCCER_MATCH_TOTAL_LINE_FAMILIES = new Set(["2.5-4.5", "2.5-5.5", "3.5-5.5", "3.5-6.5"]);
+// Subset of allowed match-total families that may use the relaxed narrow-bid floor.
+// Picked deliberately from audit evidence; do NOT widen without a fresh pull.
+const SOCCER_MATCH_TOTAL_RELAXED_NYB_FAMILIES = new Set(["2.5-5.5", "3.5-6.5"]);
 const SOCCER_SPREAD_BROAD_MIN = 1.5;
 const SOCCER_SPREAD_BROAD_MAX = 3.5;
 
@@ -67,6 +78,19 @@ function isFullGameMatchTotal(candidate: Candidate): boolean {
 function isFullGameSpread(candidate: Candidate): boolean {
   return candidate.broad.ladderKey.includes(":spread:full-game")
     && candidate.narrow.ladderKey.includes(":spread:full-game");
+}
+
+/**
+ * Shape-aware soccer narrow-yes-bid floor. Returns the relaxed (looser) floor
+ * only for full-game match-total families with empirical evidence that the
+ * narrow leg is systematically sold cheap. Everything else (spreads, halftime
+ * totals, narrow shapes 1.5/2.5, 3.5/5.5, etc.) keeps the strict default.
+ */
+export function soccerEffectiveMinNarrowYesBid(candidate: Candidate): number {
+  if (!isFullGameMatchTotal(candidate)) return SOCCER_MIN_NARROW_YES_BID;
+  const family = normalizeLineFamily(candidate);
+  if (!SOCCER_MATCH_TOTAL_RELAXED_NYB_FAMILIES.has(family)) return SOCCER_MIN_NARROW_YES_BID;
+  return Math.min(SOCCER_MIN_NARROW_YES_BID, SOCCER_RELAXED_MIN_NARROW_YES_BID);
 }
 
 function soccerLive(candidate: Candidate, marketType: MarketType): string[] {
@@ -93,7 +117,8 @@ function soccerLive(candidate: Candidate, marketType: MarketType): string[] {
   if (SPORTS_MAX_ENTRY_LEG_PRICE > 0 && maxEntryLeg(candidate) >= SPORTS_MAX_ENTRY_LEG_PRICE) {
     failures.push("soccer_max_entry_leg_price_exceeded");
   }
-  if (SOCCER_MIN_NARROW_YES_BID > 0 && narrowYesBid < SOCCER_MIN_NARROW_YES_BID) {
+  const minNarrowYesBid = soccerEffectiveMinNarrowYesBid(candidate);
+  if (minNarrowYesBid > 0 && narrowYesBid < minNarrowYesBid) {
     failures.push("soccer_narrow_yes_bid_too_low");
   }
   if (SOCCER_MAX_NARROW_YES_BID > 0 && narrowYesBid > SOCCER_MAX_NARROW_YES_BID) {
