@@ -63,7 +63,12 @@ function impliedNarrowYesBid(candidate: Candidate): number {
   return Math.max(0, Math.min(1, 1 - candidate.narrow.noBook.ask));
 }
 
-const SOCCER_MATCH_TOTAL_LINE_FAMILIES = new Set(["2.5-4.5", "2.5-5.5", "3.5-5.5", "3.5-6.5"]);
+// `2.5-6.5` is a width-4 match-total middle (goals in {3,4,5,6}). Doc evidence:
+// 4-goal middles +17.9% ROI (n=34) at avg cost $1.17, and the `2.5-6.5` family
+// itself +13.7% ROI (n=20). Live scanning shows costs $1.11-$1.25 with narrow
+// NO well below 0.98, so the strict-NYB floor and the 0.98 leg cap apply normally.
+const SOCCER_MATCH_TOTAL_LINE_FAMILIES = new Set(["2.5-4.5", "2.5-5.5", "2.5-6.5", "3.5-5.5", "3.5-6.5"]);
+const SOCCER_MATCH_TOTAL_WIDTH_ALLOW = new Set([2, 3, 4]);
 // Subset of allowed match-total families that may use the relaxed narrow-bid floor.
 // Picked deliberately from audit evidence; do NOT widen without a fresh pull.
 const SOCCER_MATCH_TOTAL_RELAXED_NYB_FAMILIES = new Set(["2.5-5.5", "3.5-6.5"]);
@@ -131,7 +136,7 @@ function soccerLive(candidate: Candidate, marketType: MarketType): string[] {
   if (!(marketType === "match_total" || marketType === "spread")) failures.push("soccer_market_shape_not_live");
   if (marketType === "match_total") {
     if (!isFullGameMatchTotal(candidate)) failures.push("soccer_total_not_full_game");
-    if (!(width === 2 || width === 3)) failures.push("soccer_total_width_not_historical_winner");
+    if (!SOCCER_MATCH_TOTAL_WIDTH_ALLOW.has(width)) failures.push("soccer_total_width_not_historical_winner");
     if (!SOCCER_MATCH_TOTAL_LINE_FAMILIES.has(family)) failures.push("soccer_total_line_family_not_historical_winner");
   }
   if (marketType === "spread") {

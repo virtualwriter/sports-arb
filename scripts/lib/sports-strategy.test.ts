@@ -145,6 +145,48 @@ describe("sports strategy", () => {
     expect(decision.middleWidth).toBe(3);
   });
 
+  it("allows the 2.5-6.5 width-4 soccer match total family", () => {
+    const broad = quote({
+      eventSlug: "fifwc-che-can-2026-06-24-more-markets",
+      ladderKey: "sports:soccer:fifwc-che-can-2026-06-24-more-markets:total:full-game",
+      question: "Switzerland vs. Canada: O/U 2.5",
+      strike: 2.5,
+      yesBook: { tokenId: "yes-broad", bid: 0.3, bidSize: 20, ask: 0.25, askSize: 20, spread: 0.01, minOrderSize: 1 },
+    });
+    const narrow = quote({
+      eventSlug: "fifwc-che-can-2026-06-24-more-markets",
+      ladderKey: "sports:soccer:fifwc-che-can-2026-06-24-more-markets:total:full-game",
+      question: "Switzerland vs. Canada: O/U 6.5",
+      strike: 6.5,
+      noTokenId: "no-narrow",
+      noBook: { tokenId: "no-narrow", bid: 0.9, bidSize: 20, ask: 0.93, askSize: 20, spread: 0.01, minOrderSize: 1 },
+    });
+    const decision = evaluateSportsStrategy(soccerCandidate({ broad, narrow, packageCost: 1.18 }));
+    expect(decision.liveEligible).toBe(true);
+    expect(decision.lineFamily).toBe("2.5-6.5");
+    expect(decision.middleWidth).toBe(4);
+  });
+
+  it("still blocks unsupported soccer match total widths (width 5)", () => {
+    const broad = quote({
+      eventSlug: "fifwc-che-can-2026-06-24-more-markets",
+      ladderKey: "sports:soccer:fifwc-che-can-2026-06-24-more-markets:total:full-game",
+      question: "Switzerland vs. Canada: O/U 2.5",
+      strike: 2.5,
+      yesBook: { tokenId: "yes-broad", bid: 0.3, bidSize: 20, ask: 0.25, askSize: 20, spread: 0.01, minOrderSize: 1 },
+    });
+    const narrow = quote({
+      eventSlug: "fifwc-che-can-2026-06-24-more-markets",
+      ladderKey: "sports:soccer:fifwc-che-can-2026-06-24-more-markets:total:full-game",
+      question: "Switzerland vs. Canada: O/U 7.5",
+      strike: 7.5,
+      noTokenId: "no-narrow",
+      noBook: { tokenId: "no-narrow", bid: 0.9, bidSize: 20, ask: 0.93, askSize: 20, spread: 0.01, minOrderSize: 1 },
+    });
+    const decision = evaluateSportsStrategy(soccerCandidate({ broad, narrow, packageCost: 1.18 }));
+    expect(decision.gateFailures).toContain("soccer_total_width_not_historical_winner");
+  });
+
   it("allows strict soccer match totals in the selective high-cost bucket", () => {
     const decision = evaluateSportsStrategy(soccerCandidate({ packageCost: 1.31 }));
     expect(decision.liveEligible).toBe(true);
