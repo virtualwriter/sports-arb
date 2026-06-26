@@ -257,7 +257,17 @@ function reportRow(row: JsonRow, now: Date, event: GammaEvent | null | undefined
   if (!["MLB", "SOCCER", "NBA", "WNBA", "NFL", "NCAAF", "TENNIS", "WOMENS_TENNIS", "COLLEGE_BASEBALL"].includes(sport)) return null;
 
   const status = String(row.status ?? "unknown");
-  const orphan = /orphan|unwind/i.test(status) || /orphan|unwind|naked/i.test(String(row.failureReason ?? ""));
+  const failureReason = String(row.failureReason ?? "");
+  // Treat sub-dust naked residuals (e.g. naked_narrow_no=0.0155) as normal
+  // cheap-first completions, not orphans. The daemon itself uses
+  // SPORTS_ORPHAN_DUST_SHARES (default 0.01, governor sets to 1) and never
+  // quarantines below that threshold.
+  const ORPHAN_DUST_THRESHOLD = 1;
+  const nakedMatch = /naked_(?:broad_yes|narrow_no)=([0-9.]+)/i.exec(failureReason);
+  const nakedShares = nakedMatch ? Number(nakedMatch[1]) : 0;
+  const hasMaterialNaked = /naked/i.test(failureReason) && nakedShares >= ORPHAN_DUST_THRESHOLD;
+  const orphan =
+    /orphan|unwind/i.test(status) || /orphan|unwind/i.test(failureReason) || hasMaterialNaked;
   const shares = num(row.filledShares);
   const cost = num(row.actualCost);
   if (cost <= 0 || (shares <= 0 && !orphan)) return null;
