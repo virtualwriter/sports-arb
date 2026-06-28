@@ -131,7 +131,7 @@ const LADDER_DISCOVERY_TAGS = (process.env.ARB_DAEMON_LADDER_DISCOVERY_TAGS ?? "
 const TENNIS_EVENT_SLUGS = (process.env.ARB_DAEMON_TENNIS_EVENT_SLUGS ?? "")
   .split(",").map((slug) => slug.trim()).filter(Boolean);
 const SPORTS_DISCOVERY_LIMIT = Number(process.env.ARB_DAEMON_SPORTS_DISCOVERY_LIMIT ?? process.env.ARB_DAEMON_MLB_DISCOVERY_LIMIT ?? 500);
-const SOCCER_DISCOVERY_LIMIT = Number(process.env.ARB_DAEMON_SOCCER_DISCOVERY_LIMIT ?? 300);
+const SOCCER_DISCOVERY_LIMIT = Number(process.env.ARB_DAEMON_SOCCER_DISCOVERY_LIMIT ?? 600);
 const SPORTS_AUTO_DISCOVERY_DAYS = Number(process.env.ARB_DAEMON_SPORTS_AUTO_DISCOVERY_DAYS ?? 2);
 const KEEP_FAR_FUTURE_CONFIGURED_SPORTS = process.env.ARB_DAEMON_KEEP_FAR_FUTURE_CONFIGURED_SPORTS === "1";
 const DAEMON_MARKET_CONCURRENCY = Math.max(1, Number(process.env.ARB_DAEMON_MARKET_CONCURRENCY ?? 1));
@@ -879,7 +879,11 @@ function sportsGameDiscoveryTags(kind: SportsGameKind): string[] {
   if (kind === "nba") return ["nba", "basketball"];
   if (kind === "mlb") return ["mlb", "baseball"];
   if (kind === "tennis") return ["tennis", "atp", "wta", "itf"];
-  return ["soccer"];
+  // Polymarket buries fifwc-* events past offset 300 under the `soccer` tag,
+  // while the dedicated `fifa-world-cup` tag surfaces them on page 1. Include
+  // both so we discover FIFA tournament matches without bumping the soccer
+  // pagination limit absurdly high.
+  return ["soccer", "fifa-world-cup"];
 }
 
 function sportsGameDiscoveryLimit(kind: SportsGameKind): number {
