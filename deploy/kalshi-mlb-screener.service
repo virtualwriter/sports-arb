@@ -1,0 +1,36 @@
+[Unit]
+Description=Kalshi MLB shadow screener (read-only candidate discovery)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/sports-arb
+EnvironmentFile=/etc/sports-arb.env
+EnvironmentFile=-/etc/kalshi.env
+Environment=SPORTS_ARB_STATE_DIR=/var/lib/sports-arb
+Environment=SPORTS_ARB_DATA_DIR=/var/lib/sports-arb/data
+Environment=SPORTS_ARB_RUNTIME_DIR=/var/lib/sports-arb/runtime
+Environment=NODE_NO_WARNINGS=1
+Environment=KALSHI_MIN_REQUEST_SPACING_MS=70
+Environment=KALSHI_SCREENER_REFRESH_MS=120000
+Environment=KALSHI_SCREENER_ORDERBOOK_CONCURRENCY=2
+Environment=KALSHI_SCREENER_MAX_WIDTH=4
+ExecStart=/opt/sports-arb/node_modules/.bin/tsx /opt/sports-arb/scripts/kalshi-mlb-screener.ts
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+KillSignal=SIGTERM
+TimeoutStopSec=15
+User=sports-arb
+Group=sports-arb
+StateDirectory=sports-arb
+RuntimeDirectory=sports-arb
+NoNewPrivileges=true
+ReadOnlyPaths=/etc/kalshi
+
+[Install]
+WantedBy=multi-user.target
