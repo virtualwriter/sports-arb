@@ -12,16 +12,33 @@ config({ path: ".env" });
 
 const TELEGRAM_API = "https://api.telegram.org";
 
+async function postTelegram(token: string, chatId: string, payload: Record<string, unknown>): Promise<Response> {
+  return fetch(`${TELEGRAM_API}/bot${token}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, disable_web_page_preview: true, ...payload }),
+  });
+}
+
 async function sendMessage(text: string): Promise<void> {
   const token = process.env.SPORTS_ARB_TELEGRAM_BOT_TOKEN ?? process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.SPORTS_ARB_TELEGRAM_CHAT_ID ?? process.env.TELEGRAM_CHAT_ID;
   if (!token || !chatId) throw new Error("Missing SPORTS_ARB_TELEGRAM_BOT_TOKEN or SPORTS_ARB_TELEGRAM_CHAT_ID");
-  const response = await fetch(`${TELEGRAM_API}/bot${token}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text, parse_mode: "Markdown", disable_web_page_preview: true }),
-  });
-  if (!response.ok) throw new Error(`Telegram send failed ${response.status}: ${await response.text()}`);
+
+  // Try Markdown first so formatted reports still render with bold/code blocks.
+  // If Telegram rejects with a 400 parse error (unbalanced markdown entities in
+  // user-content like game titles or package strings), retry as plain text so
+  // the daily digest always lands.
+  const markdownResp = await postTelegram(token, chatId, { text, parse_mode: "Markdown" });
+  if (markdownResp.ok) return;
+  const body = await markdownResp.text();
+  const isParseError = markdownResp.status === 400 && /can'?t parse entities/i.test(body);
+  if (!isParseError) {
+    throw new Error(`Telegram send failed ${markdownResp.status}: ${body}`);
+  }
+  console.warn(`[telegram] markdown parse error (${body.slice(0, 120)}…); retrying as plain text`);
+  const plainResp = await postTelegram(token, chatId, { text });
+  if (!plainResp.ok) throw new Error(`Telegram plain-text send failed ${plainResp.status}: ${await plainResp.text()}`);
 }
 
 function recordOperatorAction(action: string): void {
