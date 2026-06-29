@@ -1,0 +1,19 @@
+[Unit]
+Description=Sports Arb LLM daily learning pass
+# Run after the websocket daemon is up so daemon-bridge can read a hot ledger.
+After=network-online.target sports-arb-daemon.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=sports-arb
+Group=sports-arb
+WorkingDirectory=/opt/sports-arb
+EnvironmentFile=/etc/sports-arb.env
+Environment=SPORTS_ARB_STATE_DIR=/var/lib/sports-arb
+Environment=SPORTS_ARB_DATA_DIR=/var/lib/sports-arb/data
+Environment=SPORTS_ARB_RUNTIME_DIR=/var/lib/sports-arb/runtime
+Environment=NODE_NO_WARNINGS=1
+ExecStart=/usr/bin/env npx tsx scripts/llm-sports-arb-learning.ts
+# A typical run is <2 min; cap at 10 to bound runaway API calls.
+TimeoutStartSec=600

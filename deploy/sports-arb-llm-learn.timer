@@ -1,0 +1,16 @@
+[Unit]
+Description=Daily Sports Arb LLM learning pass
+# Runs once per day; the sports daemon trades a slow surface (knockout WC games
+# settle ~daily and MLB once per day), so hourly cycles would mostly produce
+# duplicate analyses without new evidence.
+
+[Timer]
+# 04:00 UTC = midnight ET. After overnight MLB resolutions and before EU
+# afternoon WC matches, so the analysis sees a fresh batch of settled trades.
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+RandomizedDelaySec=5min
+Unit=sports-arb-llm-learn.service
+
+[Install]
+WantedBy=timers.target
