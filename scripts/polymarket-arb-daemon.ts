@@ -2959,7 +2959,27 @@ async function executeSportsCheapFirst(pkg: WatchPackage, c: Candidate, shares: 
   }
   Object.assign((record as any).latency, { reconcileMs: Date.now() - reconcileStartedMs });
 
-  const matched = roundShares(Math.min(broadFilled, narrowFilled));
+  let matched = roundShares(Math.min(broadFilled, narrowFilled));
+  // PHANTOM-FAK GUARD: When `matched === 0` and only one leg "filled" by the
+  // CLOB response, the on-chain unpaired balance is authoritative. Some FAK
+  // responses over-report shares that never actually settle on Polygon (the
+  // FAK was killed but the response still carries a non-zero makingAmount).
+  // When that happens we previously wrote a phantom `actualCost` and a
+  // phantom naked-orphan, ending up with a -$cost line in the PnL report even
+  // though the wallet has nothing to sell. If the chain says balance==0 we
+  // clamp the leg back to 0. We only do this when matched===0 so partial
+  // fills with a real overhang are not silently dropped.
+  if (matched === 0) {
+    if (broadFilled > SPORTS_ORPHAN_DUST_SHARES && broadBalance <= SPORTS_ORPHAN_DUST_SHARES) {
+      log(`SPORTS_PHANTOM_GUARD ${pkg.key}: broad response=${broadFilled} unpairedBalance=${broadBalance.toFixed(6)} -> clamping to 0`);
+      broadFilled = 0;
+    }
+    if (narrowFilled > SPORTS_ORPHAN_DUST_SHARES && narrowBalance <= SPORTS_ORPHAN_DUST_SHARES) {
+      log(`SPORTS_PHANTOM_GUARD ${pkg.key}: narrow response=${narrowFilled} unpairedBalance=${narrowBalance.toFixed(6)} -> clamping to 0`);
+      narrowFilled = 0;
+    }
+    matched = roundShares(Math.min(broadFilled, narrowFilled));
+  }
   const broadAvgPrice = averageBuyPrice(first.role === "broad_yes" ? firstResp : secondResp, c.broad.yesBook.ask);
   const narrowAvgPrice = averageBuyPrice(first.role === "narrow_no" ? firstResp : secondResp, c.narrow.noBook.ask);
   record.filledShares = matched;

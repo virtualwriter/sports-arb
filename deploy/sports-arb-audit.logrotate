@@ -1,0 +1,29 @@
+# /etc/logrotate.d/sports-arb-audit
+#
+# Sports-arb writes append-only JSONL audit streams that can grow without
+# bound. On 2026-06-29 the monotonic capture log hit 39 GB, filled the disk,
+# and killed the daemon for 10 hours. This config compresses and rotates
+# them daily (or whenever any file exceeds 1 GB) so that never happens
+# again.
+#
+# Install on the VPS:
+#   sudo cp deploy/sports-arb-audit.logrotate /etc/logrotate.d/sports-arb-audit
+#   sudo logrotate -d /etc/logrotate.d/sports-arb-audit  # dry-run check
+#
+# Uses copytruncate so the daemon doesn't need to re-open file handles.
+
+/var/lib/sports-arb/data/monotonic-capture-audit.jsonl
+/var/lib/sports-arb/data/monotonic-middle-audit.jsonl
+/var/lib/sports-arb/data/monotonic-candidate-snapshots.jsonl
+/var/lib/sports-arb/data/kalshi-middle-audit.jsonl
+{
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su sports-arb sports-arb
+    size 1G
+}
