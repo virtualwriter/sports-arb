@@ -438,6 +438,27 @@ interface ExecutionCaptureResult {
   orphanId?: string;
 }
 
+type ExecutionQuoteContext = {
+  wsCost: number;
+  freshCost: number;
+  preflightFetchMs?: number;
+};
+
+function attachExecutionQuote(
+  record: LivePackage,
+  quoteContext: ExecutionQuoteContext | undefined,
+  actualPairCost: number | null,
+): void {
+  if (!quoteContext) return;
+  record.executionQuote = {
+    wsCost: quoteContext.wsCost,
+    freshCost: quoteContext.freshCost,
+    actualPairCost,
+    preflightFetchMs: quoteContext.preflightFetchMs,
+    recordedAt: new Date().toISOString(),
+  };
+}
+
 interface CaptureContext {
   captureId: string;
   startedMs: number;
@@ -2608,7 +2629,14 @@ async function tryExecuteInner(pkg: WatchPackage, legs: LiveLegs): Promise<void>
   for (const tokenId of executionTokens) tokensInFlight.add(tokenId);
   submitTimestamps.push(Date.now());
   try {
-    const result = await executeLive(pkg, executionCandidate, freshSized.shares);
+    const quoteContext: ExecutionQuoteContext = {
+      wsCost: wsCandidate.packageCost,
+      freshCost: executionCandidate.packageCost,
+      preflightFetchMs: typeof capture?.preflight?.fetchMs === "number"
+        ? capture.preflight.fetchMs
+        : undefined,
+    };
+    const result = await executeLive(pkg, executionCandidate, freshSized.shares, quoteContext);
     if (capture) capture.execution = result;
     emitCapture(capture, "submitted_result", result.recordStatus, {
       freshReservedUsd,
@@ -2631,12 +2659,17 @@ async function tryExecuteInner(pkg: WatchPackage, legs: LiveLegs): Promise<void>
   }
 }
 
-async function executeLive(pkg: WatchPackage, c: Candidate, shares: number): Promise<ExecutionCaptureResult> {
+async function executeLive(
+  pkg: WatchPackage,
+  c: Candidate,
+  shares: number,
+  quoteContext?: ExecutionQuoteContext,
+): Promise<ExecutionCaptureResult> {
   if (!clob) throw new Error("CLOB client not initialized");
   const sportsBlock = sportsExecutionBlocked(c);
   if (sportsBlock) throw new Error(`blocked_sports_non_atomic_execution: ${sportsBlock}`);
   if (isSportsCandidate(c)) {
-    return executeSportsCheapFirst(pkg, c, shares);
+    return executeSportsCheapFirst(pkg, c, shares, quoteContext);
   }
   const client = clob.client;
   const record = packageRecord(c, reconcileAddress, shares, false);
@@ -2785,6 +2818,8 @@ async function executeLive(pkg: WatchPackage, c: Candidate, shares: number): Pro
         : `naked_${nakedRole}=${nakedShares} -> orphan (no matched fill)${errSuffix}`
       : `no_fill both FAK legs killed (arb gone); no position${errSuffix}`;
   }
+  const actualPairCost = matched > 0 ? broadAvgPrice + narrowAvgPrice : null;
+  attachExecutionQuote(record, quoteContext, actualPairCost);
   record.updatedAt = new Date().toISOString();
   persist(record, orders);
 
@@ -2850,7 +2885,12 @@ async function executeLive(pkg: WatchPackage, c: Candidate, shares: number): Pro
   };
 }
 
-async function executeSportsCheapFirst(pkg: WatchPackage, c: Candidate, shares: number): Promise<ExecutionCaptureResult> {
+async function executeSportsCheapFirst(
+  pkg: WatchPackage,
+  c: Candidate,
+  shares: number,
+  quoteContext?: ExecutionQuoteContext,
+): Promise<ExecutionCaptureResult> {
   if (!clob) throw new Error("CLOB client not initialized");
   const client = clob.client;
   const record = packageRecord(c, reconcileAddress, shares, false);
@@ -3005,6 +3045,8 @@ async function executeSportsCheapFirst(pkg: WatchPackage, c: Candidate, shares: 
       ? `sports_cheap_first_naked_${nakedRole}=${nakedShares} -> immediate_exit (no matched fill)${errSuffix}`
       : `sports_cheap_first_no_fill; no position${errSuffix}`;
   }
+  const actualPairCost = matched > 0 ? broadAvgPrice + narrowAvgPrice : null;
+  attachExecutionQuote(record, quoteContext, actualPairCost);
   record.updatedAt = new Date().toISOString();
   persist(record, orders);
 

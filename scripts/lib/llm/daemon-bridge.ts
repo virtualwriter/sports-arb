@@ -62,6 +62,13 @@ type DaemonRow = {
   realizedExitPnl?: number;
   exitProceeds?: number;
   soldReason?: string;
+  executionQuote?: {
+    wsCost?: number;
+    freshCost?: number;
+    actualPairCost?: number | null;
+    preflightFetchMs?: number;
+    recordedAt?: string;
+  };
 };
 
 type GammaMarket = {
@@ -81,6 +88,43 @@ const SPORTS_ASSETS = new Set<SportId>([
 function num(value: unknown, fallback = 0): number {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function roundSlippageCents(value: number): number {
+  return Math.round(value * 10) / 10;
+}
+
+export function computeExecutionSlippage(row: {
+  filledShares?: number;
+  actualCost?: number;
+  prices?: { packageCost?: number };
+  executionQuote?: DaemonRow["executionQuote"];
+}): {
+  fillSlippageCents: number | null;
+  preflightDriftCents: number | null;
+  fillSlippageSource: "execution_quote" | "ledger_inferred" | null;
+} {
+  const shares = num(row.filledShares);
+  const actualCost = num(row.actualCost);
+  const quoted = num(row.prices?.packageCost);
+  const eq = row.executionQuote;
+
+  let fillSlippageCents: number | null = null;
+  let fillSlippageSource: "execution_quote" | "ledger_inferred" | null = null;
+  if (eq?.actualPairCost != null && Number.isFinite(eq.freshCost)) {
+    fillSlippageCents = roundSlippageCents((eq.actualPairCost - eq.freshCost) * 100);
+    fillSlippageSource = "execution_quote";
+  } else if (shares > 0 && quoted > 0 && actualCost > 0) {
+    fillSlippageCents = roundSlippageCents(((actualCost / shares) - quoted) * 100);
+    fillSlippageSource = "ledger_inferred";
+  }
+
+  let preflightDriftCents: number | null = null;
+  if (eq?.wsCost != null && eq.freshCost != null && Number.isFinite(eq.wsCost) && Number.isFinite(eq.freshCost)) {
+    preflightDriftCents = roundSlippageCents((eq.freshCost - eq.wsCost) * 100);
+  }
+
+  return { fillSlippageCents, preflightDriftCents, fillSlippageSource };
 }
 
 function parseJsonArray(value: unknown): unknown[] {
@@ -270,6 +314,7 @@ function toSportsArbPackage(row: DaemonRow, event: GammaEvent | null | undefined
   if (cost <= 0 || (shares <= 0 && !isOrphan)) return null;
 
   const packageCost = num(row.prices?.packageCost, shares > 0 ? cost / shares : 0);
+  const slippage = computeExecutionSlippage(row);
   const marketType = classifyMarketType(row);
   const lineFamily = `${num(row.broadStrike)}-${num(row.narrowStrike)}`;
   const middleWidth = Math.abs(num(row.narrowStrike) - num(row.broadStrike));
@@ -312,6 +357,24 @@ function toSportsArbPackage(row: DaemonRow, event: GammaEvent | null | undefined
       availableShares: num(row.intendedShares),
       maxSpread: 0,
       minLiquidity: 0,
+      executionQuote: row.executionQuote || slippage.fillSlippageCents != null || slippage.preflightDriftCents != null
+        ? {
+            wsCost: num(row.executionQuote?.wsCost, packageCost),
+            freshCost: num(row.executionQuote?.freshCost, packageCost),
+            actualPairCost: row.executionQuote?.actualPairCost ?? (shares > 0 ? cost / shares : null),
+            preflightFetchMs: row.executionQuote?.preflightFetchMs,
+            fillSlippageCents: slippage.fillSlippageCents,
+            preflightDriftCents: slippage.preflightDriftCents,
+          }
+        : slippage.fillSlippageSource === "ledger_inferred"
+          ? {
+              wsCost: packageCost,
+              freshCost: packageCost,
+              actualPairCost: shares > 0 ? cost / shares : null,
+              fillSlippageCents: slippage.fillSlippageCents,
+              preflightDriftCents: null,
+            }
+          : undefined,
     },
     sizing: {
       targetUsd: num(row.intendedCost, packageCost * num(row.intendedShares)),

@@ -57,6 +57,12 @@ export type LiveBucketStats = {
   tier: Tier;
   enforcedLive: boolean;
   recommendation: Recommendation;
+  /** Avg fill slippage (actual − quoted/preflight) in cents per share. */
+  avgFillSlippageCents: number | null;
+  /** Avg REST preflight − WS drift in cents (only when executionQuote persisted). */
+  avgPreflightDriftCents: number | null;
+  slippageSampleCount: number;
+  preflightDriftSampleCount: number;
 };
 
 export type StrategyBucketsSnapshot = {
@@ -157,6 +163,10 @@ export function aggregateLiveBuckets(
     totalCost: number;
     totalPnl: number;
     roiSum: number;
+    fillSlippageSum: number;
+    fillSlippageCount: number;
+    preflightDriftSum: number;
+    preflightDriftCount: number;
     firstResolvedAt: string | null;
     lastResolvedAt: string | null;
   };
@@ -181,6 +191,10 @@ export function aggregateLiveBuckets(
       totalCost: 0,
       totalPnl: 0,
       roiSum: 0,
+      fillSlippageSum: 0,
+      fillSlippageCount: 0,
+      preflightDriftSum: 0,
+      preflightDriftCount: 0,
       firstResolvedAt: null,
       lastResolvedAt: null,
     };
@@ -195,6 +209,16 @@ export function aggregateLiveBuckets(
     acc.totalCost += cost;
     acc.totalPnl += pnl;
     acc.roiSum += roi;
+    const fillSlip = pkg.pricing.executionQuote?.fillSlippageCents;
+    if (fillSlip != null && Number.isFinite(fillSlip)) {
+      acc.fillSlippageSum += fillSlip;
+      acc.fillSlippageCount += 1;
+    }
+    const preflightDrift = pkg.pricing.executionQuote?.preflightDriftCents;
+    if (preflightDrift != null && Number.isFinite(preflightDrift)) {
+      acc.preflightDriftSum += preflightDrift;
+      acc.preflightDriftCount += 1;
+    }
     const at = pkg.resolution.resolvedAt ?? pkg.timestamps.updated ?? null;
     if (at) {
       if (!acc.firstResolvedAt || at < acc.firstResolvedAt) acc.firstResolvedAt = at;
@@ -218,6 +242,12 @@ export function aggregateLiveBuckets(
     const simpleRoi = acc.resolved > 0 ? acc.roiSum / acc.resolved : 0;
     const winRate = acc.resolved > 0 ? acc.wins / acc.resolved : null;
     const middleRate = acc.resolved > 0 ? acc.middles / acc.resolved : null;
+    const avgFillSlippageCents = acc.fillSlippageCount > 0
+      ? round2(acc.fillSlippageSum / acc.fillSlippageCount)
+      : null;
+    const avgPreflightDriftCents = acc.preflightDriftCount > 0
+      ? round2(acc.preflightDriftSum / acc.preflightDriftCount)
+      : null;
     const base = {
       sportId: acc.sportId,
       marketType: acc.marketType,
@@ -239,6 +269,10 @@ export function aggregateLiveBuckets(
       lastResolvedAt: acc.lastResolvedAt,
       tier,
       enforcedLive: enforced,
+      avgFillSlippageCents,
+      avgPreflightDriftCents,
+      slippageSampleCount: acc.fillSlippageCount,
+      preflightDriftSampleCount: acc.preflightDriftCount,
     };
     buckets.push({ ...base, recommendation: recommendationFor(base) });
   }

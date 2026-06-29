@@ -106,6 +106,15 @@ const ALLOWED_ASSETS = new Set((process.env.MONOTONIC_ARB_REAL_PM_ASSETS ?? "BTC
   .map((asset) => asset.trim().toUpperCase())
   .filter(Boolean));
 
+/** Price path at submit: WS snapshot → REST preflight → actual FAK fills. */
+export type ExecutionQuote = {
+  wsCost: number;
+  freshCost: number;
+  actualPairCost: number | null;
+  preflightFetchMs?: number;
+  recordedAt: string;
+};
+
 type LivePackage = {
   id: string;
   packageId: string;
@@ -131,6 +140,7 @@ type LivePackage = {
   latency?: Record<string, unknown>;
   tokenIds: { broadYes: string; narrowNo: string };
   prices: { broadYesAsk: number; narrowNoAsk: number; packageCost: number };
+  executionQuote?: ExecutionQuote;
   packageLegs: Array<{
     role: "broad_yes" | "narrow_no";
     instrumentType: "pm_yes" | "pm_no";

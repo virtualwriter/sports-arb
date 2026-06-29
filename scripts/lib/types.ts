@@ -97,6 +97,15 @@ export type SportsArbPackage = {
     availableShares: number;
     maxSpread: number;
     minLiquidity: number;
+    /** WS → preflight → fill price path when persisted by the daemon. */
+    executionQuote?: {
+      wsCost: number;
+      freshCost: number;
+      actualPairCost: number | null;
+      preflightFetchMs?: number;
+      fillSlippageCents: number | null;
+      preflightDriftCents: number | null;
+    };
   };
   sizing: {
     targetUsd: number;

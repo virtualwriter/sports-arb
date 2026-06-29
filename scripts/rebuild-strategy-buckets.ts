@@ -74,10 +74,22 @@ function formatRoi(roi: number): string {
   return `${sign}${roi.toFixed(2)}%`;
 }
 
+function formatSlippage(cents: number | null): string {
+  if (cents == null) return "—";
+  const sign = cents >= 0 ? "+" : "";
+  return `${sign}${cents.toFixed(1)}¢`;
+}
+
 function formatBucketLine(b: LiveBucketStats): string {
   const tag = b.enforcedLive ? "LIVE" : "shadow";
   const rec = b.recommendation === "hold" ? "" : ` **[${b.recommendation}]**`;
-  return `- \`${b.comparisonGroup}\` (${tag}, ${b.tier}, n=${b.resolved}, roi=${formatRoi(b.capitalWeightedRoiPct)}, middles=${b.middles}/${b.resolved})${rec}`;
+  const slip = b.slippageSampleCount > 0
+    ? `, fill=${formatSlippage(b.avgFillSlippageCents)}`
+    : "";
+  const drift = b.preflightDriftSampleCount > 0
+    ? `, preflight=${formatSlippage(b.avgPreflightDriftCents)}`
+    : "";
+  return `- \`${b.comparisonGroup}\` (${tag}, ${b.tier}, n=${b.resolved}, roi=${formatRoi(b.capitalWeightedRoiPct)}, middles=${b.middles}/${b.resolved}${slip}${drift})${rec}`;
 }
 
 function writeDiffMarkdown(
@@ -138,14 +150,32 @@ function writeDiffMarkdown(
   }
   lines.push("");
 
+  const slippageBuckets = current.buckets
+    .filter((b) => b.slippageSampleCount > 0)
+    .sort((a, b) => (b.avgFillSlippageCents ?? 0) - (a.avgFillSlippageCents ?? 0));
+  lines.push("## Execution slippage (fill vs quoted, preflight vs WS)");
+  lines.push("");
+  lines.push("_Fill slippage = actual pair cost − REST preflight quote (or inferred from ledger for older trades). Preflight drift = REST preflight − WS snapshot._");
+  lines.push("");
+  if (slippageBuckets.length === 0) {
+    lines.push("_No slippage data yet. New trades will persist ws/fresh/actual costs at submit._");
+  } else {
+    lines.push("| Bucket | Enforced | n (slip) | Avg fill slip | Avg preflight drift | Cap ROI |");
+    lines.push("| --- | --- | ---: | ---: | ---: | ---: |");
+    for (const b of slippageBuckets) {
+      lines.push(`| \`${b.comparisonGroup}\` | ${b.enforcedLive ? "live" : "shadow"} | ${b.slippageSampleCount} | ${formatSlippage(b.avgFillSlippageCents)} | ${formatSlippage(b.avgPreflightDriftCents)} | ${formatRoi(b.capitalWeightedRoiPct)} |`);
+    }
+  }
+  lines.push("");
+
   lines.push("## All buckets at-a-glance");
   lines.push("");
-  lines.push("| Bucket | Enforced | Tier | n | Cap ROI | Win rate | Middle rate | Recommendation |");
-  lines.push("| --- | --- | --- | ---: | ---: | ---: | ---: | --- |");
+  lines.push("| Bucket | Enforced | Tier | n | Cap ROI | Fill slip | Preflight | Win rate | Middle rate | Recommendation |");
+  lines.push("| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |");
   for (const b of current.buckets) {
     const wr = b.winRate == null ? "—" : `${(b.winRate * 100).toFixed(0)}%`;
     const mr = b.middleRate == null ? "—" : `${(b.middleRate * 100).toFixed(0)}%`;
-    lines.push(`| \`${b.comparisonGroup}\` | ${b.enforcedLive ? "live" : "shadow"} | ${b.tier} | ${b.resolved} | ${formatRoi(b.capitalWeightedRoiPct)} | ${wr} | ${mr} | ${b.recommendation} |`);
+    lines.push(`| \`${b.comparisonGroup}\` | ${b.enforcedLive ? "live" : "shadow"} | ${b.tier} | ${b.resolved} | ${formatRoi(b.capitalWeightedRoiPct)} | ${formatSlippage(b.avgFillSlippageCents)} | ${formatSlippage(b.avgPreflightDriftCents)} | ${wr} | ${mr} | ${b.recommendation} |`);
   }
   lines.push("");
 
