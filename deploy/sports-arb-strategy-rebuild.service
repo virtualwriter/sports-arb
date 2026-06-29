@@ -1,0 +1,19 @@
+[Unit]
+Description=Sports Arb nightly strategy-bucket rebuild
+# Runs ahead of the LLM learning pass so the daily journal sees fresh evidence.
+After=network-online.target sports-arb-daemon.service
+Wants=network-online.target
+Before=sports-arb-llm-learn.service
+
+[Service]
+Type=oneshot
+User=sports-arb
+Group=sports-arb
+WorkingDirectory=/opt/sports-arb
+EnvironmentFile=/etc/sports-arb.env
+Environment=SPORTS_ARB_STATE_DIR=/var/lib/sports-arb
+Environment=SPORTS_ARB_DATA_DIR=/var/lib/sports-arb/data
+Environment=SPORTS_ARB_RUNTIME_DIR=/var/lib/sports-arb/runtime
+Environment=NODE_NO_WARNINGS=1
+ExecStart=/usr/bin/env npx tsx scripts/rebuild-strategy-buckets.ts
+TimeoutStartSec=600

@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly strategy-bucket rebuild (precedes LLM learning pass at 04:00)
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=2min
+Unit=sports-arb-strategy-rebuild.service
+
+[Install]
+WantedBy=timers.target

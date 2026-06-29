@@ -1,19 +1,55 @@
 #!/usr/bin/env tsx
 import { appendFileSync } from "node:fs";
 import { config } from "dotenv";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { loadDaemonSportsArbPackages } from "./lib/llm/daemon-bridge.js";
 import { requestDeepSeek } from "./lib/llm/deepseek.js";
 import { summarizeEvidence, writeLlmJournal } from "./lib/llm/learning.js";
-import { PATHS, ensureParent, ensureStateDirs } from "./lib/paths.js";
+import { aggregateLiveBuckets, type StrategyBucketsSnapshot } from "./lib/llm/bucket-aggregator.js";
+import { loadBaselineBuckets } from "./lib/llm/baseline-evidence.js";
+import { PATHS, REPO_ROOT, ensureParent, ensureStateDirs } from "./lib/paths.js";
 import { readShadowPackages } from "./lib/shadow-ledger.js";
 import { readJson } from "./lib/storage.js";
+import { currentStrategyAllowlist } from "./lib/sports-strategy.js";
 import type { HealthSnapshot, SportsArbPackage } from "./lib/types.js";
 
 config({ path: "config.env" });
 config({ path: ".env" });
 
-function compactContext(live: SportsArbPackage[], shadows: SportsArbPackage[], health: HealthSnapshot): string {
-  const evidence = summarizeEvidence([...live, ...shadows]).slice(0, 20);
+function loadStrategySnapshot(live: SportsArbPackage[]): StrategyBucketsSnapshot {
+  const path = join(REPO_ROOT, "analysis", "strategy-buckets-live.json");
+  if (existsSync(path)) {
+    try {
+      return JSON.parse(readFileSync(path, "utf8")) as StrategyBucketsSnapshot;
+    } catch {
+      // Fall through to in-process rebuild.
+    }
+  }
+  return aggregateLiveBuckets(live, currentStrategyAllowlist(), loadBaselineBuckets());
+}
+
+function compactContext(
+  live: SportsArbPackage[],
+  shadows: SportsArbPackage[],
+  health: HealthSnapshot,
+  strategy: StrategyBucketsSnapshot,
+): string {
+  const evidence = summarizeEvidence([...live, ...shadows]).slice(0, 30);
+  // The full snapshot can be 5-20 KB. Trim each bucket to the fields the LLM
+  // needs for reasoning so the prompt stays tight.
+  const bucketsCompact = strategy.buckets.map((b) => ({
+    bucket: b.comparisonGroup,
+    enforcedLive: b.enforcedLive,
+    tier: b.tier,
+    n: b.resolved,
+    wins: b.wins,
+    middles: b.middles,
+    capRoi: b.capitalWeightedRoiPct,
+    winRate: b.winRate,
+    recommendation: b.recommendation,
+    lastResolvedAt: b.lastResolvedAt,
+  }));
   return JSON.stringify({
     generatedAt: new Date().toISOString(),
     health,
@@ -26,6 +62,15 @@ function compactContext(live: SportsArbPackage[], shadows: SportsArbPackage[], h
       resolved: shadows.filter((pkg) => pkg.resolution?.status === "resolved").length,
       sub1Open: shadows.filter((pkg) => pkg.pricing.packageCost < 1 && pkg.status === "shadow_open").length,
     },
+    // Frozen Jun 16-22 baseline. Same cost-bucket aggregation that originally
+    // produced the hardcoded allowlist in sports-strategy.ts.
+    frozenBaseline: strategy.baseline,
+    // What the daemon currently allows live.
+    currentAllowlist: strategy.allowlist,
+    // What our live ledger has actually paid out since.
+    liveBucketEvidence: bucketsCompact,
+    thresholds: strategy.thresholds,
+    // Legacy view (no tiering); kept for parity with prior journals.
     setupFamilyEvidence: evidence,
   });
 }
@@ -49,19 +94,33 @@ async function main() {
     killSwitchActive: false,
     notes: [],
   });
-  const context = compactContext(live, shadows, health);
+  const strategy = loadStrategySnapshot(live);
+  const context = compactContext(live, shadows, health, strategy);
   const result = await requestDeepSeek([
     {
       role: "system",
       content: [
         "You are the sports monotonic arbitrage learning analyst.",
-        "You may summarize evidence, flag risks, propose hypotheses, and suggest bounded risk parameter changes.",
+        "Three datasets are provided in the user message:",
+        "(1) frozenBaseline -- the Jun 16-22 backtest at cost-bucket granularity (n=4458 resolved). This is the reference window from which the current allowlist was hand-derived.",
+        "(2) currentAllowlist -- exactly what the daemon currently allows live (line families, cost ranges, widths, bid floors). Treat as the gate's source of truth.",
+        "(3) liveBucketEvidence -- per (sport:marketType:lineFamily:costBucket) stats from the daemon's resolved live ledger since Jun 23. Each entry has a tier (preliminary/actionable/confirmed) and a recommendation (insufficient_evidence/hold/promote_candidate/demote_candidate).",
+        "Your job each day: compare evidence vs the allowlist and the baseline.",
+        "Focus on actionable + confirmed tiers when proposing changes. Preliminary tier may be mentioned but should not drive recommendations.",
+        "You may summarize evidence, flag risks, propose hypotheses, and suggest bounded parameter changes (e.g. relax narrow_yes_bid floor for line family X by 0.005, or remove cost bucket Y from MLB game_total).",
         "You may not directly enter trades, promote a sport adapter to live, or unpause after a large orphan incident.",
-        "Use concise bullets grouped as: risks, evidence, hypotheses, suggested deterministic checks.",
+        "Output sections, in order: (1) risks, (2) baseline-vs-live deltas worth attention, (3) bucket recommendations (only buckets where tier >= actionable AND recommendation != hold), (4) suggested deterministic checks before any change ships. Concise bullets.",
       ].join(" "),
     },
     { role: "user", content: context },
   ]);
+  if (!result.text.trim()) {
+    // Empty response is almost always a transient provider hiccup -- the next
+    // scheduled run will pick it up. Don't pollute the journal with a header
+    // that has no body.
+    console.warn(`[llm] empty response from ${result.model}; skipping journal append`);
+    return;
+  }
   const journal = `\n\n## ${result.calledAt} (${result.model})\n\n${result.text}\n`;
   ensureParent(PATHS.learningJournal);
   appendFileSync(PATHS.learningJournal, journal);

@@ -204,6 +204,68 @@ function shadowPurpose(candidate: Candidate, gateFailures: string[]): ShadowPurp
   return undefined;
 }
 
+/**
+ * Snapshot of the hardcoded strategy gate. The LLM learning pass and the
+ * nightly strategy-bucket aggregator both read this so they can compare the
+ * currently-enforced allowlist against the freshest live evidence and the
+ * frozen baseline. Keep this function in lockstep with the const sets above
+ * (or, when we eventually drive the gate from a config file, this snapshot
+ * becomes the loader's return value).
+ */
+export type StrategyAllowlistSnapshot = {
+  generatedAt: string;
+  soccer: {
+    costRangeLive: { lo: number; hi: number };
+    costRangeMatchTotalExtended: { lo: number; hi: number };
+    matchTotalLineFamilies: string[];
+    matchTotalRelaxedNybFamilies: string[];
+    matchTotalWidthsAllowed: number[];
+    spreadBroadStrike: { lo: number; hi: number };
+    spreadWidthsAllowed: number[];
+    minNarrowYesBid: number;
+    relaxedMinNarrowYesBid: number;
+    maxNarrowYesBid: number;
+    maxEntryLegPrice: number;
+  };
+  mlb: {
+    gameTotalLineFamilies: Record<string, { lo: number; hi: number }>;
+    spreadCostRange: { lo: number; hi: number };
+    spreadWidthsAllowed: number[];
+    minNarrowYesBid: number;
+    maxEntryLegPrice: number;
+  };
+};
+
+export function currentStrategyAllowlist(): StrategyAllowlistSnapshot {
+  const mlbGameTotals: Record<string, { lo: number; hi: number }> = {};
+  for (const [family, range] of MLB_GAME_TOTAL_LIVE_COST_RANGES.entries()) {
+    mlbGameTotals[family] = { lo: range.lo, hi: range.hi };
+  }
+  return {
+    generatedAt: new Date().toISOString(),
+    soccer: {
+      costRangeLive: { lo: 1.05, hi: 1.22 },
+      costRangeMatchTotalExtended: { lo: 1.25, hi: 1.35 },
+      matchTotalLineFamilies: [...SOCCER_MATCH_TOTAL_LINE_FAMILIES],
+      matchTotalRelaxedNybFamilies: [...SOCCER_MATCH_TOTAL_RELAXED_NYB_FAMILIES],
+      matchTotalWidthsAllowed: [...SOCCER_MATCH_TOTAL_WIDTH_ALLOW],
+      spreadBroadStrike: { lo: SOCCER_SPREAD_BROAD_MIN, hi: SOCCER_SPREAD_BROAD_MAX },
+      spreadWidthsAllowed: [2, 3],
+      minNarrowYesBid: SOCCER_MIN_NARROW_YES_BID,
+      relaxedMinNarrowYesBid: SOCCER_RELAXED_MIN_NARROW_YES_BID,
+      maxNarrowYesBid: SOCCER_MAX_NARROW_YES_BID,
+      maxEntryLegPrice: SPORTS_MAX_ENTRY_LEG_PRICE,
+    },
+    mlb: {
+      gameTotalLineFamilies: mlbGameTotals,
+      spreadCostRange: { lo: 1.19, hi: 1.22 },
+      spreadWidthsAllowed: [1],
+      minNarrowYesBid: MLB_MIN_NARROW_YES_BID,
+      maxEntryLegPrice: SPORTS_MAX_ENTRY_LEG_PRICE,
+    },
+  };
+}
+
 export function evaluateSportsStrategy(candidate: Candidate): StrategyDecision {
   const adapter = adapterForCandidate(candidate);
   const marketType = adapter?.classifyMarket(candidate.broad) ?? "unknown";

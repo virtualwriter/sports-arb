@@ -12,5 +12,11 @@ config.env
 data/
 exports/
 
+# Outputs of nightly strategy-bucket rebuild. The static baseline CSV stays
+# tracked; the dynamic snapshot and dated diff reports are regenerated nightly.
+analysis/strategy-buckets-live.json
+analysis/strategy-buckets-history/
+analysis/strategy-changes-*.md
+
 *.log
 .DS_Store
