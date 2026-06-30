@@ -9,7 +9,14 @@ export type DeepSeekResult = {
 // Generic LLM client that prefers DeepSeek when DEEPSEEK_API_KEY is set,
 // otherwise falls back to Anthropic. The function name is retained for
 // backward compatibility with callers that pre-date the multi-provider split.
-export async function requestDeepSeek(messages: LlmMessage[], options: { maxTokens?: number; temperature?: number } = {}): Promise<DeepSeekResult> {
+export type LlmRequestOptions = {
+  maxTokens?: number;
+  temperature?: number;
+  /** When set, overrides LLM_MODEL / DEEPSEEK_MODEL for this call only. */
+  model?: string;
+};
+
+export async function requestDeepSeek(messages: LlmMessage[], options: LlmRequestOptions = {}): Promise<DeepSeekResult> {
   const deepseekKey = process.env.DEEPSEEK_API_KEY;
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
   if (deepseekKey) return callDeepSeek(deepseekKey, messages, options);
@@ -17,8 +24,8 @@ export async function requestDeepSeek(messages: LlmMessage[], options: { maxToke
   throw new Error("Missing LLM credentials: set DEEPSEEK_API_KEY or ANTHROPIC_API_KEY");
 }
 
-async function callDeepSeek(apiKey: string, messages: LlmMessage[], options: { maxTokens?: number; temperature?: number }): Promise<DeepSeekResult> {
-  const model = process.env.LLM_MODEL ?? process.env.DEEPSEEK_MODEL ?? "deepseek-chat";
+async function callDeepSeek(apiKey: string, messages: LlmMessage[], options: LlmRequestOptions): Promise<DeepSeekResult> {
+  const model = options.model ?? process.env.LLM_MODEL ?? process.env.DEEPSEEK_MODEL ?? "deepseek-chat";
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), Number(process.env.SPORTS_ARB_LLM_TIMEOUT_MS ?? 90_000));
   try {
@@ -42,8 +49,8 @@ async function callDeepSeek(apiKey: string, messages: LlmMessage[], options: { m
   }
 }
 
-async function callAnthropic(apiKey: string, messages: LlmMessage[], options: { maxTokens?: number; temperature?: number }): Promise<DeepSeekResult> {
-  const model = process.env.LLM_MODEL ?? process.env.ANTHROPIC_MODEL ?? "claude-3-5-sonnet-latest";
+async function callAnthropic(apiKey: string, messages: LlmMessage[], options: LlmRequestOptions): Promise<DeepSeekResult> {
+  const model = options.model ?? process.env.LLM_MODEL ?? process.env.ANTHROPIC_MODEL ?? "claude-3-5-sonnet-latest";
   // Anthropic separates a top-level system prompt from the user/assistant turn
   // sequence, so we coalesce all "system" messages into the system field.
   const systemParts: string[] = [];

@@ -1097,8 +1097,20 @@ function isStaleSubmittedNoFill(row: LivePackage): boolean {
   return Number.isFinite(updatedAt) && Date.now() - updatedAt > STALE_SUBMITTED_MS;
 }
 
+function isCheapFirstIntentMarker(failureReason: string | undefined): boolean {
+  return /^sports_cheap_first_intent\b/i.test(failureReason ?? "");
+}
+
+function isFlatClosedPackage(row: LivePackage): boolean {
+  if ((row as { status?: string }).status === "orphan_unwound") return true;
+  if (row.status !== "unwind_required") return false;
+  if ((row.actualCost ?? 0) > EPSILON || (row.filledShares ?? 0) > EPSILON) return false;
+  return !activeOrphans().some((o) => o.packageId === row.packageId && o.shares > SPORTS_ORPHAN_DUST_SHARES);
+}
+
 function isDaemonOpenPackage(row: LivePackage): boolean {
   if (isStaleSubmittedNoFill(row)) return false;
+  if (isFlatClosedPackage(row)) return false;
   if (["quoted", "leg1_submitted", "leg1_filled", "leg2_submitted"].includes(row.status)) return true;
   if (row.status === "package_complete") return !isCleanCompletedPackage(row);
   if (row.status !== "unwind_required") return false;
@@ -1108,10 +1120,11 @@ function isDaemonOpenPackage(row: LivePackage): boolean {
 }
 
 function isCleanCompletedPackage(row: LivePackage): boolean {
-  return row.status === "package_complete"
-    && !row.failureReason
-    && (row.actualCost ?? 0) > 0
-    && (row.filledShares ?? 0) > 0;
+  if (row.status !== "package_complete") return false;
+  if ((row.actualCost ?? 0) <= 0 || (row.filledShares ?? 0) <= 0) return false;
+  if (!row.failureReason) return true;
+  // `sports_cheap_first_intent` is durable execution metadata, not an error.
+  return isCheapFirstIntentMarker(row.failureReason);
 }
 
 function daemonOpenPackageCount(rows: LivePackage[]): number {
@@ -2225,6 +2238,51 @@ function appendQuarantine(entry: QuarantineEntry) {
   quarantinedPackages.add(entry.packageId);
   for (const tokenId of entry.tokenIds) quarantinedTokens.add(tokenId);
   log(`QUARANTINED package=${entry.packageId} tokens=${entry.tokenIds.length} reason=${entry.reason}`);
+}
+
+function reloadQuarantineSets(entries: QuarantineEntry[]) {
+  quarantinedPackages.clear();
+  quarantinedTokens.clear();
+  for (const entry of entries) {
+    if (entry.packageId) quarantinedPackages.add(entry.packageId);
+    for (const tokenId of Array.isArray(entry.tokenIds) ? entry.tokenIds : []) {
+      quarantinedTokens.add(tokenId);
+    }
+  }
+}
+
+function quarantineEntryIsStale(entry: QuarantineEntry, packageRows: LivePackage[]): boolean {
+  if (activeOrphans().some((o) => o.packageId === entry.packageId && o.shares > SPORTS_ORPHAN_DUST_SHARES)) {
+    return false;
+  }
+  const row = packageRows.find((r) => r.packageId === entry.packageId);
+  if (!row) return true;
+  if (isFlatClosedPackage(row)) return true;
+  if (isDaemonOpenPackage(row) || isCompletedPackagePosition(row)) return false;
+  return true;
+}
+
+function pruneStaleQuarantine() {
+  if (!existsSync(QUARANTINE_PATH)) return;
+  let entries: QuarantineEntry[];
+  try {
+    entries = JSON.parse(readFileSync(QUARANTINE_PATH, "utf8")) as QuarantineEntry[];
+  } catch (err: any) {
+    log(`quarantine prune skipped: ${err?.message ?? String(err)}`);
+    return;
+  }
+  if (!Array.isArray(entries) || entries.length === 0) return;
+  const packageRows = readJsonArray<LivePackage>(PACKAGES_PATH);
+  const kept: QuarantineEntry[] = [];
+  const removed: string[] = [];
+  for (const entry of entries) {
+    if (quarantineEntryIsStale(entry, packageRows)) removed.push(entry.packageId);
+    else kept.push(entry);
+  }
+  if (removed.length === 0) return;
+  writeFileSync(QUARANTINE_PATH, JSON.stringify(kept, null, 2) + "\n");
+  reloadQuarantineSets(kept);
+  log(`quarantine pruned stale=${removed.length} remaining=${kept.length} removed=${removed.join(", ")}`);
 }
 
 function quarantinePackage(pkg: WatchPackage, c: Candidate, reason: string, details: Record<string, unknown> = {}) {
@@ -4435,6 +4493,7 @@ async function main() {
   loadPausedEvents();
   loadQuarantine();
   loadOrphans();
+  pruneStaleQuarantine();
   await refreshSpotPrices();
   await recoverIncompleteSportsIntentsAtStartup();
   await reconcileOrphansAtStartup();

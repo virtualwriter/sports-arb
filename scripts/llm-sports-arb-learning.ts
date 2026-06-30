@@ -99,6 +99,10 @@ async function main() {
   });
   const strategy = loadStrategySnapshot(live);
   const context = compactContext(live, shadows, health, strategy);
+  // Nightly learn uses the non-reasoning chat model. Reasoning models (e.g.
+  // deepseek-v4-pro) burn the shared max_tokens budget on reasoning_content
+  // and often return an empty visible answer for our large strategy prompt.
+  const learnModel = process.env.SPORTS_ARB_LLM_LEARN_MODEL ?? "deepseek-chat";
   const result = await requestDeepSeek([
     {
       role: "system",
@@ -116,7 +120,7 @@ async function main() {
       ].join(" "),
     },
     { role: "user", content: context },
-  ]);
+  ], { model: learnModel });
   if (!result.text.trim()) {
     // Empty response is almost always a transient provider hiccup -- the next
     // scheduled run will pick it up. Don't pollute the journal with a header
