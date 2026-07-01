@@ -26,6 +26,11 @@ import WebSocket from "ws";
 import { OrderType, Side, type TickSize } from "@polymarket/clob-client-v2";
 import { VpnGuard } from "./lib/VpnGuard.js";
 import { adapterForCandidate } from "./lib/sports-registry.js";
+import {
+  pickCheapestSoccerPackagesByEvent,
+  shouldDeferSoccerPackage,
+  type ScoredWatchPackage,
+} from "./lib/soccer-event-package-priority.js";
 import { evaluateSportsStrategy, soccerEffectiveMinNarrowYesBid, sportsEffectiveMaxEntryLegPrice } from "./lib/sports-strategy.js";
 import {
   type Candidate,
@@ -180,6 +185,9 @@ const MLB_MIN_NARROW_YES_BID = Number(process.env.ARB_DAEMON_MLB_MIN_NARROW_YES_
 const SPORTS_MAX_EVENT_USD = Number(process.env.ARB_DAEMON_SPORTS_MAX_EVENT_USD ?? 50);
 const SPORTS_MAX_EVENT_PACKAGES = Math.max(1, Number(process.env.ARB_DAEMON_SPORTS_MAX_EVENT_PACKAGES ?? 3));
 const SPORTS_BLOCK_EVENT_OVERLAP = process.env.ARB_DAEMON_SPORTS_BLOCK_EVENT_OVERLAP !== "0";
+// When multiple live-eligible soccer packages exist on one event (e.g. 3.5/5.5
+// and 3.5/6.5), only submit the cheapest; equal cost prefers the narrower middle.
+const SOCCER_PREFER_CHEAPEST_EVENT_PACKAGE = process.env.ARB_DAEMON_SOCCER_PREFER_CHEAPEST_EVENT_PACKAGE !== "0";
 const SPORTS_PRICE_SLIPPAGE = Number(process.env.ARB_DAEMON_SPORTS_PRICE_SLIPPAGE ?? 0);
 // Hedge completion (knock out the ~290ms preflight reprice → naked-leg failure
 // mode). The cheap leg fills first; if the hedge ask ticks up past the stale
@@ -1616,6 +1624,35 @@ function sportsStrategyGate(candidate: Candidate): { decision: SportsStrategyGat
   return { decision, reason: `strict_strategy_gate_failed:${strategyFailures.join("+")}` };
 }
 
+function liveEligibleSoccerCandidate(pkg: WatchPackage): Candidate | null {
+  const legs = liveLegs(pkg);
+  if (!legs) return null;
+  const candidate = liveCandidate(pkg.base, legs);
+  if (candidate.asset !== "SOCCER") return null;
+  if (!passesDynamicGate(candidate)) return null;
+  if (sportsStrategyGate(candidate).reason) return null;
+  if (sportsExecutionBlocked(candidate)) return null;
+  return candidate;
+}
+
+function scoredLiveEligibleSoccerOnEvent(eventSlug: string): ScoredWatchPackage[] {
+  const out: ScoredWatchPackage[] = [];
+  for (const [key, pkg] of packages) {
+    if (pkg.base.eventSlug !== eventSlug) continue;
+    const candidate = liveEligibleSoccerCandidate(pkg);
+    if (!candidate) continue;
+    out.push({ key, candidate });
+  }
+  return out;
+}
+
+function soccerCheaperPackageBlock(pkg: WatchPackage, candidate: Candidate): string | null {
+  if (!SOCCER_PREFER_CHEAPEST_EVENT_PACKAGE || candidate.asset !== "SOCCER") return null;
+  const defer = shouldDeferSoccerPackage(candidate, pkg.key, scoredLiveEligibleSoccerOnEvent(candidate.eventSlug));
+  if (!defer) return null;
+  return `soccer_cheaper_event_package event=${candidate.eventSlug} cost=${candidate.packageCost.toFixed(4)} cheaper=${defer.cheaperKey}@${defer.cheaperCost.toFixed(4)}`;
+}
+
 function recordNearMiss(candidate: Candidate) {
   nearMissObservations += 1;
   const minShares = requiredDisplayedTouch(candidate);
@@ -2414,6 +2451,17 @@ async function tryExecuteInner(pkg: WatchPackage, legs: LiveLegs): Promise<void>
       log(`skip ${pkg.key}: ${sportsBlock}`);
     }
     emitCapture(capture, "sports_blocked", sportsBlock);
+    return;
+  }
+  const cheaperPackageBlock = soccerCheaperPackageBlock(pkg, wsCandidate);
+  if (cheaperPackageBlock) {
+    const now = Date.now();
+    const last = lastSkipLogAt.get(`${pkg.key}:cheaper_event`) ?? 0;
+    if (now - last >= SKIP_LOG_THROTTLE_MS) {
+      lastSkipLogAt.set(`${pkg.key}:cheaper_event`, now);
+      log(`skip ${pkg.key}: ${cheaperPackageBlock}`);
+    }
+    emitCapture(capture, "sports_blocked", cheaperPackageBlock);
     return;
   }
   if (perMinuteCapReached()) {
@@ -4168,6 +4216,7 @@ async function recoverIncompleteSportsIntentsAtStartup() {
 function evaluateToken(tokenId: string) {
   const keys = tokenToPackages.get(tokenId);
   if (!keys || keys.size === 0) return;
+  const ready: Array<{ pkg: WatchPackage; legs: LiveLegs; candidate: Candidate }> = [];
   for (const key of keys) {
     const pkg = packages.get(key);
     if (!pkg) continue;
@@ -4197,7 +4246,20 @@ function evaluateToken(tokenId: string) {
     if (isSportsCandidate(candidate)) {
       log(`sports_ws_gate_pass ${pkg.key}: wsCost=${candidate.packageCost.toFixed(4)} wsSpread=${candidate.maxSpread.toFixed(4)} edge=${(candidate.lockedEdge * 100).toFixed(2)}c size=${candidate.availableSize.toFixed(2)} strategy=${strategyGate.decision.comparisonGroup}`);
     }
-    void tryExecute(pkg, legs);
+    ready.push({ pkg, legs, candidate });
+  }
+  if (ready.length === 0) return;
+
+  const soccerReady = ready.filter((row) => row.candidate.asset === "SOCCER");
+  const otherReady = ready.filter((row) => row.candidate.asset !== "SOCCER");
+  const soccerExecuteKeys = SOCCER_PREFER_CHEAPEST_EVENT_PACKAGE
+    ? new Set(pickCheapestSoccerPackagesByEvent(soccerReady.map((row) => ({ key: row.pkg.key, candidate: row.candidate }))).map((row) => row.key))
+    : new Set(soccerReady.map((row) => row.pkg.key));
+
+  for (const row of otherReady) void tryExecute(row.pkg, row.legs);
+  for (const row of soccerReady) {
+    if (!soccerExecuteKeys.has(row.pkg.key)) continue;
+    void tryExecute(row.pkg, row.legs);
   }
 }
 
