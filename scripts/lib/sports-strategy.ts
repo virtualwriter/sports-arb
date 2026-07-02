@@ -72,6 +72,13 @@ const SOCCER_MATCH_TOTAL_WIDTH_ALLOW = new Set([2, 3, 4]);
 // Subset of allowed match-total families that may use the relaxed narrow-bid floor.
 // Picked deliberately from audit evidence; do NOT widen without a fresh pull.
 const SOCCER_MATCH_TOTAL_RELAXED_NYB_FAMILIES = new Set(["2.5-5.5", "3.5-6.5"]);
+// Live ledger Jun25+: 3.5/6.5 at ~$1.28 averaged 6.7% middle hit vs 45% backtest @
+// $1.17; 2.5/4.5 T3 fills @ ~$1.31 also underperformed. Cap each family to the
+// backtest-evidence cost ceiling so T3 band permission does not override shape ROI.
+const SOCCER_MATCH_TOTAL_FAMILY_MAX_LIVE_COST = new Map<string, number>([
+  ["3.5-6.5", Number(process.env.ARB_DAEMON_SOCCER_MAX_COST_3_5_6_5 ?? 1.20)],
+  ["2.5-4.5", Number(process.env.ARB_DAEMON_SOCCER_MAX_COST_2_5_4_5 ?? 1.22)],
+]);
 const SOCCER_SPREAD_BROAD_MIN = 1.5;
 const SOCCER_SPREAD_BROAD_MAX = 3.5;
 const MLB_GAME_TOTAL_LIVE_COST_RANGES = new Map<string, { lo: number; hi: number }>([
@@ -138,6 +145,10 @@ function soccerLive(candidate: Candidate, marketType: MarketType): string[] {
     if (!isFullGameMatchTotal(candidate)) failures.push("soccer_total_not_full_game");
     if (!SOCCER_MATCH_TOTAL_WIDTH_ALLOW.has(width)) failures.push("soccer_total_width_not_historical_winner");
     if (!SOCCER_MATCH_TOTAL_LINE_FAMILIES.has(family)) failures.push("soccer_total_line_family_not_historical_winner");
+    const familyMaxCost = SOCCER_MATCH_TOTAL_FAMILY_MAX_LIVE_COST.get(family);
+    if (familyMaxCost !== undefined && cost >= 1 && cost > familyMaxCost + 1e-9) {
+      failures.push("soccer_total_family_max_cost_exceeded");
+    }
   }
   if (marketType === "spread") {
     if (!isFullGameSpread(candidate)) failures.push("soccer_spread_not_full_game");
@@ -219,6 +230,7 @@ export type StrategyAllowlistSnapshot = {
     costRangeMatchTotalExtended: { lo: number; hi: number };
     matchTotalLineFamilies: string[];
     matchTotalRelaxedNybFamilies: string[];
+    matchTotalFamilyMaxLiveCost: Record<string, number>;
     matchTotalWidthsAllowed: number[];
     spreadBroadStrike: { lo: number; hi: number };
     spreadWidthsAllowed: number[];
@@ -248,6 +260,7 @@ export function currentStrategyAllowlist(): StrategyAllowlistSnapshot {
       costRangeMatchTotalExtended: { lo: 1.25, hi: 1.35 },
       matchTotalLineFamilies: [...SOCCER_MATCH_TOTAL_LINE_FAMILIES],
       matchTotalRelaxedNybFamilies: [...SOCCER_MATCH_TOTAL_RELAXED_NYB_FAMILIES],
+      matchTotalFamilyMaxLiveCost: Object.fromEntries(SOCCER_MATCH_TOTAL_FAMILY_MAX_LIVE_COST.entries()),
       matchTotalWidthsAllowed: [...SOCCER_MATCH_TOTAL_WIDTH_ALLOW],
       spreadBroadStrike: { lo: SOCCER_SPREAD_BROAD_MIN, hi: SOCCER_SPREAD_BROAD_MAX },
       spreadWidthsAllowed: [2, 3],
