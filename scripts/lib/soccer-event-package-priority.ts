@@ -7,6 +7,12 @@ export type ScoredWatchPackage = {
   candidate: Candidate;
 };
 
+export function soccerLineFamily(candidate: Candidate): string {
+  const lo = Math.min(candidate.broad.strike, candidate.narrow.strike);
+  const hi = Math.max(candidate.broad.strike, candidate.narrow.strike);
+  return `${lo}-${hi}`;
+}
+
 /** Lower cost wins; equal cost prefers a narrower middle (e.g. 3.5/5.5 over 3.5/6.5). */
 export function isBetterSoccerEventPackage(challenger: Candidate, incumbent: Candidate): boolean {
   if (challenger.packageCost + EPS < incumbent.packageCost) return true;
@@ -39,7 +45,11 @@ export function shouldDeferSoccerPackage(
   packageKey: string,
   items: ScoredWatchPackage[],
 ): { defer: boolean; cheaperKey: string; cheaperCost: number } | null {
-  const eligible = items.filter((item) => item.candidate.eventSlug === candidate.eventSlug);
+  const family = soccerLineFamily(candidate);
+  const eligible = items.filter((item) =>
+    item.candidate.eventSlug === candidate.eventSlug
+    && soccerLineFamily(item.candidate) === family
+  );
   if (eligible.length === 0) return null;
   const best = findCheapestSoccerEventPackage(eligible);
   if (!best || best.key === packageKey) return null;

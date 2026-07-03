@@ -209,6 +209,49 @@ describe("sports strategy", () => {
     expect(decision.lineFamily).toBe("3.5-6.5");
   });
 
+  it("blocks 3.5-5.5 above the live family max cost", () => {
+    const broad = quote({
+      eventSlug: "fifwc-arg-cvi-2026-07-03-more-markets",
+      ladderKey: "sports:soccer:fifwc-arg-cvi-2026-07-03-more-markets:total:full-game",
+      question: "Argentina vs. Cabo Verde: O/U 3.5",
+      strike: 3.5,
+      yesBook: { tokenId: "yes-broad", bid: 0.3, bidSize: 20, ask: 0.35, askSize: 20, spread: 0.01, minOrderSize: 1 },
+    });
+    const narrow = quote({
+      eventSlug: "fifwc-arg-cvi-2026-07-03-more-markets",
+      ladderKey: "sports:soccer:fifwc-arg-cvi-2026-07-03-more-markets:total:full-game",
+      question: "Argentina vs. Cabo Verde: O/U 5.5",
+      strike: 5.5,
+      noTokenId: "no-narrow",
+      noBook: { tokenId: "no-narrow", bid: 0.9, bidSize: 20, ask: 0.93, askSize: 20, spread: 0.01, minOrderSize: 1 },
+    });
+    const decision = evaluateSportsStrategy(soccerCandidate({ broad, narrow, packageCost: 1.27 }));
+    expect(decision.liveEligible).toBe(false);
+    expect(decision.gateFailures).toContain("soccer_total_family_max_cost_exceeded");
+  });
+
+  it("allows 3.5-5.5 at or below the live family max cost", () => {
+    const broad = quote({
+      eventSlug: "fifwc-arg-cvi-2026-07-03-more-markets",
+      ladderKey: "sports:soccer:fifwc-arg-cvi-2026-07-03-more-markets:total:full-game",
+      question: "Argentina vs. Cabo Verde: O/U 3.5",
+      strike: 3.5,
+      yesBook: { tokenId: "yes-broad", bid: 0.3, bidSize: 20, ask: 0.30, askSize: 20, spread: 0.01, minOrderSize: 1 },
+    });
+    const narrow = quote({
+      eventSlug: "fifwc-arg-cvi-2026-07-03-more-markets",
+      ladderKey: "sports:soccer:fifwc-arg-cvi-2026-07-03-more-markets:total:full-game",
+      question: "Argentina vs. Cabo Verde: O/U 5.5",
+      strike: 5.5,
+      noTokenId: "no-narrow",
+      noBook: { tokenId: "no-narrow", bid: 0.9, bidSize: 20, ask: 0.93, askSize: 20, spread: 0.01, minOrderSize: 1 },
+    });
+    const decision = evaluateSportsStrategy(soccerCandidate({ broad, narrow, packageCost: 1.18 }));
+    expect(decision.gateFailures).not.toContain("soccer_total_family_max_cost_exceeded");
+    expect(decision.liveEligible).toBe(true);
+    expect(decision.lineFamily).toBe("3.5-5.5");
+  });
+
   it("blocks 2.5-4.5 above the live family max cost in T3", () => {
     const broad = quote({
       eventSlug: "fifwc-mex-ecu-2026-06-30-more-markets",

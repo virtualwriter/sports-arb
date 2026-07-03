@@ -42,14 +42,22 @@ describe("soccer-event-package-priority", () => {
     expect(picked[0]?.key).toBe("cheap");
   });
 
-  it("defers a dearer package when a cheaper sibling exists", () => {
+  it("defers a dearer package when a cheaper same-family sibling exists", () => {
     const items = [
       { key: "cheap", candidate: soccerCandidate([3.5, 5.5], 1.21, "cheap") },
-      { key: "dear", candidate: soccerCandidate([3.5, 6.5], 1.23, "dear") },
+      { key: "dear", candidate: soccerCandidate([3.5, 5.5], 1.23, "dear") },
     ];
     const defer = shouldDeferSoccerPackage(items[1]!.candidate, "dear", items);
     expect(defer?.defer).toBe(true);
     expect(defer?.cheaperKey).toBe("cheap");
     expect(defer?.cheaperCost).toBe(1.21);
+  });
+
+  it("does not defer across different line families on the same event", () => {
+    const items = [
+      { key: "cheap", candidate: soccerCandidate([3.5, 5.5], 1.21, "cheap") },
+      { key: "dear", candidate: soccerCandidate([3.5, 6.5], 1.23, "dear") },
+    ];
+    expect(shouldDeferSoccerPackage(items[1]!.candidate, "dear", items)).toBeNull();
   });
 });

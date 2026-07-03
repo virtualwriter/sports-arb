@@ -76,6 +76,7 @@ const SOCCER_MATCH_TOTAL_RELAXED_NYB_FAMILIES = new Set(["2.5-5.5", "3.5-6.5"]);
 // $1.17; 2.5/4.5 T3 fills @ ~$1.31 also underperformed. Cap each family to the
 // backtest-evidence cost ceiling so T3 band permission does not override shape ROI.
 const SOCCER_MATCH_TOTAL_FAMILY_MAX_LIVE_COST = new Map<string, number>([
+  ["3.5-5.5", Number(process.env.ARB_DAEMON_SOCCER_MAX_COST_3_5_5 ?? 1.18)],
   ["3.5-6.5", Number(process.env.ARB_DAEMON_SOCCER_MAX_COST_3_5_6_5 ?? 1.20)],
   ["2.5-4.5", Number(process.env.ARB_DAEMON_SOCCER_MAX_COST_2_5_4_5 ?? 1.22)],
 ]);

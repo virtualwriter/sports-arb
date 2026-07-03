@@ -31,6 +31,7 @@ import {
   shouldDeferSoccerPackage,
   type ScoredWatchPackage,
 } from "./lib/soccer-event-package-priority.js";
+import { recordSoccerEventShapeCost, soccerBestSeenCostBlock } from "./lib/soccer-event-best-cost.js";
 import { appendShadowPackage } from "./lib/shadow-ledger.js";
 import { packageFromCandidate } from "./lib/package-factory.js";
 import { evaluateSportsStrategy, soccerEffectiveMinNarrowYesBid, sportsEffectiveMaxEntryLegPrice } from "./lib/sports-strategy.js";
@@ -192,6 +193,8 @@ const SPORTS_BLOCK_EVENT_OVERLAP = process.env.ARB_DAEMON_SPORTS_BLOCK_EVENT_OVE
 // When multiple live-eligible soccer packages exist on one event (e.g. 3.5/5.5
 // and 3.5/6.5), only submit the cheapest; equal cost prefers the narrower middle.
 const SOCCER_PREFER_CHEAPEST_EVENT_PACKAGE = process.env.ARB_DAEMON_SOCCER_PREFER_CHEAPEST_EVENT_PACKAGE !== "0";
+// One clean fill per soccer event; no re-entry at worse prices until operator resets ledger.
+const SOCCER_ONE_FILL_PER_EVENT = process.env.ARB_DAEMON_SOCCER_ONE_FILL_PER_EVENT !== "0";
 const SPORTS_PRICE_SLIPPAGE = Number(process.env.ARB_DAEMON_SPORTS_PRICE_SLIPPAGE ?? 0);
 // Hedge completion (knock out the ~290ms preflight reprice → naked-leg failure
 // mode). The cheap leg fills first; if the hedge ask ticks up past the stale
@@ -1168,6 +1171,16 @@ function sharesExecutionLeg(candidate: Candidate, row: LivePackage): boolean {
 
 function sportsEventExposureBlock(candidate: Candidate, rows: LivePackage[], nextCost = 0): string | null {
   if (!isSportsCandidate(candidate)) return null;
+  if (candidate.asset === "SOCCER" && SOCCER_ONE_FILL_PER_EVENT) {
+    const priorFill = rows.some((row) =>
+      row.eventSlug === candidate.eventSlug
+      && row.status === "package_complete"
+      && isCleanCompletedPackage(row)
+    );
+    if (priorFill) {
+      return `soccer_event_already_filled event=${candidate.eventSlug}`;
+    }
+  }
   const active = activeSportsEventPackages(rows, candidate.eventSlug);
   if (active.length >= SPORTS_MAX_EVENT_PACKAGES) {
     return `sports_event_package_cap event=${candidate.eventSlug} open=${active.length} cap=${SPORTS_MAX_EVENT_PACKAGES}`;
@@ -1278,6 +1291,8 @@ function sportsExecutionBlocked(candidate: Candidate): string | null {
   if (candidate.asset === "MLB" && MLB_MIN_NARROW_YES_BID > 0 && narrowYesBid + EPSILON < MLB_MIN_NARROW_YES_BID) {
     return `mlb narrow yes bid below live band bid=${narrowYesBid.toFixed(4)} min=${MLB_MIN_NARROW_YES_BID.toFixed(4)}`;
   }
+  const bestSeenBlock = soccerBestSeenCostBlock(candidate);
+  if (bestSeenBlock) return bestSeenBlock;
   if (ENABLE_NBA_BATCH_EXECUTION) return null;
   if (ALLOW_NBA_NON_ATOMIC_EXECUTION) return null;
   return "NBA requires batched/tightly-coupled two-leg execution; separate FAK legs can leave naked inventory";
@@ -1633,6 +1648,7 @@ function liveEligibleSoccerCandidate(pkg: WatchPackage): Candidate | null {
   if (!legs) return null;
   const candidate = liveCandidate(pkg.base, legs);
   if (candidate.asset !== "SOCCER") return null;
+  recordSoccerEventShapeCost(candidate);
   if (!passesDynamicGate(candidate)) return null;
   if (sportsStrategyGate(candidate).reason) return null;
   if (sportsExecutionBlocked(candidate)) return null;
@@ -4252,6 +4268,7 @@ function evaluateToken(tokenId: string) {
     const legs = liveLegs(pkg);
     if (!legs) continue;
     const candidate = liveCandidate(pkg.base, legs);
+    if (candidate.asset === "SOCCER") recordSoccerEventShapeCost(candidate);
     recordNearMiss(candidate);
     if (!passesDynamicGate(candidate)) {
       void emitShadowCapture(pkg, candidate);
