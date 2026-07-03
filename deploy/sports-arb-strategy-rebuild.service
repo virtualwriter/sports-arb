@@ -15,5 +15,5 @@ Environment=SPORTS_ARB_STATE_DIR=/var/lib/sports-arb
 Environment=SPORTS_ARB_DATA_DIR=/var/lib/sports-arb/data
 Environment=SPORTS_ARB_RUNTIME_DIR=/var/lib/sports-arb/runtime
 Environment=NODE_NO_WARNINGS=1
-ExecStart=/usr/bin/env npx tsx scripts/rebuild-strategy-buckets.ts
+ExecStart=/bin/bash -c 'python3 scripts/build_continuous_backtest.py --repo-root /opt/sports-arb --data-dir /var/lib/sports-arb/data && /usr/bin/env npx tsx scripts/rebuild-strategy-buckets.ts && python3 scripts/join_live_scan_backtest.py --repo-root /opt/sports-arb --data-dir /var/lib/sports-arb/data'
 TimeoutStartSec=600

@@ -31,6 +31,8 @@ import {
   shouldDeferSoccerPackage,
   type ScoredWatchPackage,
 } from "./lib/soccer-event-package-priority.js";
+import { appendShadowPackage } from "./lib/shadow-ledger.js";
+import { packageFromCandidate } from "./lib/package-factory.js";
 import { evaluateSportsStrategy, soccerEffectiveMinNarrowYesBid, sportsEffectiveMaxEntryLegPrice } from "./lib/sports-strategy.js";
 import {
   type Candidate,
@@ -165,7 +167,9 @@ const CANDIDATE_SNAPSHOT_MAX_COST = Number(process.env.ARB_DAEMON_CANDIDATE_SNAP
 // non-executable near buckets. Shadow rows let us study 1.000-1.005 / 1.005-1.02
 // conversion blockers without loosening live trading gates or risking capital.
 const CAPTURE_AUDIT_MIN_COST = Number(process.env.ARB_DAEMON_CAPTURE_AUDIT_MIN_COST ?? CANDIDATE_SNAPSHOT_MIN_COST);
-const CAPTURE_AUDIT_MAX_COST = Number(process.env.ARB_DAEMON_CAPTURE_AUDIT_MAX_COST ?? 1.02);
+// Must cover the live sports cost ceiling (Tier 3 soccer reaches ~1.35) so submitted_result
+// rows land in monotonic-capture-audit.jsonl for shadow-vs-live middle-rate comparisons.
+const CAPTURE_AUDIT_MAX_COST = Number(process.env.ARB_DAEMON_CAPTURE_AUDIT_MAX_COST ?? 1.35);
 const CAPTURE_AUDIT_MIN_INTERVAL_MS = Number(process.env.ARB_DAEMON_CAPTURE_AUDIT_MIN_INTERVAL_MS ?? 5_000);
 const MIN_MARKETABLE_BUY_USD = Number(process.env.MONOTONIC_ARB_REAL_PM_MIN_MARKETABLE_BUY_USD ?? 1);
 // Live sports books move faster than the macro/crypto ladders, so they still
@@ -1808,6 +1812,28 @@ function beginCapture(candidate: Candidate, executionTokens: string[]): CaptureC
   };
 }
 
+function maybeAppendCaptureShadowLedger(ctx: CaptureContext, extra: Record<string, unknown>) {
+  try {
+    const decision = evaluateSportsStrategy(ctx.wsCandidate);
+    if (!decision.shadowEligible && !decision.liveEligible) return;
+    const sizing = ctx.sizing;
+    const sizedCost = typeof sizing?.cost === "number" ? sizing.cost : ctx.wsCandidate.packageCost;
+    const sizedShares = typeof sizing?.shares === "number" ? sizing.shares : ctx.wsCandidate.availableSize;
+    const candidate = { ...ctx.wsCandidate, packageCost: sizedCost, availableSize: sizedShares };
+    const targetUsd = Math.min(MAX_PACKAGE_USD, sizedCost * sizedShares);
+    appendShadowPackage(packageFromCandidate({
+      candidate,
+      decision,
+      mode: "shadow",
+      targetUsd,
+      maxPackageUsd: MAX_PACKAGE_USD,
+      metadataSnapshotId: `capture:${ctx.captureId}`,
+    }));
+  } catch (err) {
+    log(`shadow ledger append failed package=${ctx.wsCandidate.packageId}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 function emitCapture(
   ctx: CaptureContext | null,
   terminalStatus: CaptureTerminalStatus,
@@ -1838,6 +1864,9 @@ function emitCapture(
     execution: ctx.execution,
     ...extra,
   }]);
+  if (terminalStatus === "shadow_would_submit") {
+    maybeAppendCaptureShadowLedger(ctx, extra);
+  }
 }
 
 type ShadowCaptureOptions = {
