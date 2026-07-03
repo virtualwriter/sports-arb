@@ -2,7 +2,7 @@
 import { writeFileSync } from "node:fs";
 import { config } from "dotenv";
 import { loadDaemonSportsArbPackages } from "./lib/llm/daemon-bridge.js";
-import { summarizeEvidence } from "./lib/llm/learning.js";
+import { latestLlmAnalysisText, summarizeEvidence } from "./lib/llm/learning.js";
 import { PATHS, ensureParent, ensureStateDirs } from "./lib/paths.js";
 import { readShadowPackages } from "./lib/shadow-ledger.js";
 import { readJson, writeJson } from "./lib/storage.js";
@@ -62,6 +62,7 @@ function markdownReport(args: {
   const livePnl = resolvedLive.reduce((sum, pkg) => sum + (pkg.resolution?.pnlUsd ?? 0), 0);
   const shadowPnl = resolvedShadows.reduce((sum, pkg) => sum + (pkg.resolution?.pnlUsd ?? 0), 0);
   const evidence = summarizeEvidence([...resolvedLive, ...resolvedShadows]).slice(0, 12);
+  const llmAnalysis = latestLlmAnalysisText(6000);
   return [
     `# Sports Arb Daily Report`,
     ``,
@@ -88,6 +89,9 @@ function markdownReport(args: {
     ``,
     ...evidence.map((row) => `- ${row.comparisonGroup}: n=${row.resolved}, winRate=${row.winRate === null ? "n/a" : (row.winRate * 100).toFixed(1) + "%"}, avgRoi=${row.avgRoiPct.toFixed(2)}%, promote=${row.promoteEligible}, kill=${row.killCandidate}`),
     ``,
+    ...(llmAnalysis
+      ? [`## LLM Analysis`, ``, llmAnalysis, ``]
+      : [`## LLM Analysis`, ``, `_No journal entry yet. Run \`npm run llm:learn\` or wait for the 04:00 UTC timer._`, ``]),
     `## LLM Permissions`,
     ``,
     `DeepSeek may write journal/advice and suggest risk parameter changes. It may not enter trades, promote adapters, or unpause large-orphan incidents.`,

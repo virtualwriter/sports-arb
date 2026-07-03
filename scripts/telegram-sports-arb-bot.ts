@@ -4,6 +4,7 @@ import { config } from "dotenv";
 import { buildDailyReport } from "./daily-sports-arb-report.js";
 import { PATHS, ensureParent } from "./lib/paths.js";
 import { readJson } from "./lib/storage.js";
+import { latestLlmAnalysisText } from "./lib/llm/learning.js";
 import { sportsPnlTelegramText } from "./sports-pnl-report.js";
 import type { HealthSnapshot, SportsArbPackage } from "./lib/types.js";
 
@@ -20,10 +21,16 @@ async function postTelegram(token: string, chatId: string, payload: Record<strin
   });
 }
 
-async function sendMessage(text: string): Promise<void> {
+async function sendMessage(text: string, opts?: { plain?: boolean }): Promise<void> {
   const token = process.env.SPORTS_ARB_TELEGRAM_BOT_TOKEN ?? process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.SPORTS_ARB_TELEGRAM_CHAT_ID ?? process.env.TELEGRAM_CHAT_ID;
   if (!token || !chatId) throw new Error("Missing SPORTS_ARB_TELEGRAM_BOT_TOKEN or SPORTS_ARB_TELEGRAM_CHAT_ID");
+
+  if (opts?.plain) {
+    const plainResp = await postTelegram(token, chatId, { text });
+    if (!plainResp.ok) throw new Error(`Telegram plain-text send failed ${plainResp.status}: ${await plainResp.text()}`);
+    return;
+  }
 
   // Try Markdown first so formatted reports still render with bold/code blocks.
   // If Telegram rejects with a 400 parse error (unbalanced markdown entities in
@@ -52,6 +59,13 @@ async function main() {
     const report = await buildDailyReport();
     await sendMessage(report.markdown.slice(0, 3900));
     await sendMessage((await sportsPnlTelegramText()).slice(0, 3900));
+    const llm = latestLlmAnalysisText(3800);
+    if (llm) {
+      await sendMessage(llm, { plain: true });
+      console.log("[telegram] sent LLM analysis");
+    } else {
+      console.warn("[telegram] no LLM analysis in state; run llm:learn before telegram:daily");
+    }
     console.log(`[telegram] sent daily report ${report.markdownPath}`);
     return;
   }

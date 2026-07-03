@@ -66,3 +66,15 @@ export function writeLlmJournal(journal: string): void {
     lastJournal: journal,
   });
 }
+
+/** Latest DeepSeek journal entry for daily report / Telegram delivery. */
+export function latestLlmAnalysisText(maxChars = 3500): string | null {
+  const { lastJournal, lastCallAt } = readLlmState();
+  const journal = lastJournal?.trim();
+  if (!journal) return null;
+  const stamp = lastCallAt ? `${lastCallAt.slice(0, 16)}Z` : "unknown";
+  const header = `LLM analysis (${stamp})\n\n`;
+  const budget = Math.max(200, maxChars - header.length);
+  if (journal.length <= budget) return header + journal;
+  return `${header}${journal.slice(0, budget - 20)}\n\n… (truncated)`;
+}
