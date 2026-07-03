@@ -2,7 +2,7 @@ import type { Candidate } from "./monotonic-arb-core.js";
 
 const EPS = 1e-9;
 
-export const SOCCER_BEST_SEEN_GATE_ENABLED = process.env.ARB_DAEMON_SOCCER_BEST_SEEN_GATE !== "0";
+export const SOCCER_BEST_SEEN_GATE_ENABLED = process.env.ARB_DAEMON_SOCCER_BEST_SEEN_GATE === "1";
 export const SOCCER_BEST_SEEN_TOLERANCE = Number(process.env.ARB_DAEMON_SOCCER_BEST_SEEN_TOLERANCE ?? 0.03);
 
 const bestByEventFamily = new Map<string, number>();

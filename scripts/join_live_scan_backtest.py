@@ -18,6 +18,7 @@ import argparse
 import csv
 import gzip
 import json
+import os
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -102,6 +103,39 @@ def load_daemon_live(path: Path) -> list[dict[str, Any]]:
         return []
     data = json.loads(path.read_text())
     return data if isinstance(data, list) else []
+
+
+def ledger_row_key(row: dict[str, Any]) -> str:
+    return str(row.get("id") or f"{row.get('packageId', 'unknown')}::{row.get('createdAt', '')}")
+
+
+def load_archived_packages(archive_dir: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    if not archive_dir.exists():
+        return rows
+    for path in sorted(archive_dir.glob("*.json")):
+        try:
+            parsed = json.loads(path.read_text())
+        except json.JSONDecodeError:
+            continue
+        records = parsed if isinstance(parsed, list) else []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            for pkg in record.get("packages") or []:
+                if isinstance(pkg, dict):
+                    rows.append(pkg)
+    return rows
+
+
+def load_combined_ledger(live_path: Path, archive_dir: Path | None = None) -> list[dict[str, Any]]:
+    by_key: dict[str, dict[str, Any]] = {}
+    if archive_dir is not None:
+        for row in load_archived_packages(archive_dir):
+            by_key[ledger_row_key(row)] = row
+    for row in load_daemon_live(live_path):
+        by_key[ledger_row_key(row)] = row
+    return list(by_key.values())
 
 
 def daemon_fill_row(row: dict[str, Any]) -> dict[str, Any] | None:
@@ -262,13 +296,17 @@ def render_markdown(report: dict[str, Any]) -> str:
         cheap_cost = f"{cheapest['bestObserved']:.3f}" if cheapest else "—"
         delta = f"{fill.get('cheaperSiblingGapCents', 0):.1f}" if cheapest else "—"
         resolved = fill.get("outcome") or "pending"
+
+        def fmt_cost(value: Any) -> str:
+            return f"{float(value):.3f}" if value is not None else "—"
+
         lines.append(
             f"| {str(fill.get('submittedAt') or '')[:19]} "
             f"| `{fill.get('event', '')[:28]}` "
             f"| {shape_label} "
-            f"| {fill.get('fillCost', 0):.3f} "
-            f"| {fill.get('bestObserved', 0):.3f} "
-            f"| {fill.get('worstObserved', 0):.3f} "
+            f"| {fmt_cost(fill.get('fillCost'))} "
+            f"| {fmt_cost(fill.get('bestObserved'))} "
+            f"| {fmt_cost(fill.get('worstObserved'))} "
             f"| {cheap_cost} "
             f"| {delta} "
             f"| {resolved} |"
@@ -305,7 +343,11 @@ def main() -> None:
     parser.add_argument("--repo-root", default=".")
     parser.add_argument("--packages", default="analysis/monotonic-chronological-packages-continuous.csv")
     parser.add_argument("--gamma-cache", default="analysis/gamma-market-cache-v2.json")
-    parser.add_argument("--data-dir", default="/var/lib/sports-arb/data")
+    parser.add_argument(
+        "--data-dir",
+        default=os.environ.get("SPORTS_ARB_DATA_DIR", "data"),
+        help="Ledger root (default: $SPORTS_ARB_DATA_DIR or repo data/)",
+    )
     parser.add_argument("--live", help="Override live ledger path")
     parser.add_argument("--capture-audit", action="store_true", help="Scan capture-audit for live packageIds")
     parser.add_argument("--json-out", default="analysis/live-scan-join.json")
@@ -314,6 +356,8 @@ def main() -> None:
 
     repo_root = Path(args.repo_root).resolve()
     data_dir = Path(args.data_dir)
+    if not data_dir.is_absolute():
+        data_dir = (repo_root / data_dir).resolve()
     packages_path = repo_root / args.packages
     gamma_path = repo_root / args.gamma_cache
     live_path = Path(args.live) if args.live else data_dir / "polymarket-live-packages.json"
@@ -326,7 +370,7 @@ def main() -> None:
     csv_index = load_csv_index(packages_path)
     sibling_index = build_sibling_index(csv_index, cache, bounds)
 
-    raw_live = load_daemon_live(live_path)
+    raw_live = load_combined_ledger(live_path, data_dir / "archive")
     live_rows = [row for row in (daemon_fill_row(item) for item in raw_live) if row]
     live_rows.sort(key=lambda row: str(row.get("submittedAt") or ""))
 

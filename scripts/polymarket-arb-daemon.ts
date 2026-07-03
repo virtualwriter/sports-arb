@@ -1440,20 +1440,7 @@ function juneBreakevenRangeBlock(candidate: Candidate): string | null {
 }
 
 function minEdgeFor(candidate: Candidate): number {
-  if (isSportsCandidate(candidate)) {
-    // The strict high-cost soccer match-total bypass (sportsCostRangeBlock)
-    // allows cost up to 1.35, but SPORTS_MIN_EDGE=-0.25 caps cost at 1.25 in
-    // the dynamic edge gate, making the bypass dead-code. Loosen the edge
-    // threshold to match the cost-range ceiling for those shapes so 2.5/5.5
-    // and 3.5/6.5 candidates aren't silently filtered before the strategy
-    // log. Note: this does NOT loosen any execution gate; the cost-range
-    // bypass already requires marketType=match_total, full-game scope, width
-    // in {2,3}, and line family in SOCCER_MATCH_TOTAL_LINE_FAMILIES.
-    if (isStrictHighCostSoccerMatchTotal(candidate)) {
-      return Math.min(SPORTS_MIN_EDGE, -0.35);
-    }
-    return SPORTS_MIN_EDGE;
-  }
+  if (isSportsCandidate(candidate)) return SPORTS_MIN_EDGE;
   // June expiries are allowed at breakeven (cost <= 1.0000) to fish for middles.
   // Sizing/outlay rules remain exactly the normal daemon rules.
   if (isJuneExpiryCandidate(candidate)) return Number(process.env.ARB_DAEMON_JUNE_EXPIRY_MIN_EDGE ?? 0);
@@ -1484,27 +1471,9 @@ function costInRange(cost: number, range: CostRange): boolean {
   return aboveMin && belowMax;
 }
 
-function isStrictHighCostSoccerMatchTotal(candidate: Candidate): boolean {
-  if (candidate.asset !== "SOCCER" || !costInRange(candidate.packageCost, { label: "1.25-1.35", min: 1.25, max: 1.35, includeMin: true, includeMax: true })) {
-    return false;
-  }
-  const decision = evaluateSportsStrategy(candidate);
-  const shapeFailures = decision.gateFailures.filter((failure) =>
-    failure === "soccer_market_shape_not_live"
-    || failure === "soccer_total_not_full_game"
-    || failure === "soccer_total_width_not_historical_winner"
-    || failure === "soccer_total_line_family_not_historical_winner"
-    || failure.startsWith("soccer_spread_")
-  );
-  return decision.adapter?.sportId === "SOCCER"
-    && decision.marketType === "match_total"
-    && shapeFailures.length === 0;
-}
-
 function sportsCostRangeBlock(candidate: Candidate): string | null {
   if (!isSportsCandidate(candidate) || SPORTS_ALLOWED_COST_RANGES.length === 0) return null;
   if (SPORTS_ALLOWED_COST_RANGES.some((range) => costInRange(candidate.packageCost, range))) return null;
-  if (isStrictHighCostSoccerMatchTotal(candidate)) return null;
   const allowed = SPORTS_ALLOWED_COST_RANGES.map((range) => range.label).join("|");
   return `sports_cost_range cost=${candidate.packageCost.toFixed(4)} allowed=${allowed}`;
 }

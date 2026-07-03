@@ -90,18 +90,12 @@ function isEnforcedLive(
   allow: StrategyAllowlistSnapshot,
 ): boolean {
   if (sportId === "SOCCER") {
-    if (marketType === "match_total") {
-      if (!allow.soccer.matchTotalLineFamilies.includes(lineFamily)) return false;
-      if (!allow.soccer.matchTotalWidthsAllowed.includes(middleWidth)) return false;
-      // Cost-bucket gate: live or extended-match-total band.
-      return isCostBucketInRange(costBucket, allow.soccer.costRangeLive)
-        || isCostBucketInRange(costBucket, allow.soccer.costRangeMatchTotalExtended);
-    }
-    if (marketType === "spread") {
-      if (!allow.soccer.spreadWidthsAllowed.includes(middleWidth)) return false;
-      return isCostBucketInRange(costBucket, allow.soccer.costRangeLive);
-    }
-    return false;
+    if (marketType !== "match_total") return false;
+    if (!allow.soccer.matchTotalLineFamilies.includes(lineFamily)) return false;
+    if (!allow.soccer.matchTotalWidthsAllowed.includes(middleWidth)) return false;
+    const familyMax = allow.soccer.matchTotalFamilyMaxLiveCost[lineFamily];
+    if (familyMax === undefined) return false;
+    return isCostBucketInRange(costBucket, { lo: allow.soccer.matchTotalMinLiveCost, hi: familyMax });
   }
   if (sportId === "MLB") {
     if (marketType === "game_total") {
