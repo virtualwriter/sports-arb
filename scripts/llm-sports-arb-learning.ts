@@ -1,33 +1,19 @@
 #!/usr/bin/env tsx
 import { appendFileSync } from "node:fs";
 import { config } from "dotenv";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import { loadDaemonSportsArbPackages } from "./lib/llm/daemon-bridge.js";
 import { requestDeepSeek } from "./lib/llm/deepseek.js";
+import { compactBacktestShapesForLlm } from "./lib/llm/backtest-shape-evidence.js";
 import { summarizeEvidence, writeLlmJournal } from "./lib/llm/learning.js";
-import { aggregateLiveBuckets, type StrategyBucketsSnapshot } from "./lib/llm/bucket-aggregator.js";
-import { loadBaselineBuckets } from "./lib/llm/baseline-evidence.js";
-import { PATHS, REPO_ROOT, ensureParent, ensureStateDirs } from "./lib/paths.js";
+import type { StrategyBucketsSnapshot } from "./lib/llm/bucket-aggregator.js";
+import { buildStrategySnapshot } from "./lib/llm/strategy-snapshot.js";
+import { PATHS, ensureParent, ensureStateDirs } from "./lib/paths.js";
 import { readShadowPackages } from "./lib/shadow-ledger.js";
 import { readJson } from "./lib/storage.js";
-import { currentStrategyAllowlist } from "./lib/sports-strategy.js";
 import type { HealthSnapshot, SportsArbPackage } from "./lib/types.js";
 
 config({ path: "config.env" });
 config({ path: ".env" });
-
-function loadStrategySnapshot(live: SportsArbPackage[]): StrategyBucketsSnapshot {
-  const path = join(REPO_ROOT, "analysis", "strategy-buckets-live.json");
-  if (existsSync(path)) {
-    try {
-      return JSON.parse(readFileSync(path, "utf8")) as StrategyBucketsSnapshot;
-    } catch {
-      // Fall through to in-process rebuild.
-    }
-  }
-  return aggregateLiveBuckets(live, currentStrategyAllowlist(), loadBaselineBuckets());
-}
 
 function compactContext(
   live: SportsArbPackage[],
@@ -35,24 +21,25 @@ function compactContext(
   health: HealthSnapshot,
   strategy: StrategyBucketsSnapshot,
 ): string {
-  const evidence = summarizeEvidence([...live, ...shadows]).slice(0, 30);
-  // The full snapshot can be 5-20 KB. Trim each bucket to the fields the LLM
-  // needs for reasoning so the prompt stays tight.
-  const bucketsCompact = strategy.buckets.map((b) => ({
-    bucket: b.comparisonGroup,
-    enforcedLive: b.enforcedLive,
-    tier: b.tier,
-    n: b.resolved,
-    wins: b.wins,
-    middles: b.middles,
-    capRoi: b.capitalWeightedRoiPct,
-    winRate: b.winRate,
-    avgFillSlippageCents: b.avgFillSlippageCents,
-    avgPreflightDriftCents: b.avgPreflightDriftCents,
-    slippageSampleCount: b.slippageSampleCount,
-    recommendation: b.recommendation,
-    lastResolvedAt: b.lastResolvedAt,
-  }));
+  const evidence = summarizeEvidence([...live, ...shadows]).slice(0, 20);
+  const enforcedLiveBuckets = strategy.buckets
+    .filter((b) => b.enforcedLive)
+    .map((b) => ({
+      bucket: b.comparisonGroup,
+      tier: b.tier,
+      n: b.resolved,
+      middles: b.middles,
+      middleRatePct: b.middleRate == null ? null : round1(b.middleRate * 100),
+      capRoi: b.capitalWeightedRoiPct,
+      avgFillSlippageCents: b.avgFillSlippageCents,
+      avgPreflightDriftCents: b.avgPreflightDriftCents,
+      slippageSampleCount: b.slippageSampleCount,
+      executionFlag: b.executionFlag,
+      lastResolvedAt: b.lastResolvedAt,
+    }));
+  const executionAlerts = enforcedLiveBuckets.filter(
+    (b) => b.executionFlag !== "hold" && b.executionFlag !== "insufficient_evidence",
+  );
   return JSON.stringify({
     generatedAt: new Date().toISOString(),
     health,
@@ -63,26 +50,48 @@ function compactContext(
     shadows: {
       open: shadows.filter((pkg) => pkg.status === "shadow_open").length,
       resolved: shadows.filter((pkg) => pkg.resolution?.status === "resolved").length,
-      sub1Open: shadows.filter((pkg) => pkg.pricing.packageCost < 1 && pkg.status === "shadow_open").length,
     },
-    // Frozen Jun 16-22 baseline. Same cost-bucket aggregation that originally
-    // produced the hardcoded allowlist in sports-strategy.ts.
-    frozenBaseline: strategy.baseline,
-    // What the daemon currently allows live.
-    currentAllowlist: strategy.allowlist,
-    // What our live ledger has actually paid out since.
-    liveBucketEvidence: bucketsCompact,
-    thresholds: strategy.thresholds,
-    // Legacy view (no tiering); kept for parity with prior journals.
+    gateAuthority: {
+      source: "shape-roi-jun16-jul3-continuous.json + sports-strategy.ts",
+      note: "Gates are derived from backtest shape ROI@worst and per-family fill caps. Live PnL alone must NOT drive gate removals.",
+      currentAllowlist: strategy.allowlist,
+      backtestShapes: compactBacktestShapesForLlm(strategy.backtestShapes),
+    },
+    frozenBaselineCostBuckets: strategy.baseline,
+    liveExecutionMonitoring: {
+      enforcedLiveBuckets,
+      executionAlerts,
+      thresholds: strategy.thresholds,
+    },
     setupFamilyEvidence: evidence,
   });
 }
 
+function round1(n: number): number {
+  return Math.round(n * 10) / 10;
+}
+
+const SYSTEM_PROMPT = [
+  "You are the sports monotonic arbitrage strategy analyst.",
+  "Gate authority (what shapes/costs should be live) comes ONLY from backtestShape evidence and currentAllowlist in gateAuthority — both are rebuilt from sports-strategy.ts on every run.",
+  "The live ledger (liveExecutionMonitoring) is for execution quality monitoring ONLY: slippage, preflight drift, middle-rate collapse vs backtest, fill-vs-scan gaps.",
+  "NEVER recommend removing or demoting a backtest-positive shape solely because live capRoi is negative.",
+  "When live loses on a backtest-positive enforced shape with low slippage, diagnose execution/population mismatch (paying above scan cost, low middle rate), not a bad gate.",
+  "When executionFlag is slippage_concern or middle_rate_gap, explain the execution issue and suggest operational fixes (timing, preflight freshness, fill caps) — not gate removal.",
+  "When executionFlag is execution_review, note the live/backtest gap and recommend monitoring or join analysis — not automatic demotion.",
+  "You may affirm that current gates align with backtest when backtestShapes show positive worstRoiPct under familyMaxLiveCost.",
+  "You may suggest bounded gate tweaks ONLY when backtest shape evidence itself is weak (negative worstRoiPct at enforced cost cap) or a shape is not in backtestShapes.",
+  "You may not enter trades, promote adapters, or unpause orphan incidents.",
+  "Output sections in order:",
+  "(1) Gate alignment — how currentAllowlist maps to backtestShapes (one bullet per enforced family).",
+  "(2) Execution gaps — only buckets with executionFlag != hold and != insufficient_evidence; compare live middleRatePct to backtest middleRatePct.",
+  "(3) Monitoring — what to watch next (no gate demotions from live PnL alone).",
+  "(4) Optional backtest-driven gate tweaks — only if backtest worstRoiPct is negative at the enforced cap; otherwise say none needed.",
+  "Concise bullets.",
+].join(" ");
+
 async function main() {
   ensureStateDirs();
-  // Primary input is the daemon ledger (bridged into SportsArbPackage shape).
-  // Fall back to the legacy hourly-executor file if the daemon hasn't been
-  // active yet, so we never silently drop history during a transition.
   const daemonLive = await loadDaemonSportsArbPackages();
   const legacyLive = readJson<SportsArbPackage[]>(PATHS.livePackages, []);
   const live = daemonLive.length > 0 ? daemonLive : legacyLive;
@@ -97,34 +106,14 @@ async function main() {
     killSwitchActive: false,
     notes: [],
   });
-  const strategy = loadStrategySnapshot(live);
+  const strategy = buildStrategySnapshot(live);
   const context = compactContext(live, shadows, health, strategy);
-  // Nightly learn uses the non-reasoning chat model. Reasoning models (e.g.
-  // deepseek-v4-pro) burn the shared max_tokens budget on reasoning_content
-  // and often return an empty visible answer for our large strategy prompt.
   const learnModel = process.env.SPORTS_ARB_LLM_LEARN_MODEL ?? "deepseek-chat";
   const result = await requestDeepSeek([
-    {
-      role: "system",
-      content: [
-        "You are the sports monotonic arbitrage learning analyst.",
-        "Three datasets are provided in the user message:",
-        "(1) frozenBaseline -- the Jun 16-22 backtest at cost-bucket granularity (n=4458 resolved). This is the reference window from which the current allowlist was hand-derived.",
-        "(2) currentAllowlist -- exactly what the daemon currently allows live (line families, cost ranges, widths, bid floors). Treat as the gate's source of truth.",
-        "(3) liveBucketEvidence -- per (sport:marketType:lineFamily:costBucket) stats from the daemon's resolved live ledger since Jun 23. Each entry has a tier (preliminary/actionable/confirmed), recommendation, and execution slippage (avgFillSlippageCents = actual fill minus preflight quote; avgPreflightDriftCents = REST preflight minus WS snapshot).",
-        "Your job each day: compare evidence vs the allowlist and the baseline. When a bucket loses money but slippage is high (+fill or +preflight drift), distinguish gate-shape problems from execution-timing problems.",
-        "Focus on actionable + confirmed tiers when proposing changes. Preliminary tier may be mentioned but should not drive recommendations.",
-        "You may summarize evidence, flag risks, propose hypotheses, and suggest bounded parameter changes (e.g. relax narrow_yes_bid floor for line family X by 0.005, or remove cost bucket Y from MLB game_total).",
-        "You may not directly enter trades, promote a sport adapter to live, or unpause after a large orphan incident.",
-        "Output sections, in order: (1) risks, (2) baseline-vs-live deltas worth attention, (3) bucket recommendations (only buckets where tier >= actionable AND recommendation != hold), (4) suggested deterministic checks before any change ships. Concise bullets.",
-      ].join(" "),
-    },
+    { role: "system", content: SYSTEM_PROMPT },
     { role: "user", content: context },
   ], { model: learnModel });
   if (!result.text.trim()) {
-    // Empty response is almost always a transient provider hiccup -- the next
-    // scheduled run will pick it up. Don't pollute the journal with a header
-    // that has no body.
     console.warn(`[llm] empty response from ${result.model}; skipping journal append`);
     return;
   }
@@ -132,7 +121,7 @@ async function main() {
   ensureParent(PATHS.learningJournal);
   appendFileSync(PATHS.learningJournal, journal);
   writeLlmJournal(result.text);
-  console.log(`[llm] wrote ${PATHS.learningJournal}`);
+  console.log(`[llm] wrote ${PATHS.learningJournal} (allowlist=${strategy.allowlist.generatedAt})`);
 }
 
 main().catch((error) => {

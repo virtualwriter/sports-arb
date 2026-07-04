@@ -3,26 +3,21 @@
 // the LLM learning pass and the morning operator review. Reads:
 //   - Daemon ledger + archives (resolved live trades since Jun 23)
 //   - analysis/monotonic-chronological-ledger-long.csv (frozen Jun 16-22)
-//   - Current sports-strategy.ts allowlist snapshot
+//   - analysis/shape-roi-jun16-jul3-continuous.json (shape gate authority)
+//   - Current sports-strategy.ts allowlist snapshot (always fresh)
 // Writes:
 //   - analysis/strategy-buckets-live.json (deterministic)
 //   - analysis/strategy-changes-YYYY-MM-DD.md (human diff vs yesterday)
 //
-// This script never touches sports-strategy.ts. Promote/demote recommendations
-// are advisory only -- the operator decides when (if ever) to edit the gate.
+// This script never touches sports-strategy.ts. Gate changes are manual.
 
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "dotenv";
-import {
-  aggregateLiveBuckets,
-  type LiveBucketStats,
-  type StrategyBucketsSnapshot,
-} from "./lib/llm/bucket-aggregator.js";
-import { loadBaselineBuckets } from "./lib/llm/baseline-evidence.js";
+import type { LiveBucketStats, StrategyBucketsSnapshot } from "./lib/llm/bucket-aggregator.js";
+import { buildStrategySnapshot } from "./lib/llm/strategy-snapshot.js";
 import { loadDaemonSportsArbPackages } from "./lib/llm/daemon-bridge.js";
 import { ensureParent, ensureStateDirs, REPO_ROOT } from "./lib/paths.js";
-import { currentStrategyAllowlist } from "./lib/sports-strategy.js";
 
 config({ path: "config.env" });
 config({ path: ".env" });
@@ -82,14 +77,16 @@ function formatSlippage(cents: number | null): string {
 
 function formatBucketLine(b: LiveBucketStats): string {
   const tag = b.enforcedLive ? "LIVE" : "shadow";
-  const rec = b.recommendation === "hold" ? "" : ` **[${b.recommendation}]**`;
+  const flag = b.executionFlag === "hold" || b.executionFlag === "insufficient_evidence"
+    ? ""
+    : ` **[${b.executionFlag}]**`;
   const slip = b.slippageSampleCount > 0
     ? `, fill=${formatSlippage(b.avgFillSlippageCents)}`
     : "";
   const drift = b.preflightDriftSampleCount > 0
     ? `, preflight=${formatSlippage(b.avgPreflightDriftCents)}`
     : "";
-  return `- \`${b.comparisonGroup}\` (${tag}, ${b.tier}, n=${b.resolved}, roi=${formatRoi(b.capitalWeightedRoiPct)}, middles=${b.middles}/${b.resolved}${slip}${drift})${rec}`;
+  return `- \`${b.comparisonGroup}\` (${tag}, ${b.tier}, n=${b.resolved}, roi=${formatRoi(b.capitalWeightedRoiPct)}, middles=${b.middles}/${b.resolved}${slip}${drift})${flag}`;
 }
 
 function writeDiffMarkdown(
@@ -102,12 +99,16 @@ function writeDiffMarkdown(
   lines.push(`# Strategy buckets diff — ${todayUtc()}`);
   lines.push("");
   lines.push(`Generated: ${current.generatedAt}`);
+  lines.push(`Allowlist snapshot: ${current.allowlist.generatedAt}`);
   lines.push(`Total resolved packages (live ledger): ${current.totalResolvedPackages}`);
   if (previous) lines.push(`Previous snapshot: ${previous.generatedAt} (${previous.totalResolvedPackages} resolved)`);
   lines.push("");
+  lines.push("_Gate authority: backtest shapes in \`shape-roi-jun16-jul3-continuous.json\`. Live buckets are execution monitoring only._");
+  lines.push("");
 
-  const promote = current.buckets.filter((b) => b.recommendation === "promote_candidate");
-  const demote = current.buckets.filter((b) => b.recommendation === "demote_candidate");
+  const slippage = current.buckets.filter((b) => b.executionFlag === "slippage_concern");
+  const middleGap = current.buckets.filter((b) => b.executionFlag === "middle_rate_gap");
+  const execReview = current.buckets.filter((b) => b.executionFlag === "execution_review");
   const newBuckets = current.buckets.filter((b) => !prev.has(bucketKey(b)));
   const growth = current.buckets
     .map((b) => ({ b, p: prev.get(bucketKey(b)) }))
@@ -115,19 +116,33 @@ function writeDiffMarkdown(
     .map((entry) => ({ ...entry, delta: entry.b.resolved - (entry.p?.resolved ?? 0) }))
     .sort((a, b) => b.delta - a.delta);
 
-  lines.push("## Recommendations (actionable)");
+  lines.push("## Backtest gate shapes (authority)");
   lines.push("");
-  if (demote.length === 0 && promote.length === 0) {
-    lines.push("_No actionable recommendations. All actionable-tier buckets currently align with the enforced allowlist._");
+  lines.push("| Shape | n | Middle rate | ROI@worst | Family max cost |");
+  lines.push("| --- | ---: | ---: | ---: | ---: |");
+  for (const shape of current.backtestShapes) {
+    lines.push(`| \`SOCCER:match_total:${shape.lineFamily}\` | ${shape.resolved} | ${(shape.middleRate * 100).toFixed(1)}% | ${formatRoi(shape.worstRoiPct)} | ${shape.familyMaxLiveCost ?? "—"} |`);
+  }
+  lines.push("");
+
+  lines.push("## Execution alerts (live monitoring)");
+  lines.push("");
+  if (slippage.length === 0 && middleGap.length === 0 && execReview.length === 0) {
+    lines.push("_No execution alerts on enforced-live buckets._");
   } else {
-    if (demote.length > 0) {
-      lines.push("### Demote candidates (enforced live but losing money)");
-      for (const b of demote) lines.push(formatBucketLine(b));
+    if (slippage.length > 0) {
+      lines.push("### Slippage concern");
+      for (const b of slippage) lines.push(formatBucketLine(b));
       lines.push("");
     }
-    if (promote.length > 0) {
-      lines.push("### Promote candidates (not enforced but live evidence is strong)");
-      for (const b of promote) lines.push(formatBucketLine(b));
+    if (middleGap.length > 0) {
+      lines.push("### Middle rate gap vs backtest");
+      for (const b of middleGap) lines.push(formatBucketLine(b));
+      lines.push("");
+    }
+    if (execReview.length > 0) {
+      lines.push("### Execution review (live loss — check fill vs scan, not auto-demote)");
+      for (const b of execReview) lines.push(formatBucketLine(b));
       lines.push("");
     }
   }
@@ -150,41 +165,13 @@ function writeDiffMarkdown(
   }
   lines.push("");
 
-  const slippageBuckets = current.buckets
-    .filter((b) => b.slippageSampleCount > 0)
-    .sort((a, b) => (b.avgFillSlippageCents ?? 0) - (a.avgFillSlippageCents ?? 0));
-  lines.push("## Execution slippage (fill vs quoted, preflight vs WS)");
-  lines.push("");
-  lines.push("_Fill slippage = actual pair cost − REST preflight quote (or inferred from ledger for older trades). Preflight drift = REST preflight − WS snapshot._");
-  lines.push("");
-  if (slippageBuckets.length === 0) {
-    lines.push("_No slippage data yet. New trades will persist ws/fresh/actual costs at submit._");
-  } else {
-    lines.push("| Bucket | Enforced | n (slip) | Avg fill slip | Avg preflight drift | Cap ROI |");
-    lines.push("| --- | --- | ---: | ---: | ---: | ---: |");
-    for (const b of slippageBuckets) {
-      lines.push(`| \`${b.comparisonGroup}\` | ${b.enforcedLive ? "live" : "shadow"} | ${b.slippageSampleCount} | ${formatSlippage(b.avgFillSlippageCents)} | ${formatSlippage(b.avgPreflightDriftCents)} | ${formatRoi(b.capitalWeightedRoiPct)} |`);
-    }
-  }
-  lines.push("");
-
   lines.push("## All buckets at-a-glance");
   lines.push("");
-  lines.push("| Bucket | Enforced | Tier | n | Cap ROI | Fill slip | Preflight | Win rate | Middle rate | Recommendation |");
-  lines.push("| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |");
+  lines.push("| Bucket | Enforced | Tier | n | Cap ROI | Fill slip | Middle rate | Execution flag |");
+  lines.push("| --- | --- | --- | ---: | ---: | ---: | ---: | --- |");
   for (const b of current.buckets) {
-    const wr = b.winRate == null ? "—" : `${(b.winRate * 100).toFixed(0)}%`;
     const mr = b.middleRate == null ? "—" : `${(b.middleRate * 100).toFixed(0)}%`;
-    lines.push(`| \`${b.comparisonGroup}\` | ${b.enforcedLive ? "live" : "shadow"} | ${b.tier} | ${b.resolved} | ${formatRoi(b.capitalWeightedRoiPct)} | ${formatSlippage(b.avgFillSlippageCents)} | ${formatSlippage(b.avgPreflightDriftCents)} | ${wr} | ${mr} | ${b.recommendation} |`);
-  }
-  lines.push("");
-
-  lines.push("## Frozen baseline (Jun 16-22, n=4458) for context");
-  lines.push("");
-  lines.push("| Cost bucket | n | Middle rate | Realized ROI |");
-  lines.push("| --- | ---: | ---: | ---: |");
-  for (const b of current.baseline) {
-    lines.push(`| ${b.bucket} | ${b.resolved} | ${(b.middleRate * 100).toFixed(1)}% | ${formatRoi(b.realizedRoiPct)} |`);
+    lines.push(`| \`${b.comparisonGroup}\` | ${b.enforcedLive ? "live" : "shadow"} | ${b.tier} | ${b.resolved} | ${formatRoi(b.capitalWeightedRoiPct)} | ${formatSlippage(b.avgFillSlippageCents)} | ${mr} | ${b.executionFlag} |`);
   }
   lines.push("");
 
@@ -194,20 +181,12 @@ function writeDiffMarkdown(
 
 async function main() {
   ensureStateDirs();
-  const allowlist = currentStrategyAllowlist();
-  const baseline = loadBaselineBuckets();
-  if (baseline.length === 0) {
-    console.warn("[strategy-rebuild] warning: baseline CSV missing or empty; LLM context will lack pre-Jun-22 reference");
-  }
-
   const packages = await loadDaemonSportsArbPackages();
-  const snapshot = aggregateLiveBuckets(packages, allowlist, baseline);
+  const snapshot = buildStrategySnapshot(packages);
   const previous = loadPreviousSnapshot() ?? findMostRecentHistoryBefore(todayUtc());
 
   ensureParent(SNAPSHOT_PATH);
   writeFileSync(SNAPSHOT_PATH, JSON.stringify(snapshot, null, 2), "utf8");
-  // Keep a dated copy so day-over-day diffs survive even if SNAPSHOT_PATH is
-  // overwritten before the operator reads it.
   const historyPath = join(HISTORY_DIR, `strategy-buckets-${todayUtc()}.json`);
   ensureParent(historyPath);
   writeFileSync(historyPath, JSON.stringify(snapshot, null, 2), "utf8");
@@ -215,7 +194,7 @@ async function main() {
   const diffPath = join(ANALYSIS_DIR, `strategy-changes-${todayUtc()}.md`);
   writeDiffMarkdown(snapshot, previous, diffPath);
 
-  console.log(`[strategy-rebuild] resolved=${snapshot.totalResolvedPackages} buckets=${snapshot.buckets.length}`);
+  console.log(`[strategy-rebuild] resolved=${snapshot.totalResolvedPackages} buckets=${snapshot.buckets.length} backtestShapes=${snapshot.backtestShapes.length}`);
   console.log(`[strategy-rebuild] wrote ${SNAPSHOT_PATH}`);
   console.log(`[strategy-rebuild] wrote ${diffPath}`);
 }

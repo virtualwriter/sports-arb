@@ -1,21 +1,17 @@
 // Aggregates the daemon's resolved trade ledger (active + archived) into
 // per-bucket statistics keyed by (sportId, marketType, lineFamily, costBucket).
-// This is the "live evidence" half of the continuous-learning loop; the static
-// Jun 16-22 backtest baseline (loadBaselineBuckets) is the other half.
+// Live stats are for execution monitoring only — gate authority comes from
+// shape-level backtest evidence (loadBacktestShapeEvidence).
 //
-// Tiering:
-//   preliminary  -> n >= 5   (visible in reports, not actionable)
-//   actionable   -> n >= 15  (eligible to be flagged for promote/demote)
-//   confirmed    -> n >= 30  (high-confidence signal)
-//
-// Recommendations are deliberately conservative: a bucket only gets a
-// promote_candidate / demote_candidate tag when its sample size has crossed
-// `actionable` AND its capital-weighted ROI is meaningfully positive/negative.
-// The actual code change (editing sports-strategy.ts constants) is left as a
-// manual review step until the live ledger has many more trades per bucket.
+// Tiering (sample size for live monitoring):
+//   preliminary  -> n >= 5
+//   actionable   -> n >= 15
+//   confirmed    -> n >= 30
 
 import type { SportsArbPackage } from "../types.js";
 import type { StrategyAllowlistSnapshot } from "../sports-strategy.js";
+import type { BacktestShapeRow } from "./backtest-shape-evidence.js";
+import { backtestMiddleRateByFamily } from "./backtest-shape-evidence.js";
 import type { BaselineBucket } from "./baseline-evidence.js";
 
 export const TIER_THRESHOLDS = {
@@ -24,14 +20,16 @@ export const TIER_THRESHOLDS = {
   confirmed: 30,
 } as const;
 
-export const PROMOTE_ROI_PCT = 5;
-export const DEMOTE_ROI_PCT = -3;
+export const SLIPPAGE_CONCERN_CENTS = 5;
+export const PREFLIGHT_DRIFT_CONCERN_CENTS = 3;
+export const MIDDLE_RATE_GAP_RATIO = 0.6;
 
 export type Tier = "below_preliminary" | "preliminary" | "actionable" | "confirmed";
 
-export type Recommendation =
-  | "promote_candidate"
-  | "demote_candidate"
+export type ExecutionFlag =
+  | "slippage_concern"
+  | "middle_rate_gap"
+  | "execution_review"
   | "hold"
   | "insufficient_evidence";
 
@@ -56,7 +54,7 @@ export type LiveBucketStats = {
   lastResolvedAt: string | null;
   tier: Tier;
   enforcedLive: boolean;
-  recommendation: Recommendation;
+  executionFlag: ExecutionFlag;
   /** Avg fill slippage (actual − quoted/preflight) in cents per share. */
   avgFillSlippageCents: number | null;
   /** Avg REST preflight − WS drift in cents (only when executionQuote persisted). */
@@ -72,6 +70,7 @@ export type StrategyBucketsSnapshot = {
   buckets: LiveBucketStats[];
   allowlist: StrategyAllowlistSnapshot;
   baseline: BaselineBucket[];
+  backtestShapes: BacktestShapeRow[];
 };
 
 function classifyTier(resolved: number): Tier {
@@ -112,9 +111,6 @@ function isEnforcedLive(
   return false;
 }
 
-// Cost buckets use string labels like "1.050-1.100". We treat the bucket as
-// "in range" if its lower bound is >= range.lo and its upper bound is <=
-// range.hi + tiny epsilon. The "<1.000" bucket is never live-enforced.
 function isCostBucketInRange(bucket: string, range: { lo: number; hi: number }): boolean {
   if (bucket === "<1.000") return false;
   if (bucket === ">1.500") return false;
@@ -125,15 +121,33 @@ function isCostBucketInRange(bucket: string, range: { lo: number; hi: number }):
   return lo >= range.lo - 1e-6 && hi <= range.hi + 1e-6;
 }
 
-function recommendationFor(stats: Omit<LiveBucketStats, "recommendation">): Recommendation {
+export function executionFlagFor(
+  stats: Omit<LiveBucketStats, "executionFlag">,
+  backtestMiddleRate: number | null,
+): ExecutionFlag {
   if (stats.tier === "below_preliminary" || stats.tier === "preliminary") {
     return "insufficient_evidence";
   }
-  if (stats.enforcedLive && stats.capitalWeightedRoiPct <= DEMOTE_ROI_PCT) {
-    return "demote_candidate";
+  if (stats.avgFillSlippageCents != null && stats.avgFillSlippageCents >= SLIPPAGE_CONCERN_CENTS) {
+    return "slippage_concern";
   }
-  if (!stats.enforcedLive && stats.capitalWeightedRoiPct >= PROMOTE_ROI_PCT) {
-    return "promote_candidate";
+  if (stats.avgPreflightDriftCents != null && stats.avgPreflightDriftCents >= PREFLIGHT_DRIFT_CONCERN_CENTS) {
+    return "slippage_concern";
+  }
+  if (
+    stats.enforcedLive
+    && stats.middleRate != null
+    && backtestMiddleRate != null
+    && backtestMiddleRate > 0
+    && stats.middleRate < backtestMiddleRate * MIDDLE_RATE_GAP_RATIO
+  ) {
+    return "middle_rate_gap";
+  }
+  if (stats.enforcedLive && stats.capitalWeightedRoiPct < 0 && stats.slippageSampleCount === 0) {
+    return "execution_review";
+  }
+  if (stats.enforcedLive && stats.capitalWeightedRoiPct < 0) {
+    return "execution_review";
   }
   return "hold";
 }
@@ -142,6 +156,7 @@ export function aggregateLiveBuckets(
   packages: SportsArbPackage[],
   allow: StrategyAllowlistSnapshot,
   baseline: BaselineBucket[],
+  backtestShapes: BacktestShapeRow[] = [],
 ): StrategyBucketsSnapshot {
   type Acc = {
     sportId: string;
@@ -165,6 +180,7 @@ export function aggregateLiveBuckets(
     lastResolvedAt: string | null;
   };
 
+  const backtestMiddleRates = backtestMiddleRateByFamily(backtestShapes);
   const grouped = new Map<string, Acc>();
   let resolvedTotal = 0;
   for (const pkg of packages) {
@@ -198,7 +214,6 @@ export function aggregateLiveBuckets(
     acc.resolved += 1;
     if (roi > 0) acc.wins += 1;
     else acc.losses += 1;
-    // Both legs winning => true middle. Single-token win is a floor (1x).
     if ((pkg.resolution.winningTokenIds?.length ?? 0) >= 2) acc.middles += 1;
     acc.totalCost += cost;
     acc.totalPnl += pnl;
@@ -242,6 +257,9 @@ export function aggregateLiveBuckets(
     const avgPreflightDriftCents = acc.preflightDriftCount > 0
       ? round2(acc.preflightDriftSum / acc.preflightDriftCount)
       : null;
+    const backtestMiddleRate = acc.sportId === "SOCCER" && acc.marketType === "match_total"
+      ? backtestMiddleRates.get(acc.lineFamily) ?? null
+      : null;
     const base = {
       sportId: acc.sportId,
       marketType: acc.marketType,
@@ -268,13 +286,20 @@ export function aggregateLiveBuckets(
       slippageSampleCount: acc.fillSlippageCount,
       preflightDriftSampleCount: acc.preflightDriftCount,
     };
-    buckets.push({ ...base, recommendation: recommendationFor(base) });
+    buckets.push({
+      ...base,
+      executionFlag: executionFlagFor(base, backtestMiddleRate),
+    });
   }
   buckets.sort((a, b) => {
-    if (a.recommendation === "demote_candidate" && b.recommendation !== "demote_candidate") return -1;
-    if (b.recommendation === "demote_candidate" && a.recommendation !== "demote_candidate") return 1;
-    if (a.recommendation === "promote_candidate" && b.recommendation !== "promote_candidate") return -1;
-    if (b.recommendation === "promote_candidate" && a.recommendation !== "promote_candidate") return 1;
+    const rank = (flag: ExecutionFlag) => {
+      if (flag === "slippage_concern") return 0;
+      if (flag === "middle_rate_gap") return 1;
+      if (flag === "execution_review") return 2;
+      return 3;
+    };
+    const delta = rank(a.executionFlag) - rank(b.executionFlag);
+    if (delta !== 0) return delta;
     return b.resolved - a.resolved;
   });
 
@@ -285,6 +310,7 @@ export function aggregateLiveBuckets(
     buckets,
     allowlist: allow,
     baseline,
+    backtestShapes,
   };
 }
 
