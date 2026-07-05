@@ -16,7 +16,6 @@ import { join } from "node:path";
 import { config } from "dotenv";
 import type { LiveBucketStats, StrategyBucketsSnapshot } from "./lib/llm/bucket-aggregator.js";
 import { buildStrategySnapshot } from "./lib/llm/strategy-snapshot.js";
-import { loadDaemonSportsArbPackages } from "./lib/llm/daemon-bridge.js";
 import { ensureParent, ensureStateDirs, REPO_ROOT } from "./lib/paths.js";
 
 config({ path: "config.env" });
@@ -181,8 +180,7 @@ function writeDiffMarkdown(
 
 async function main() {
   ensureStateDirs();
-  const packages = await loadDaemonSportsArbPackages();
-  const snapshot = buildStrategySnapshot(packages);
+  const snapshot = buildStrategySnapshot();
   const previous = loadPreviousSnapshot() ?? findMostRecentHistoryBefore(todayUtc());
 
   ensureParent(SNAPSHOT_PATH);

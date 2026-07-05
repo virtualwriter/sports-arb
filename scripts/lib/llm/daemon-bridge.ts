@@ -407,6 +407,15 @@ function toSportsArbPackage(row: DaemonRow, event: GammaEvent | null | undefined
   return pkg;
 }
 
+export function loadDaemonSportsArbPackagesSync(): SportsArbPackage[] {
+  const active = readJson<DaemonRow[]>(PATHS.daemonLivePackages, []);
+  const archived = readArchivedDaemonRows();
+  const rows = combineDaemonRows(active, archived);
+  return rows
+    .map((row) => toSportsArbPackage(row, null))
+    .filter((pkg): pkg is SportsArbPackage => pkg !== null);
+}
+
 export async function loadDaemonSportsArbPackages(): Promise<SportsArbPackage[]> {
   const active = readJson<DaemonRow[]>(PATHS.daemonLivePackages, []);
   const archived = readArchivedDaemonRows();

@@ -33,6 +33,7 @@ run_npm() {
     SPORTS_ARB_DATA_DIR="${SPORTS_ARB_DATA_DIR:-/var/lib/sports-arb/data}" \
     SPORTS_ARB_RUNTIME_DIR="${SPORTS_ARB_RUNTIME_DIR:-/var/lib/sports-arb/runtime}" \
     NODE_NO_WARNINGS=1 \
+    NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=768}" \
     npm run "$@"
 }
 

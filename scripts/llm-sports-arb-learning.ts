@@ -1,27 +1,30 @@
 #!/usr/bin/env tsx
 import { appendFileSync } from "node:fs";
 import { config } from "dotenv";
-import { loadDaemonSportsArbPackages } from "./lib/llm/daemon-bridge.js";
 import { requestDeepSeek } from "./lib/llm/deepseek.js";
 import { compactBacktestShapesForLlm } from "./lib/llm/backtest-shape-evidence.js";
-import { summarizeEvidence, writeLlmJournal } from "./lib/llm/learning.js";
+import { writeLlmJournal } from "./lib/llm/learning.js";
 import type { StrategyBucketsSnapshot } from "./lib/llm/bucket-aggregator.js";
 import { buildStrategySnapshot } from "./lib/llm/strategy-snapshot.js";
 import { PATHS, ensureParent, ensureStateDirs } from "./lib/paths.js";
-import { readShadowPackages } from "./lib/shadow-ledger.js";
 import { readJson } from "./lib/storage.js";
-import type { HealthSnapshot, SportsArbPackage } from "./lib/types.js";
+import type { HealthSnapshot } from "./lib/types.js";
 
 config({ path: "config.env" });
 config({ path: ".env" });
 
 function compactContext(
-  live: SportsArbPackage[],
-  shadows: SportsArbPackage[],
   health: HealthSnapshot,
   strategy: StrategyBucketsSnapshot,
 ): string {
-  const evidence = summarizeEvidence([...live, ...shadows]).slice(0, 20);
+  const resolvedLive = strategy.buckets.filter((b) => b.resolved > 0);
+  const evidence = resolvedLive.slice(0, 20).map((b) => ({
+    comparisonGroup: b.comparisonGroup,
+    resolved: b.resolved,
+    capRoi: b.capitalWeightedRoiPct,
+    middleRate: b.middleRate,
+    executionFlag: b.executionFlag,
+  }));
   const enforcedLiveBuckets = strategy.buckets
     .filter((b) => b.enforcedLive)
     .map((b) => ({
@@ -44,12 +47,8 @@ function compactContext(
     generatedAt: new Date().toISOString(),
     health,
     live: {
-      open: live.filter((pkg) => !["resolved", "cancelled", "flattened"].includes(pkg.status)).length,
-      resolved: live.filter((pkg) => pkg.resolution?.status === "resolved").length,
-    },
-    shadows: {
-      open: shadows.filter((pkg) => pkg.status === "shadow_open").length,
-      resolved: shadows.filter((pkg) => pkg.resolution?.status === "resolved").length,
+      resolvedPackages: strategy.totalResolvedPackages,
+      bucketCount: strategy.buckets.length,
     },
     gateAuthority: {
       source: "shape-roi-jun16-jul3-continuous.json + sports-strategy.ts",
@@ -92,22 +91,18 @@ const SYSTEM_PROMPT = [
 
 async function main() {
   ensureStateDirs();
-  const daemonLive = await loadDaemonSportsArbPackages();
-  const legacyLive = readJson<SportsArbPackage[]>(PATHS.livePackages, []);
-  const live = daemonLive.length > 0 ? daemonLive : legacyLive;
-  const shadows = readShadowPackages(50_000);
   const health = readJson<HealthSnapshot>(PATHS.health, {
     updatedAt: new Date().toISOString(),
     status: "ok",
     clobAuth: "unknown",
     websocket: "unknown",
-    openPackages: live.length,
+    openPackages: 0,
     largeOrphanActive: false,
     killSwitchActive: false,
     notes: [],
   });
-  const strategy = buildStrategySnapshot(live);
-  const context = compactContext(live, shadows, health, strategy);
+  const strategy = buildStrategySnapshot();
+  const context = compactContext(health, strategy);
   const learnModel = process.env.SPORTS_ARB_LLM_LEARN_MODEL ?? "deepseek-chat";
   const result = await requestDeepSeek([
     { role: "system", content: SYSTEM_PROMPT },
