@@ -28,6 +28,8 @@ pause_daemon() {
 resume_daemon() {
   if [[ "$STOPPED" == "1" ]]; then
     echo "[nightly-digest] starting $DAEMON_UNIT"
+    systemctl reset-failed "$DAEMON_UNIT" 2>/dev/null || true
+    sleep 3
     systemctl start "$DAEMON_UNIT"
   fi
 }

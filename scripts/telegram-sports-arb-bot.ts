@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, statSync } from "node:fs";
 import { config } from "dotenv";
 import { buildDailyReport } from "./daily-sports-arb-report.js";
 import { PATHS, ensureParent } from "./lib/paths.js";
@@ -56,8 +56,25 @@ function recordOperatorAction(action: string): void {
 async function main() {
   const command = process.argv[2] ?? "daily";
   if (command === "daily") {
-    const report = await buildDailyReport();
-    await sendMessage(report.markdown.slice(0, 3900));
+    const maxAgeMs = Number(process.env.SPORTS_ARB_TELEGRAM_REPORT_MAX_AGE_MS ?? 86_400_000);
+    let markdown: string;
+    let markdownPath = PATHS.dailyMarkdown;
+    if (existsSync(PATHS.dailyMarkdown)) {
+      const ageMs = Date.now() - statSync(PATHS.dailyMarkdown).mtimeMs;
+      if (ageMs <= maxAgeMs) {
+        markdown = readFileSync(PATHS.dailyMarkdown, "utf8");
+        console.log(`[telegram] reusing daily markdown (${Math.round(ageMs / 60_000)}m old)`);
+      } else {
+        const report = await buildDailyReport();
+        markdown = report.markdown;
+        markdownPath = report.markdownPath;
+      }
+    } else {
+      const report = await buildDailyReport();
+      markdown = report.markdown;
+      markdownPath = report.markdownPath;
+    }
+    await sendMessage(markdown.slice(0, 3900));
     await sendMessage((await sportsPnlTelegramText()).slice(0, 3900));
     const llm = latestLlmAnalysisText(3800);
     if (llm) {
@@ -66,7 +83,7 @@ async function main() {
     } else {
       console.warn("[telegram] no LLM analysis in state; run llm:learn before telegram:daily");
     }
-    console.log(`[telegram] sent daily report ${report.markdownPath}`);
+    console.log(`[telegram] sent daily report ${markdownPath}`);
     return;
   }
   if (command === "pnl") {

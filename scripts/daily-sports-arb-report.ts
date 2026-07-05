@@ -4,7 +4,6 @@ import { config } from "dotenv";
 import { loadDaemonSportsArbPackagesSync } from "./lib/llm/daemon-bridge.js";
 import { latestLlmAnalysisText, summarizeEvidence } from "./lib/llm/learning.js";
 import { PATHS, ensureParent, ensureStateDirs } from "./lib/paths.js";
-import { readShadowPackages } from "./lib/shadow-ledger.js";
 import { readJson, writeJson } from "./lib/storage.js";
 import type { HealthSnapshot, SportsArbPackage } from "./lib/types.js";
 
@@ -103,7 +102,7 @@ export async function buildDailyReport() {
   const daemonLive = loadDaemonSportsArbPackagesSync();
   const legacyLive = readJson<SportsArbPackage[]>(PATHS.livePackages, []);
   const live = daemonLive.length > 0 ? daemonLive : legacyLive;
-  const shadows = readShadowPackages(2_000);
+  const shadows: SportsArbPackage[] = [];
   const health = readJson<HealthSnapshot>(PATHS.health, {
     updatedAt: new Date().toISOString(),
     status: "ok",
