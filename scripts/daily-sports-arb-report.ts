@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 import { writeFileSync } from "node:fs";
 import { config } from "dotenv";
-import { loadDaemonSportsArbPackages } from "./lib/llm/daemon-bridge.js";
+import { loadDaemonSportsArbPackagesSync } from "./lib/llm/daemon-bridge.js";
 import { latestLlmAnalysisText, summarizeEvidence } from "./lib/llm/learning.js";
 import { PATHS, ensureParent, ensureStateDirs } from "./lib/paths.js";
 import { readShadowPackages } from "./lib/shadow-ledger.js";
