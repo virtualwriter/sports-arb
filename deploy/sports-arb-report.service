@@ -7,9 +7,12 @@ Wants=network-online.target
 Type=oneshot
 WorkingDirectory=/opt/sports-arb
 EnvironmentFile=/etc/sports-arb.env
-ExecStart=/usr/bin/env npm run llm:learn
-ExecStart=/usr/bin/env npm run report:daily
-ExecStart=/usr/bin/env npm run report:pnl
-ExecStartPost=/usr/bin/env npm run telegram:daily
-User=sports-arb
-Group=sports-arb
+Environment=SPORTS_ARB_STATE_DIR=/var/lib/sports-arb
+Environment=SPORTS_ARB_DATA_DIR=/var/lib/sports-arb/data
+Environment=SPORTS_ARB_RUNTIME_DIR=/var/lib/sports-arb/runtime
+# Root so we can pause the daemon to avoid OOM; npm runs as sports-arb inside the script.
+# LLM runs at 04:00 via sports-arb-llm-learn.timer — this job sends report+PnL+Telegram only.
+ExecStart=/bin/bash /opt/sports-arb/scripts/nightly-digest.sh telegram
+User=root
+Group=root
+TimeoutStartSec=900
