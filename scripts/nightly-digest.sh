@@ -3,6 +3,13 @@
 # the 3.7GB VPS, then resume trading. Ledger files on disk are read directly.
 set -euo pipefail
 
+if [[ -f /etc/sports-arb.env ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source /etc/sports-arb.env
+  set +a
+fi
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
