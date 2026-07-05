@@ -100,10 +100,10 @@ function markdownReport(args: {
 
 export async function buildDailyReport() {
   ensureStateDirs();
-  const daemonLive = await loadDaemonSportsArbPackages();
+  const daemonLive = loadDaemonSportsArbPackagesSync();
   const legacyLive = readJson<SportsArbPackage[]>(PATHS.livePackages, []);
   const live = daemonLive.length > 0 ? daemonLive : legacyLive;
-  const shadows = readShadowPackages(50_000);
+  const shadows = readShadowPackages(2_000);
   const health = readJson<HealthSnapshot>(PATHS.health, {
     updatedAt: new Date().toISOString(),
     status: "ok",
