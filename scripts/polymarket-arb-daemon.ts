@@ -35,6 +35,7 @@ import { recordSoccerEventShapeCost, soccerBestSeenCostBlock } from "./lib/socce
 import { appendShadowPackage } from "./lib/shadow-ledger.js";
 import { packageFromCandidate } from "./lib/package-factory.js";
 import { evaluateSportsStrategy, soccerEffectiveMinNarrowYesBid, sportsEffectiveMaxEntryLegPrice } from "./lib/sports-strategy.js";
+import { soccerBacktestLiveGateBlock } from "./lib/soccer-backtest-live-gate.js";
 import {
   type Candidate,
   type Direction,
@@ -259,10 +260,8 @@ const BALANCE_HEADROOM_MULTIPLIER = Number(
   ?? process.env.ARB_DAEMON_SPORTS_BALANCE_HEADROOM_MULTIPLIER
   ?? 1.03,
 );
-// Block sports entries close to the scheduled event/market start. Sports top of
-// book becomes especially stale near kickoff; default to a 15-minute no-entry
-// buffer unless explicitly overridden.
-const SPORTS_ENTRY_CUTOFF_MS = Number(process.env.ARB_DAEMON_SPORTS_ENTRY_CUTOFF_MS ?? 15 * 60_000);
+// Block sports entries after scheduled kickoff. Default: no pre-kickoff buffer (0 ms).
+const SPORTS_ENTRY_CUTOFF_MS = Number(process.env.ARB_DAEMON_SPORTS_ENTRY_CUTOFF_MS ?? 0);
 // Non-sports keep reserve depth because stale or vanishing displayed liquidity
 // produced uneven partial-fill orphans. Sports execution now buys the cheap leg
 // first and sizes the hedge to the actual fill, so default to using the full
@@ -1287,6 +1286,9 @@ function sportsExecutionBlocked(candidate: Candidate): string | null {
     if (SOCCER_MAX_NARROW_YES_BID > 0 && narrowYesBid - EPSILON > SOCCER_MAX_NARROW_YES_BID) {
       return `soccer narrow yes bid above live band bid=${narrowYesBid.toFixed(4)} max=${SOCCER_MAX_NARROW_YES_BID.toFixed(4)}`;
     }
+    const strategy = evaluateSportsStrategy(candidate);
+    const backtestBlock = soccerBacktestLiveGateBlock(candidate, strategy.marketType);
+    if (backtestBlock) return backtestBlock;
   }
   if (candidate.asset === "MLB" && MLB_MIN_NARROW_YES_BID > 0 && narrowYesBid + EPSILON < MLB_MIN_NARROW_YES_BID) {
     return `mlb narrow yes bid below live band bid=${narrowYesBid.toFixed(4)} min=${MLB_MIN_NARROW_YES_BID.toFixed(4)}`;
@@ -1472,6 +1474,7 @@ function costInRange(cost: number, range: CostRange): boolean {
 }
 
 function sportsCostRangeBlock(candidate: Candidate): string | null {
+  if (candidate.asset === "SOCCER") return null;
   if (!isSportsCandidate(candidate) || SPORTS_ALLOWED_COST_RANGES.length === 0) return null;
   if (SPORTS_ALLOWED_COST_RANGES.some((range) => costInRange(candidate.packageCost, range))) return null;
   const allowed = SPORTS_ALLOWED_COST_RANGES.map((range) => range.label).join("|");

@@ -13,6 +13,7 @@ import type { StrategyAllowlistSnapshot } from "../sports-strategy.js";
 import type { BacktestShapeRow } from "./backtest-shape-evidence.js";
 import { backtestMiddleRateByFamily } from "./backtest-shape-evidence.js";
 import type { BaselineBucket } from "./baseline-evidence.js";
+import { isSoccerBacktestEnforcedShape } from "./backtest-shape-evidence.js";
 
 export const TIER_THRESHOLDS = {
   preliminary: 5,
@@ -89,12 +90,8 @@ function isEnforcedLive(
   allow: StrategyAllowlistSnapshot,
 ): boolean {
   if (sportId === "SOCCER") {
-    if (marketType !== "match_total") return false;
-    if (!allow.soccer.matchTotalLineFamilies.includes(lineFamily)) return false;
-    if (!allow.soccer.matchTotalWidthsAllowed.includes(middleWidth)) return false;
-    const familyMax = allow.soccer.matchTotalFamilyMaxLiveCost[lineFamily];
-    if (familyMax === undefined) return false;
-    return isCostBucketInRange(costBucket, { lo: allow.soccer.matchTotalMinLiveCost, hi: familyMax });
+    if (!allow.soccer.allowedMarketTypes.includes(marketType)) return false;
+    return isSoccerBacktestEnforcedShape(marketType, lineFamily, middleWidth);
   }
   if (sportId === "MLB") {
     if (marketType === "game_total") {

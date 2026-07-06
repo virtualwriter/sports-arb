@@ -55,29 +55,11 @@ function impliedNarrowYesBid(candidate: Candidate): number {
   return Math.max(0, Math.min(1, 1 - candidate.narrow.noBook.ask));
 }
 
-// Backtest-positive match-total families only. Spreads are shadow-only.
-const SOCCER_MATCH_TOTAL_LINE_FAMILIES = new Set(["2.5-4.5", "2.5-5.5", "2.5-6.5", "3.5-5.5", "3.5-6.5"]);
-const SOCCER_MATCH_TOTAL_WIDTH_ALLOW = new Set([2, 3, 4]);
-const SOCCER_MATCH_TOTAL_MIN_LIVE_COST = 1.05;
-// Enforced on candidate.packageCost (live submit / fill quote), not scan-firstObserved cost.
-const SOCCER_MATCH_TOTAL_FAMILY_MAX_LIVE_COST = new Map<string, number>([
-  ["3.5-5.5", Number(process.env.ARB_DAEMON_SOCCER_MAX_COST_3_5_5 ?? 1.18)],
-  ["3.5-6.5", Number(process.env.ARB_DAEMON_SOCCER_MAX_COST_3_5_6_5 ?? 1.20)],
-  ["2.5-4.5", Number(process.env.ARB_DAEMON_SOCCER_MAX_COST_2_5_4_5 ?? 1.22)],
-  ["2.5-5.5", Number(process.env.ARB_DAEMON_SOCCER_MAX_COST_2_5_5 ?? 1.22)],
-  ["2.5-6.5", Number(process.env.ARB_DAEMON_SOCCER_MAX_COST_2_5_6_5 ?? 1.22)],
-]);
-
 const MLB_GAME_TOTAL_LIVE_COST_RANGES = new Map<string, { lo: number; hi: number }>([
   ["5.5-7.5", { lo: 1.19, hi: 1.22 }],
   ["6.5-7.5", { lo: 1.10, hi: 1.16 }],
   ["6.5-8.5", { lo: 1.16, hi: 1.19 }],
 ]);
-
-function isFullGameMatchTotal(candidate: Candidate): boolean {
-  return candidate.broad.ladderKey.includes(":total:full-game")
-    && candidate.narrow.ladderKey.includes(":total:full-game");
-}
 
 export function soccerEffectiveMinNarrowYesBid(_candidate: Candidate): number {
   return SOCCER_MIN_NARROW_YES_BID;
@@ -87,33 +69,12 @@ export function sportsEffectiveMaxEntryLegPrice(_candidate: Candidate, defaultCa
   return defaultCap;
 }
 
-export function soccerMatchTotalFamilyMaxLiveCost(lineFamily: string): number | undefined {
-  return SOCCER_MATCH_TOTAL_FAMILY_MAX_LIVE_COST.get(lineFamily);
-}
-
 function soccerLive(candidate: Candidate, marketType: MarketType): string[] {
   const failures: string[] = [];
-  const cost = candidate.packageCost;
-  const family = normalizeLineFamily(candidate);
-  const width = middleWidth(candidate);
   const narrowYesBid = impliedNarrowYesBid(candidate);
 
-  if (marketType === "spread") {
-    failures.push("soccer_spread_not_live");
-    return failures;
-  }
-  if (marketType !== "match_total") {
+  if (!(marketType === "match_total" || marketType === "spread")) {
     failures.push("soccer_market_shape_not_live");
-  }
-  if (marketType === "match_total") {
-    if (!isFullGameMatchTotal(candidate)) failures.push("soccer_total_not_full_game");
-    if (!SOCCER_MATCH_TOTAL_WIDTH_ALLOW.has(width)) failures.push("soccer_total_width_not_historical_winner");
-    if (!SOCCER_MATCH_TOTAL_LINE_FAMILIES.has(family)) failures.push("soccer_total_line_family_not_historical_winner");
-    if (cost >= 1 && cost < SOCCER_MATCH_TOTAL_MIN_LIVE_COST) failures.push("soccer_cost_bucket_not_live");
-    const familyMaxCost = SOCCER_MATCH_TOTAL_FAMILY_MAX_LIVE_COST.get(family);
-    if (familyMaxCost !== undefined && cost >= 1 && cost > familyMaxCost + 1e-9) {
-      failures.push("soccer_total_family_max_cost_exceeded");
-    }
   }
   if (SPORTS_MAX_ENTRY_LEG_PRICE > 0 && maxEntryLeg(candidate) >= SPORTS_MAX_ENTRY_LEG_PRICE) {
     failures.push("soccer_max_entry_leg_price_exceeded");
@@ -178,11 +139,8 @@ function shadowPurpose(candidate: Candidate, gateFailures: string[]): ShadowPurp
 export type StrategyAllowlistSnapshot = {
   generatedAt: string;
   soccer: {
-    matchTotalOnly: boolean;
-    matchTotalMinLiveCost: number;
-    matchTotalLineFamilies: string[];
-    matchTotalFamilyMaxLiveCost: Record<string, number>;
-    matchTotalWidthsAllowed: number[];
+    liveGate: "daemon_backtest_positive_roi";
+    allowedMarketTypes: string[];
     minNarrowYesBid: number;
     maxNarrowYesBid: number;
     maxEntryLegPrice: number;
@@ -204,11 +162,8 @@ export function currentStrategyAllowlist(): StrategyAllowlistSnapshot {
   return {
     generatedAt: new Date().toISOString(),
     soccer: {
-      matchTotalOnly: true,
-      matchTotalMinLiveCost: SOCCER_MATCH_TOTAL_MIN_LIVE_COST,
-      matchTotalLineFamilies: [...SOCCER_MATCH_TOTAL_LINE_FAMILIES],
-      matchTotalFamilyMaxLiveCost: Object.fromEntries(SOCCER_MATCH_TOTAL_FAMILY_MAX_LIVE_COST.entries()),
-      matchTotalWidthsAllowed: [...SOCCER_MATCH_TOTAL_WIDTH_ALLOW],
+      liveGate: "daemon_backtest_positive_roi",
+      allowedMarketTypes: ["match_total", "spread"],
       minNarrowYesBid: SOCCER_MIN_NARROW_YES_BID,
       maxNarrowYesBid: SOCCER_MAX_NARROW_YES_BID,
       maxEntryLegPrice: SPORTS_MAX_ENTRY_LEG_PRICE,

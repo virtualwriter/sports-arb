@@ -88,84 +88,16 @@ describe("sports strategy", () => {
     expect(decision.costBucket).toBe("1.190-1.220");
   });
 
-  it("allows historical-winner full-game soccer match totals", () => {
-    const decision = evaluateSportsStrategy(soccerCandidate());
+  it("allows soccer match totals without strategy-layer cost or family gates", () => {
+    const decision = evaluateSportsStrategy(soccerCandidate({ packageCost: 1.31 }));
     expect(decision.liveEligible).toBe(true);
     expect(decision.marketType).toBe("match_total");
     expect(decision.lineFamily).toBe("2.5-5.5");
     expect(decision.middleWidth).toBe(3);
-  });
-
-  it("blocks 3.5-6.5 above the live family max cost", () => {
-    const broad = quote({
-      eventSlug: "fifwc-civ-nor-2026-06-30-more-markets",
-      ladderKey: "sports:soccer:fifwc-civ-nor-2026-06-30-more-markets:total:full-game",
-      question: "Côte d'Ivoire vs. Norway: O/U 3.5",
-      strike: 3.5,
-      yesBook: { tokenId: "yes-broad", bid: 0.3, bidSize: 20, ask: 0.35, askSize: 20, spread: 0.01, minOrderSize: 1 },
-    });
-    const narrow = quote({
-      eventSlug: "fifwc-civ-nor-2026-06-30-more-markets",
-      ladderKey: "sports:soccer:fifwc-civ-nor-2026-06-30-more-markets:total:full-game",
-      question: "Côte d'Ivoire vs. Norway: O/U 6.5",
-      strike: 6.5,
-      noTokenId: "no-narrow",
-      noBook: { tokenId: "no-narrow", bid: 0.9, bidSize: 20, ask: 0.93, askSize: 20, spread: 0.01, minOrderSize: 1 },
-    });
-    const decision = evaluateSportsStrategy(soccerCandidate({ broad, narrow, packageCost: 1.278 }));
-    expect(decision.liveEligible).toBe(false);
-    expect(decision.gateFailures).toContain("soccer_total_family_max_cost_exceeded");
-  });
-
-  it("blocks 3.5-5.5 above the live family max cost", () => {
-    const broad = quote({
-      eventSlug: "fifwc-arg-cvi-2026-07-03-more-markets",
-      ladderKey: "sports:soccer:fifwc-arg-cvi-2026-07-03-more-markets:total:full-game",
-      question: "Argentina vs. Cabo Verde: O/U 3.5",
-      strike: 3.5,
-      yesBook: { tokenId: "yes-broad", bid: 0.3, bidSize: 20, ask: 0.35, askSize: 20, spread: 0.01, minOrderSize: 1 },
-    });
-    const narrow = quote({
-      eventSlug: "fifwc-arg-cvi-2026-07-03-more-markets",
-      ladderKey: "sports:soccer:fifwc-arg-cvi-2026-07-03-more-markets:total:full-game",
-      question: "Argentina vs. Cabo Verde: O/U 5.5",
-      strike: 5.5,
-      noTokenId: "no-narrow",
-      noBook: { tokenId: "no-narrow", bid: 0.9, bidSize: 20, ask: 0.93, askSize: 20, spread: 0.01, minOrderSize: 1 },
-    });
-    const decision = evaluateSportsStrategy(soccerCandidate({ broad, narrow, packageCost: 1.27 }));
-    expect(decision.liveEligible).toBe(false);
-    expect(decision.gateFailures).toContain("soccer_total_family_max_cost_exceeded");
-  });
-
-  it("allows 3.5-5.5 at or below the live family max cost", () => {
-    const broad = quote({
-      eventSlug: "fifwc-arg-cvi-2026-07-03-more-markets",
-      ladderKey: "sports:soccer:fifwc-arg-cvi-2026-07-03-more-markets:total:full-game",
-      question: "Argentina vs. Cabo Verde: O/U 3.5",
-      strike: 3.5,
-      yesBook: { tokenId: "yes-broad", bid: 0.3, bidSize: 20, ask: 0.30, askSize: 20, spread: 0.01, minOrderSize: 1 },
-    });
-    const narrow = quote({
-      eventSlug: "fifwc-arg-cvi-2026-07-03-more-markets",
-      ladderKey: "sports:soccer:fifwc-arg-cvi-2026-07-03-more-markets:total:full-game",
-      question: "Argentina vs. Cabo Verde: O/U 5.5",
-      strike: 5.5,
-      noTokenId: "no-narrow",
-      noBook: { tokenId: "no-narrow", bid: 0.9, bidSize: 20, ask: 0.93, askSize: 20, spread: 0.01, minOrderSize: 1 },
-    });
-    const decision = evaluateSportsStrategy(soccerCandidate({ broad, narrow, packageCost: 1.18 }));
     expect(decision.gateFailures).not.toContain("soccer_total_family_max_cost_exceeded");
-    expect(decision.liveEligible).toBe(true);
   });
 
-  it("blocks tier-3 soccer match totals above family caps", () => {
-    const decision = evaluateSportsStrategy(soccerCandidate({ packageCost: 1.31 }));
-    expect(decision.liveEligible).toBe(false);
-    expect(decision.gateFailures).toContain("soccer_total_family_max_cost_exceeded");
-  });
-
-  it("blocks soccer spreads from live entry", () => {
+  it("allows soccer spreads at the strategy layer", () => {
     const broad = quote({
       eventSlug: "fifwc-che-can-2026-06-24-more-markets",
       ladderKey: "sports:soccer:fifwc-che-can-2026-06-24-more-markets:spread:full-game:canada",
@@ -181,27 +113,27 @@ describe("sports strategy", () => {
       noBook: { tokenId: "no-narrow", bid: 0.9, bidSize: 20, ask: 0.93, askSize: 20, spread: 0.01, minOrderSize: 1 },
     });
     const decision = evaluateSportsStrategy(soccerCandidate({ broad, narrow, packageCost: 1.18 }));
-    expect(decision.liveEligible).toBe(false);
-    expect(decision.gateFailures).toContain("soccer_spread_not_live");
+    expect(decision.liveEligible).toBe(true);
+    expect(decision.marketType).toBe("spread");
   });
 
-  it("blocks first-half soccer totals from live entry", () => {
+  it("blocks unsupported soccer market types", () => {
     const broad = quote({
       eventSlug: "fifwc-che-can-2026-06-24-more-markets",
-      ladderKey: "sports:soccer:fifwc-che-can-2026-06-24-more-markets:total:first-half",
-      question: "Switzerland vs. Canada: 1st Half O/U 1.5",
+      ladderKey: "sports:soccer:fifwc-che-can-2026-06-24-more-markets:total:team",
+      question: "Switzerland: team-total O/U 1.5",
       strike: 1.5,
       yesBook: { tokenId: "yes-broad", bid: 0.3, bidSize: 20, ask: 0.25, askSize: 20, spread: 0.01, minOrderSize: 1 },
     });
     const narrow = quote({
       eventSlug: "fifwc-che-can-2026-06-24-more-markets",
-      ladderKey: "sports:soccer:fifwc-che-can-2026-06-24-more-markets:total:first-half",
-      question: "Switzerland vs. Canada: 1st Half O/U 3.5",
-      strike: 3.5,
+      ladderKey: "sports:soccer:fifwc-che-can-2026-06-24-more-markets:total:team",
+      question: "Switzerland: team-total O/U 2.5",
+      strike: 2.5,
       noBook: { tokenId: "no-narrow", bid: 0.9, bidSize: 20, ask: 0.93, askSize: 20, spread: 0.01, minOrderSize: 1 },
     });
     const decision = evaluateSportsStrategy(soccerCandidate({ broad, narrow, packageCost: 1.18 }));
     expect(decision.liveEligible).toBe(false);
-    expect(decision.gateFailures).toContain("soccer_total_not_full_game");
+    expect(decision.gateFailures).toContain("soccer_market_shape_not_live");
   });
 });

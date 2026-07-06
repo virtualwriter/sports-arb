@@ -4,13 +4,14 @@ import { loadBacktestShapeEvidence } from "./backtest-shape-evidence.js";
 import { currentStrategyAllowlist } from "../sports-strategy.js";
 
 describe("loadBacktestShapeEvidence", () => {
-  it("loads the five enforced soccer match-total families", () => {
+  it("loads all backtest-positive soccer shapes for daemon live gating", () => {
     const shapes = loadBacktestShapeEvidence(currentStrategyAllowlist());
-    expect(shapes).toHaveLength(5);
-    expect(shapes.every((s) => s.enforcedLive)).toBe(true);
-    expect(shapes.every((s) => s.worstRoiPct > 0)).toBe(true);
-    const families = shapes.map((s) => s.lineFamily).sort();
-    expect(families).toEqual(["2.5-4.5", "2.5-5.5", "2.5-6.5", "3.5-5.5", "3.5-6.5"]);
+    expect(shapes.length).toBeGreaterThan(20);
+    const enforced = shapes.filter((s) => s.enforcedLive);
+    expect(enforced.length).toBeGreaterThan(20);
+    expect(enforced.every((s) => s.worstRoiPct > 0)).toBe(true);
+    expect(enforced.some((s) => s.marketType === "spread")).toBe(true);
+    expect(enforced.some((s) => s.lineFamily === "3.5-4.5")).toBe(true);
   });
 });
 
