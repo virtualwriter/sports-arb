@@ -1,7 +1,7 @@
 // Daemon-layer live gate for soccer: allow shapes with positive backtest ROI@worst
 // at or below the backtest worst-case average cost for that shape.
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { Candidate } from "./monotonic-arb-core.js";
 import type { MarketType } from "./types.js";
@@ -30,7 +30,21 @@ const COST_TOLERANCE = Number(process.env.ARB_DAEMON_SOCCER_BACKTEST_COST_TOLERA
 const BACKTEST_SHAPE_PATH = process.env.ARB_DAEMON_SOCCER_BACKTEST_SHAPE_PATH
   ?? join(process.cwd(), "analysis", "shape-roi-jun16-jul3-continuous.json");
 
+// The nightly strategy-rebuild service regenerates the shape file while the
+// daemon keeps running, so the cache is keyed on file mtime: every nightly
+// rebuild is picked up automatically without a daemon restart.
 let cachedPositiveShapes: Map<string, SoccerBacktestShape> | null = null;
+let cachedShapesMtimeMs: number | null = null;
+let lastMtimeCheckMs = 0;
+const MTIME_CHECK_INTERVAL_MS = 60_000;
+
+function shapeFileMtimeMs(path: string): number | null {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return null;
+  }
+}
 
 function formatStrike(strike: number): string {
   return Number.isInteger(strike) ? String(strike) : String(strike);
@@ -58,7 +72,16 @@ export function backtestShapeKey(marketType: string, lineFamily: string, middleW
 }
 
 export function loadSoccerBacktestPositiveShapes(path: string = BACKTEST_SHAPE_PATH): Map<string, SoccerBacktestShape> {
-  if (cachedPositiveShapes) return cachedPositiveShapes;
+  const now = Date.now();
+  if (cachedPositiveShapes && now - lastMtimeCheckMs < MTIME_CHECK_INTERVAL_MS) {
+    return cachedPositiveShapes;
+  }
+  lastMtimeCheckMs = now;
+  const mtimeMs = shapeFileMtimeMs(path);
+  if (cachedPositiveShapes && mtimeMs === cachedShapesMtimeMs) {
+    return cachedPositiveShapes;
+  }
+  cachedShapesMtimeMs = mtimeMs;
   const out = new Map<string, SoccerBacktestShape>();
   if (!existsSync(path)) {
     cachedPositiveShapes = out;
@@ -95,6 +118,8 @@ export function loadSoccerBacktestPositiveShapes(path: string = BACKTEST_SHAPE_P
 
 export function resetSoccerBacktestShapeCacheForTests(): void {
   cachedPositiveShapes = null;
+  cachedShapesMtimeMs = null;
+  lastMtimeCheckMs = 0;
 }
 
 export function soccerBacktestLiveGateBlock(

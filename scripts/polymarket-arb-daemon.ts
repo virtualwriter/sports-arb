@@ -1254,7 +1254,10 @@ function isSportsCandidate(candidate: Candidate): boolean {
 
 function sportsEntryBlocked(candidate: Candidate): string | null {
   if (!isSportsCandidate(candidate)) return null;
-  if (SPORTS_ENTRY_CUTOFF_MS <= 0) return null;
+  // Cutoff semantics: 0 = allow entries right up until scheduled start (endDate),
+  // positive = require that many ms of pre-kickoff buffer, negative = disabled
+  // (in-play entries allowed; NOT recommended — post-kickoff re-entry compounds).
+  if (SPORTS_ENTRY_CUTOFF_MS < 0) return null;
   const dates = [candidate.broad.endDate, candidate.narrow.endDate].filter(Boolean) as string[];
   const endTimes = dates.map((date) => Date.parse(date)).filter((time) => Number.isFinite(time));
   if (!endTimes.length) return "sports market missing endDate";
@@ -1362,17 +1365,26 @@ function archiveStaleNbaLedgers() {
     if (slug && (isSportsAsset(row.asset) || isSportsSlug(slug))) activeNbaOrphanSlugs.add(slug);
   }
 
+  // Never archive events the daemon is still actively watching. Stripping a
+  // filled package row from the live ledger while the market is still tradable
+  // erases the per-event exposure history (`soccer_event_already_filled`,
+  // USD/package caps) and the daemon re-enters the same package on the next WS
+  // tick — this compounded one $20 soccer entry into a $162 position on
+  // 2026-07-07 (fifwc-che-col re-entered every watchlist refresh).
+  const watchedSlugs = new Set<string>();
+  for (const pkg of packages.values()) watchedSlugs.add(pkg.base.eventSlug);
+
   const staleSlugs = new Set<string>();
   for (const row of packagesRows) {
     const slug = row.eventSlug || packageSlug(row.packageId);
-    if (!slug || activeNbaOrphanSlugs.has(slug)) continue;
+    if (!slug || activeNbaOrphanSlugs.has(slug) || watchedSlugs.has(slug)) continue;
     if (!isSportsAsset(row.asset) && !isSportsSlug(slug)) continue;
     const endMs = packageEndMs(row);
     if (endMs !== null && endMs <= cutoffMs) staleSlugs.add(slug);
   }
   for (const row of orphanRows) {
     const slug = row.eventSlug || packageSlug(row.packageId);
-    if (!slug || activeNbaOrphanSlugs.has(slug)) continue;
+    if (!slug || activeNbaOrphanSlugs.has(slug) || watchedSlugs.has(slug)) continue;
     if (!isSportsAsset(row.asset) && !isSportsSlug(slug)) continue;
     const endMs = orphanEndMs(row);
     if (endMs !== null && endMs <= cutoffMs) staleSlugs.add(slug);

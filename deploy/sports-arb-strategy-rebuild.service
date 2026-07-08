@@ -15,5 +15,5 @@ Environment=SPORTS_ARB_STATE_DIR=/var/lib/sports-arb
 Environment=SPORTS_ARB_DATA_DIR=/var/lib/sports-arb/data
 Environment=SPORTS_ARB_RUNTIME_DIR=/var/lib/sports-arb/runtime
 Environment=NODE_NO_WARNINGS=1
-ExecStart=/bin/bash -c 'python3 scripts/build_continuous_backtest.py --repo-root /opt/sports-arb --data-dir /var/lib/sports-arb/data && /usr/bin/env npx tsx scripts/rebuild-strategy-buckets.ts && python3 scripts/join_live_scan_backtest.py --repo-root /opt/sports-arb --data-dir /var/lib/sports-arb/data'
-TimeoutStartSec=600
+ExecStart=/bin/bash -c 'python3 scripts/build_continuous_backtest.py --repo-root /opt/sports-arb --data-dir /var/lib/sports-arb/data && PYTHONPATH=scripts python3 scripts/shape_roi_best_worst.py --packages analysis/monotonic-chronological-packages-continuous.csv --gamma-cache analysis/gamma-market-cache-v2.json --data-dir /var/lib/sports-arb/data --min-n 5 --json-out analysis/shape-roi-jun16-jul3-continuous.json && PYTHONPATH=scripts python3 scripts/build_ev_lookup.py --repo-root /opt/sports-arb --data-dir /var/lib/sports-arb/data && /usr/bin/env npx tsx scripts/rebuild-strategy-buckets.ts && python3 scripts/join_live_scan_backtest.py --repo-root /opt/sports-arb --data-dir /var/lib/sports-arb/data'
+TimeoutStartSec=1800

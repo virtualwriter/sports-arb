@@ -2,6 +2,7 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { config } from "dotenv";
 import { dirname, join } from "node:path";
+import { mapLimit } from "./lib/monotonic-arb-core.js";
 import { PATHS, ensureParent, ensureStateDirs } from "./lib/paths.js";
 import { readJson, writeJson } from "./lib/storage.js";
 
@@ -53,6 +54,10 @@ function num(value: unknown, fallback = 0): number {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
 }
+
+const GAMMA_FETCH_CONCURRENCY = Math.max(1, num(process.env.SPORTS_PNL_GAMMA_CONCURRENCY, 5));
+const GAMMA_FETCH_RETRIES = Math.max(1, num(process.env.SPORTS_PNL_GAMMA_RETRIES, 3));
+const GAMMA_FETCH_RETRY_MS = Math.max(100, num(process.env.SPORTS_PNL_GAMMA_RETRY_MS, 500));
 
 function parseJsonArray(value: unknown): unknown[] {
   if (Array.isArray(value)) return value;
@@ -195,26 +200,50 @@ function gammaValue(row: JsonRow, cost: number, shares: number, event: GammaEven
   };
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function fetchGammaEvent(slug: string): Promise<GammaEvent | null> {
   const response = await fetch(`${GAMMA_API}/events?${new URLSearchParams({ slug })}`, {
     headers: { Accept: "application/json", "User-Agent": "sports-pnl-report/1.0" },
+    signal: AbortSignal.timeout(20_000),
   });
   if (!response.ok) throw new Error(`Gamma event fetch failed ${slug}: ${response.status} ${response.statusText}`);
   const data = await response.json();
   return Array.isArray(data) && data.length > 0 ? data[0] as GammaEvent : null;
 }
 
+async function fetchGammaEventWithRetry(slug: string): Promise<GammaEvent | null> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < GAMMA_FETCH_RETRIES; attempt += 1) {
+    try {
+      return await fetchGammaEvent(slug);
+    } catch (error) {
+      lastError = error;
+      if (attempt + 1 < GAMMA_FETCH_RETRIES) {
+        await sleep(GAMMA_FETCH_RETRY_MS * (attempt + 1));
+      }
+    }
+  }
+  throw lastError;
+}
+
 async function fetchEventMap(rows: JsonRow[]): Promise<Map<string, GammaEvent | null>> {
   const slugs = [...new Set(rows.map((row) => String(row.eventSlug ?? "")).filter(Boolean))];
-  const events = new Map<string, GammaEvent | null>();
-  await Promise.all(slugs.map(async (slug) => {
+  let failed = 0;
+  const pairs = await mapLimit(slugs, GAMMA_FETCH_CONCURRENCY, async (slug) => {
     try {
-      events.set(slug, await fetchGammaEvent(slug));
+      return [slug, await fetchGammaEventWithRetry(slug)] as const;
     } catch {
-      events.set(slug, null);
+      failed += 1;
+      return [slug, null] as const;
     }
-  }));
-  return events;
+  });
+  if (failed > 0) {
+    console.warn(`[pnl-report] gamma fetch failed for ${failed}/${slugs.length} events (concurrency=${GAMMA_FETCH_CONCURRENCY}, retries=${GAMMA_FETCH_RETRIES})`);
+  }
+  return new Map(pairs);
 }
 
 function readArchivedPackageRows(): JsonRow[] {
@@ -248,7 +277,57 @@ function combineRows(activeRows: JsonRow[], archivedRows: JsonRow[]): JsonRow[] 
   const byKey = new Map<string, JsonRow>();
   for (const row of archivedRows) byKey.set(rowKey(row), row);
   for (const row of activeRows) byKey.set(rowKey(row), row);
-  return [...byKey.values()];
+  return dropSupersededSnapshots([...byKey.values()]);
+}
+
+function rowTimestampMs(row: JsonRow): number {
+  const t = Date.parse(String(row.updatedAt ?? row.createdAt ?? ""));
+  return Number.isFinite(t) ? t : 0;
+}
+
+/**
+ * The daemon's ledger reconciler writes CUMULATIVE filledShares/actualCost when
+ * it re-enters the same packageId (on-chain balance reconciliation). Each
+ * archive pass then snapshots the same growing position as a separate row, so
+ * naively summing rows counts the same dollars many times over (e.g. the
+ * 2026-07-07 fifwc-che-col position appeared as 17/34/51/.../150-share rows).
+ * A row is a superseded snapshot when a strictly-later row for the same
+ * packageId and status carries at-least-as-large shares AND cost — the later
+ * row already contains this row's position. Genuinely distinct rows (repairs,
+ * partial unwinds) never dominate each other on both axes and are kept.
+ */
+function dropSupersededSnapshots(rows: JsonRow[]): JsonRow[] {
+  const EPS = 1e-6;
+  const byPackage = new Map<string, JsonRow[]>();
+  for (const row of rows) {
+    const pid = String(row.packageId ?? rowKey(row));
+    const group = byPackage.get(pid);
+    if (group) group.push(row);
+    else byPackage.set(pid, [row]);
+  }
+  const out: JsonRow[] = [];
+  for (const group of byPackage.values()) {
+    if (group.length === 1) {
+      out.push(group[0]);
+      continue;
+    }
+    for (const row of group) {
+      const superseded = group.some((other) => {
+        if (other === row) return false;
+        if (String(other.status ?? "") !== String(row.status ?? "")) return false;
+        const otherTs = rowTimestampMs(other);
+        const rowTs = rowTimestampMs(row);
+        if (otherTs < rowTs) return false;
+        // Deterministic tiebreak for identical timestamps so exactly one row
+        // of an identical pair survives.
+        if (otherTs === rowTs && rowKey(other) <= rowKey(row)) return false;
+        return num(other.filledShares) >= num(row.filledShares) - EPS
+          && num(other.actualCost) >= num(row.actualCost) - EPS;
+      });
+      if (!superseded) out.push(row);
+    }
+  }
+  return out;
 }
 
 function reportRow(row: JsonRow, now: Date, event: GammaEvent | null | undefined): ReportRow | null {
@@ -362,14 +441,15 @@ export async function buildSportsPnlReport() {
   const lifetimeStart = new Date(process.env.SPORTS_ARB_PNL_LIFETIME_START ?? "2026-06-23T21:50:00.000Z");
   const rawRows = combineRows(readJson<JsonRow[]>(PATHS.daemonLivePackages, []), readArchivedPackageRows());
   const eventMap = await fetchEventMap(rawRows);
-  const rows = rawRows
+  const reportRows = rawRows
     .map((row) => reportRow(row, now, eventMap.get(String(row.eventSlug ?? ""))))
     .filter((row): row is ReportRow => row !== null)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  const lifetimeRows = rows.filter((row) => new Date(row.createdAt) >= lifetimeStart);
-  const todayRows = lifetimeRows.filter((row) => new Date(row.createdAt) >= dailyStart);
-  const lifetime = lifetimeRows.filter((row) => !row.orphan);
-  const lifetimeOrphans = lifetimeRows.filter((row) => row.orphan);
+  const rows = reportRows;
+  const lifetimeReportRows = rows.filter((row) => new Date(row.createdAt) >= lifetimeStart);
+  const todayRows = lifetimeReportRows.filter((row) => new Date(row.createdAt) >= dailyStart);
+  const lifetime = lifetimeReportRows.filter((row) => !row.orphan);
+  const lifetimeOrphans = lifetimeReportRows.filter((row) => row.orphan);
   const today = todayRows.filter((row) => !row.orphan);
   const todayOrphans = todayRows.filter((row) => row.orphan);
   const htmlText = render({ generatedAt: now, dailyStart, lifetimeStart, today, lifetime, todayOrphans, lifetimeOrphans });
@@ -388,6 +468,32 @@ export async function buildSportsPnlReport() {
     lifetimeIncludingOrphans: summarize([...lifetime, ...lifetimeOrphans]),
   };
   writeJson(PATHS.pnlReportJson, summary);
+  const tradesWithIds = rawRows
+    .map((raw) => {
+      const rr = reportRow(raw, now, eventMap.get(String(raw.eventSlug ?? "")));
+      if (!rr || new Date(rr.createdAt) < lifetimeStart) return null;
+      return {
+        createdAt: rr.createdAt,
+        sport: rr.sport,
+        marketType: rr.marketType,
+        packageLabel: rr.packageLabel,
+        packageId: raw.packageId ?? null,
+        eventSlug: raw.eventSlug ?? null,
+        broadStrike: raw.broadStrike ?? null,
+        narrowStrike: raw.narrowStrike ?? null,
+        result: rr.result,
+        shares: rr.shares,
+        costPerShare: rr.costPerShare,
+        cost: rr.cost,
+        value: rr.value,
+        pnl: rr.pnl,
+        status: rr.status,
+        orphan: rr.orphan,
+      };
+    })
+    .filter((row): row is NonNullable<typeof row> => row !== null)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  writeJson(PATHS.pnlReportTrades, { generatedAt: now.toISOString(), lifetimeStart: lifetimeStart.toISOString(), trades: tradesWithIds });
   return { html: htmlText, htmlPath: PATHS.pnlReportHtml, summary };
 }
 

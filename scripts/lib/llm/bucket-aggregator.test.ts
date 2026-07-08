@@ -4,14 +4,17 @@ import { loadBacktestShapeEvidence } from "./backtest-shape-evidence.js";
 import { currentStrategyAllowlist } from "../sports-strategy.js";
 
 describe("loadBacktestShapeEvidence", () => {
-  it("loads all backtest-positive soccer shapes for daemon live gating", () => {
+  it("loads soccer and MLB shapes; soccer enforcement is backtest-positive", () => {
     const shapes = loadBacktestShapeEvidence(currentStrategyAllowlist());
     expect(shapes.length).toBeGreaterThan(20);
-    const enforced = shapes.filter((s) => s.enforcedLive);
-    expect(enforced.length).toBeGreaterThan(20);
-    expect(enforced.every((s) => s.worstRoiPct > 0)).toBe(true);
-    expect(enforced.some((s) => s.marketType === "spread")).toBe(true);
-    expect(enforced.some((s) => s.lineFamily === "3.5-4.5")).toBe(true);
+    expect(shapes.some((s) => s.sportId === "MLB")).toBe(true);
+    const soccerEnforced = shapes.filter((s) => s.sportId === "SOCCER" && s.enforcedLive);
+    expect(soccerEnforced.length).toBeGreaterThan(20);
+    // Soccer live gating is derived from backtest ROI; MLB enforcement comes
+    // from the strategy allowlist and is not required to be ROI-positive.
+    expect(soccerEnforced.every((s) => s.worstRoiPct > 0)).toBe(true);
+    expect(soccerEnforced.some((s) => s.marketType === "spread")).toBe(true);
+    expect(soccerEnforced.some((s) => s.lineFamily === "3.5-4.5")).toBe(true);
   });
 });
 

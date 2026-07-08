@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Build a continuous Jun 16–Jul 3 package universe for backtest analysis.
+"""Build a continuous, GROWING package universe for backtest analysis.
+
+The window starts at the frozen Jun 16 baseline and rolls forward to today by
+default (override with --window-end), so every nightly run folds in the newest
+resolved games and the backtest dataset keeps getting bigger.
 
 Sources:
   - Frozen baseline CSV (Jun 16–22 middle/snapshot audit, best cost per package)
-  - Candidate snapshots + middle audit streams (Jun 23–Jul 3, daily coverage)
+  - Candidate snapshots + middle audit streams (Jun 23 onward, daily coverage)
 
 Writes:
   - analysis/monotonic-chronological-packages-continuous.csv
@@ -30,8 +34,12 @@ from build_monotonic_backtest_addendum import (
 from monotonic_middle_report import parse_ts
 
 WINDOW_START = "2026-06-16"
-WINDOW_END = "2026-07-03"
 SNAPSHOT_CUTOVER = "2026-06-23"
+
+
+def default_window_end() -> str:
+    """Rolling end: today (UTC). Unresolved games pass through as unresolved."""
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
 
 
 def observed_day(row: dict[str, str]) -> str:
@@ -116,12 +124,14 @@ def stream_post_baseline_samples(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build continuous Jun16-Jul3 package CSV.")
+    parser = argparse.ArgumentParser(description="Build continuous rolling-window package CSV.")
     parser.add_argument("--repo-root", default=".")
     parser.add_argument("--baseline-packages", default="analysis/monotonic-chronological-packages-long.csv")
     parser.add_argument("--data-dir", default="/var/lib/sports-arb/data")
     parser.add_argument("--skip-gamma", action="store_true")
+    parser.add_argument("--window-end", default=default_window_end(), help="Inclusive YYYY-MM-DD (default: today UTC)")
     args = parser.parse_args()
+    window_end = args.window_end
 
     repo_root = Path(args.repo_root).resolve()
     data_dir = Path(args.data_dir)
@@ -132,20 +142,18 @@ def main() -> None:
     baseline_rows = baseline_in_window(
         load_baseline_rows(baseline_path),
         WINDOW_START,
-        WINDOW_END,
+        window_end,
     )
     baseline_ids = {row["packageId"] for row in baseline_rows if row.get("packageId")}
     print(f"[continuous] baseline Jun16-22 rows: {len(baseline_rows):,}", flush=True)
 
-    stream_paths = [
-        data_dir / "monotonic-candidate-snapshots.jsonl",
-        data_dir / "monotonic-candidate-snapshots.jsonl.dublin-postcutover-backup",
-        data_dir / "monotonic-middle-audit.jsonl",
-        data_dir / "monotonic-middle-audit.jsonl.1",
-        data_dir / "monotonic-middle-audit.jsonl.2.gz",
-    ]
+    # Glob so newly rotated files (.1, .2.gz, ...) are always included; a
+    # hardcoded list silently dropped observations once logrotate moved on.
+    stream_paths = sorted(data_dir.glob("monotonic-candidate-snapshots.jsonl*")) + sorted(
+        data_dir.glob("monotonic-middle-audit.jsonl*")
+    )
     since = parse_ts(f"{SNAPSHOT_CUTOVER}T00:00:00Z")
-    until = parse_ts(f"{WINDOW_END}T23:59:59Z")
+    until = parse_ts(f"{window_end}T23:59:59Z")
     if since is None or until is None:
         raise SystemExit("Invalid continuous window timestamps")
 
@@ -195,7 +203,7 @@ def main() -> None:
 
     meta_out = {
         "generatedAt": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
-        "window": [WINDOW_START, WINDOW_END],
+        "window": [WINDOW_START, window_end],
         "baselineRows": len(baseline_rows),
         "postBaselineUnique": len(samples),
         "totalRows": len(continuous_rows),

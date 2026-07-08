@@ -254,9 +254,8 @@ export function aggregateLiveBuckets(
     const avgPreflightDriftCents = acc.preflightDriftCount > 0
       ? round2(acc.preflightDriftSum / acc.preflightDriftCount)
       : null;
-    const backtestMiddleRate = acc.sportId === "SOCCER" && acc.marketType === "match_total"
-      ? backtestMiddleRates.get(acc.lineFamily) ?? null
-      : null;
+    const backtestMiddleRate =
+      backtestMiddleRates.get(`${acc.sportId}:${acc.marketType}:${acc.lineFamily}`) ?? null;
     const base = {
       sportId: acc.sportId,
       marketType: acc.marketType,

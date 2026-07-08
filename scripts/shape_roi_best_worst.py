@@ -16,6 +16,7 @@ import csv
 import gzip
 import json
 import re
+import urllib.request
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,39 @@ def load_gamma_cache(path: Path) -> dict[str, dict[str, Any]]:
         return {}
     data = json.loads(path.read_text())
     return data if isinstance(data, dict) else {}
+
+
+def supplement_gamma_cache_for_events(
+    cache: dict[str, dict[str, Any]],
+    event_slugs: set[str],
+    *,
+    gamma_api: str = "https://gamma-api.polymarket.com",
+) -> int:
+    """Fetch missing market metadata for live event slugs (one API call per event)."""
+    added = 0
+    for slug in sorted(s for s in event_slugs if s):
+        url = f"{gamma_api}/events?slug={slug}"
+        req = urllib.request.Request(url, headers={"User-Agent": "sports-arb-sibling-cf/1.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                payload = json.loads(resp.read().decode())
+        except Exception:
+            continue
+        events = payload if isinstance(payload, list) else []
+        for event in events:
+            for market in event.get("markets") or []:
+                market_id = str(market.get("id") or "")
+                if not market_id or market_id in cache:
+                    continue
+                cache[market_id] = {
+                    "id": market_id,
+                    "question": market.get("question"),
+                    "sportsMarketType": market.get("sportsMarketType"),
+                    "line": market.get("line"),
+                    "slug": market.get("slug") or slug,
+                }
+                added += 1
+    return added
 
 
 def market_meta(cache: dict[str, dict[str, Any]], market_id: str) -> dict[str, Any] | None:
@@ -258,6 +292,11 @@ def main() -> None:
     parser.add_argument("--gamma-cache", default="analysis/gamma-market-cache-v2.json")
     parser.add_argument("--audit", action="append", default=[])
     parser.add_argument("--snapshot", action="append", default=[])
+    parser.add_argument(
+        "--data-dir",
+        help="Glob monotonic-candidate-snapshots.jsonl* and monotonic-middle-audit.jsonl* "
+        "from this directory (picks up rotated files automatically)",
+    )
     parser.add_argument("--min-n", type=int, default=8)
     parser.add_argument("--asset", action="append", default=["SOCCER", "MLB"])
     parser.add_argument("--positive-only", action="store_true")
@@ -271,7 +310,12 @@ def main() -> None:
         if in_window(row, args.since, args.until)
     ]
     cache = load_gamma_cache(Path(args.gamma_cache))
-    bounds = stream_cost_bounds([Path(p) for p in [*args.audit, *args.snapshot]])
+    stream_paths = [Path(p) for p in [*args.audit, *args.snapshot]]
+    if args.data_dir:
+        data_dir = Path(args.data_dir)
+        stream_paths += sorted(data_dir.glob("monotonic-candidate-snapshots.jsonl*"))
+        stream_paths += sorted(data_dir.glob("monotonic-middle-audit.jsonl*"))
+    bounds = stream_cost_bounds(stream_paths)
     assets = set(args.asset)
 
     window = f"{args.since or '...'}..{args.until or '...'}"

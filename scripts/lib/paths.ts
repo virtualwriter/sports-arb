@@ -44,6 +44,7 @@ export const PATHS = {
   excelManifest: join(REPORTS_DIR, "sports-arb-excel-manifest.json"),
   pnlReportHtml: join(REPORTS_DIR, "sports-pnl-report", "index.html"),
   pnlReportJson: join(REPORTS_DIR, "sports-pnl-report", "summary.json"),
+  pnlReportTrades: join(REPORTS_DIR, "sports-pnl-report", "trades.json"),
 };
 
 export function ensureParent(path: string): void {
