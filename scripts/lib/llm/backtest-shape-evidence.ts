@@ -1,13 +1,13 @@
 // Shape-level backtest evidence (continuous rolling scan, Jun 16 onward).
-// Covers BOTH soccer and MLB. Live soccer gate authority is enforced in the
-// daemon via soccer-backtest-live-gate.ts; MLB live shapes come from the
-// strategy-layer allowlist.
+// Covers BOTH soccer and MLB. The daemon backtest gate
+// (sports-backtest-live-gate) is the single live authority for both sports:
+// a shape is enforcedLive iff it is backtest-positive at worst costs.
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   backtestShapeKey,
-  loadSoccerBacktestPositiveShapes,
+  loadSportsBacktestPositiveShapes,
 } from "../soccer-backtest-live-gate.js";
 import type { StrategyAllowlistSnapshot } from "../sports-strategy.js";
 
@@ -71,19 +71,8 @@ function toBacktestShapeRow(row: RawShapeRow, enforcedLive: boolean): BacktestSh
   };
 }
 
-function mlbShapeEnforcedLive(
-  allowlist: StrategyAllowlistSnapshot,
-  marketType: string,
-  lineFamily: string,
-  middleWidth: number,
-): boolean {
-  if (marketType === "game_total") return lineFamily in allowlist.mlb.gameTotalLineFamilies;
-  if (marketType === "spread") return allowlist.mlb.spreadWidthsAllowed.includes(middleWidth);
-  return false;
-}
-
 export function loadBacktestShapeEvidence(
-  allowlist: StrategyAllowlistSnapshot,
+  _allowlist: StrategyAllowlistSnapshot,
   path: string = BACKTEST_SHAPE_PATH,
 ): BacktestShapeRow[] {
   if (!existsSync(path)) return [];
@@ -93,17 +82,19 @@ export function loadBacktestShapeEvidence(
   } catch {
     return [];
   }
-  const positive = loadSoccerBacktestPositiveShapes(path);
+  const positive = loadSportsBacktestPositiveShapes(path);
   const out: BacktestShapeRow[] = [];
   for (const row of payload.rows ?? []) {
+    const asset = row.asset ?? "";
     const marketType = row.marketType ?? "unknown";
     const lineFamily = row.lineFamily ?? "";
     const middleWidth = row.middleWidth ?? 0;
-    const enforcedLive = row.asset === "MLB"
-      ? mlbShapeEnforcedLive(allowlist, marketType, lineFamily, middleWidth)
-      : positive.has(backtestShapeKey(marketType, lineFamily, middleWidth));
-    const parsed = toBacktestShapeRow(row, enforcedLive);
-    if (parsed) out.push(parsed);
+    const enforced = positive.get(backtestShapeKey(asset, marketType, lineFamily, middleWidth));
+    const parsed = toBacktestShapeRow(row, Boolean(enforced));
+    if (parsed) {
+      if (enforced) parsed.familyMaxLiveCost = round3f(enforced.maxLiveCost);
+      out.push(parsed);
+    }
   }
   out.sort((a, b) => b.worstRoiPct - a.worstRoiPct);
   return out;
@@ -143,12 +134,19 @@ export function compactBacktestShapesForLlm(shapes: BacktestShapeRow[]) {
     }));
 }
 
-export function isSoccerBacktestEnforcedShape(
+export function isSportsBacktestEnforcedShape(
+  sportId: string,
   marketType: string,
   lineFamily: string,
   middleWidth: number,
 ): boolean {
-  return loadSoccerBacktestPositiveShapes().has(backtestShapeKey(marketType, lineFamily, middleWidth));
+  return loadSportsBacktestPositiveShapes().has(
+    backtestShapeKey(sportId, marketType, lineFamily, middleWidth),
+  );
+}
+
+function round3f(n: number): number {
+  return Math.round(n * 1000) / 1000;
 }
 
 function round1(n: number): number {

@@ -13,7 +13,7 @@ import type { StrategyAllowlistSnapshot } from "../sports-strategy.js";
 import type { BacktestShapeRow } from "./backtest-shape-evidence.js";
 import { backtestMiddleRateByFamily } from "./backtest-shape-evidence.js";
 import type { BaselineBucket } from "./baseline-evidence.js";
-import { isSoccerBacktestEnforcedShape } from "./backtest-shape-evidence.js";
+import { isSportsBacktestEnforcedShape } from "./backtest-shape-evidence.js";
 
 export const TIER_THRESHOLDS = {
   preliminary: 5,
@@ -85,37 +85,18 @@ function isEnforcedLive(
   sportId: string,
   marketType: string,
   lineFamily: string,
-  costBucket: string,
+  _costBucket: string,
   middleWidth: number,
   allow: StrategyAllowlistSnapshot,
 ): boolean {
   if (sportId === "SOCCER") {
     if (!allow.soccer.allowedMarketTypes.includes(marketType)) return false;
-    return isSoccerBacktestEnforcedShape(marketType, lineFamily, middleWidth);
-  }
-  if (sportId === "MLB") {
-    if (marketType === "game_total") {
-      const range = allow.mlb.gameTotalLineFamilies[lineFamily];
-      if (!range) return false;
-      return isCostBucketInRange(costBucket, range);
-    }
-    if (marketType === "spread") {
-      if (!allow.mlb.spreadWidthsAllowed.includes(middleWidth)) return false;
-      return isCostBucketInRange(costBucket, allow.mlb.spreadCostRange);
-    }
+  } else if (sportId === "MLB") {
+    if (!allow.mlb.allowedMarketTypes.includes(marketType)) return false;
+  } else {
     return false;
   }
-  return false;
-}
-
-function isCostBucketInRange(bucket: string, range: { lo: number; hi: number }): boolean {
-  if (bucket === "<1.000") return false;
-  if (bucket === ">1.500") return false;
-  const [loStr, hiStr] = bucket.split("-");
-  const lo = Number(loStr);
-  const hi = Number(hiStr);
-  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return false;
-  return lo >= range.lo - 1e-6 && hi <= range.hi + 1e-6;
+  return isSportsBacktestEnforcedShape(sportId, marketType, lineFamily, middleWidth);
 }
 
 export function executionFlagFor(

@@ -55,12 +55,6 @@ function impliedNarrowYesBid(candidate: Candidate): number {
   return Math.max(0, Math.min(1, 1 - candidate.narrow.noBook.ask));
 }
 
-const MLB_GAME_TOTAL_LIVE_COST_RANGES = new Map<string, { lo: number; hi: number }>([
-  ["5.5-7.5", { lo: 1.19, hi: 1.22 }],
-  ["6.5-7.5", { lo: 1.10, hi: 1.16 }],
-  ["6.5-8.5", { lo: 1.16, hi: 1.19 }],
-]);
-
 export function soccerEffectiveMinNarrowYesBid(_candidate: Candidate): number {
   return SOCCER_MIN_NARROW_YES_BID;
 }
@@ -88,25 +82,15 @@ function soccerLive(candidate: Candidate, marketType: MarketType): string[] {
   return failures;
 }
 
+// Shape/cost eligibility for MLB is decided by the daemon backtest gate
+// (sports-backtest-live-gate): only backtest-positive shapes trade live, at or
+// below the EV-margin cost cap. The strategy layer keeps only operational
+// gates, mirroring soccer. The previous hardcoded cost bands here were
+// backtest-NEGATIVE on the grown dataset and drove most MLB live losses.
 function mlbLive(candidate: Candidate, marketType: MarketType): string[] {
   const failures: string[] = [];
-  const cost = candidate.packageCost;
-  const family = normalizeLineFamily(candidate);
-  const width = middleWidth(candidate);
   const narrowYesBid = impliedNarrowYesBid(candidate);
   if (!(marketType === "game_total" || marketType === "spread")) failures.push("mlb_market_shape_not_live");
-  if (marketType === "game_total") {
-    const liveCostRange = MLB_GAME_TOTAL_LIVE_COST_RANGES.get(family);
-    if (!liveCostRange) {
-      failures.push("mlb_total_line_family_not_preferred");
-    } else if (cost >= 1 && !within(cost, liveCostRange.lo, liveCostRange.hi)) {
-      failures.push("mlb_cost_bucket_not_live");
-    }
-  }
-  if (marketType === "spread") {
-    if (!within(cost, 1.19, 1.22) && cost >= 1) failures.push("mlb_cost_bucket_not_live");
-    if (width !== 1) failures.push("mlb_spread_width_not_preferred");
-  }
   if (SPORTS_MAX_ENTRY_LEG_PRICE > 0 && maxEntryLeg(candidate) >= SPORTS_MAX_ENTRY_LEG_PRICE) {
     failures.push("mlb_max_entry_leg_price_exceeded");
   }
@@ -146,19 +130,14 @@ export type StrategyAllowlistSnapshot = {
     maxEntryLegPrice: number;
   };
   mlb: {
-    gameTotalLineFamilies: Record<string, { lo: number; hi: number }>;
-    spreadCostRange: { lo: number; hi: number };
-    spreadWidthsAllowed: number[];
+    liveGate: "daemon_backtest_positive_roi";
+    allowedMarketTypes: string[];
     minNarrowYesBid: number;
     maxEntryLegPrice: number;
   };
 };
 
 export function currentStrategyAllowlist(): StrategyAllowlistSnapshot {
-  const mlbGameTotals: Record<string, { lo: number; hi: number }> = {};
-  for (const [family, range] of MLB_GAME_TOTAL_LIVE_COST_RANGES.entries()) {
-    mlbGameTotals[family] = { lo: range.lo, hi: range.hi };
-  }
   return {
     generatedAt: new Date().toISOString(),
     soccer: {
@@ -169,9 +148,8 @@ export function currentStrategyAllowlist(): StrategyAllowlistSnapshot {
       maxEntryLegPrice: SPORTS_MAX_ENTRY_LEG_PRICE,
     },
     mlb: {
-      gameTotalLineFamilies: mlbGameTotals,
-      spreadCostRange: { lo: 1.19, hi: 1.22 },
-      spreadWidthsAllowed: [1],
+      liveGate: "daemon_backtest_positive_roi",
+      allowedMarketTypes: ["game_total", "spread"],
       minNarrowYesBid: MLB_MIN_NARROW_YES_BID,
       maxEntryLegPrice: SPORTS_MAX_ENTRY_LEG_PRICE,
     },

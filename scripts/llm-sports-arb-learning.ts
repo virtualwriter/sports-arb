@@ -75,7 +75,7 @@ const SYSTEM_PROMPT = [
   "Think like a world-class quant: reason from sample sizes and confidence, distinguish signal from noise, never draw conclusions from n<5, and always separate STRATEGY questions (which shapes/costs are +EV) from EXECUTION questions (are fills matching scans).",
   "",
   "EVIDENCE MODEL:",
-  "- backtestShapes covers BOTH sports: SOCCER (match_total, spread) is daemon-gated — every shape with worstRoiPct>0 and n>=5 trades live at or below its worstAvgCost; MLB (game_total, spread) live shapes come from currentAllowlist cost ranges.",
+  "- backtestShapes covers BOTH sports under ONE rule: SOCCER (match_total, spread) and MLB (game_total, spread) are daemon-gated — a shape trades live iff worstRoiPct>0 and n>=8, and only at cost <= min(worstAvgCost, (1+middleRate)/1.03), i.e. every entry carries >=3% expected ROI at its own cost (familyMaxLiveCost shows the effective cap).",
   "- backtestShapes includes shadow/negative shapes too (enforcedLive=false). Use them to spot promotion candidates (positive worstRoiPct, decent n, not yet live) and to confirm exclusions are justified.",
   "- The backtest window is rolling and grows nightly; n increasing over time is expected and strengthens or weakens shapes — call out shapes whose evidence changed materially.",
   "- The live ledger (liveExecutionMonitoring) is for execution quality ONLY: slippage, preflight drift, middle-rate collapse vs backtest, fill-vs-scan gaps.",

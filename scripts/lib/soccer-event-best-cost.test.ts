@@ -1,10 +1,9 @@
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeAll, beforeEach } from "vitest";
 import type { Candidate } from "./monotonic-arb-core.js";
-import {
-  recordSoccerEventShapeCost,
-  resetSoccerEventBestCosts,
-  soccerBestSeenCostBlock,
-} from "./soccer-event-best-cost.js";
+
+// The gate reads its enable flag at module load, so set env before importing.
+process.env.ARB_DAEMON_SOCCER_BEST_SEEN_GATE = "1";
+const gate = await import("./soccer-event-best-cost.js");
 
 function soccerCandidate(cost: number): Candidate {
   return {
@@ -17,11 +16,14 @@ function soccerCandidate(cost: number): Candidate {
 }
 
 describe("soccer-event-best-cost", () => {
-  beforeEach(() => resetSoccerEventBestCosts());
+  beforeAll(() => {
+    expect(gate.SOCCER_BEST_SEEN_GATE_ENABLED).toBe(true);
+  });
+  beforeEach(() => gate.resetSoccerEventBestCosts());
 
   it("blocks when cost is above best seen plus tolerance", () => {
-    recordSoccerEventShapeCost(soccerCandidate(1.12));
-    expect(soccerBestSeenCostBlock(soccerCandidate(1.15))).toBeNull();
-    expect(soccerBestSeenCostBlock(soccerCandidate(1.16))).toMatch(/soccer_above_best_seen/);
+    gate.recordSoccerEventShapeCost(soccerCandidate(1.12));
+    expect(gate.soccerBestSeenCostBlock(soccerCandidate(1.15))).toBeNull();
+    expect(gate.soccerBestSeenCostBlock(soccerCandidate(1.16))).toMatch(/soccer_above_best_seen/);
   });
 });
