@@ -58,6 +58,12 @@ function num(value: unknown, fallback = 0): number {
 const GAMMA_FETCH_CONCURRENCY = Math.max(1, num(process.env.SPORTS_PNL_GAMMA_CONCURRENCY, 5));
 const GAMMA_FETCH_RETRIES = Math.max(1, num(process.env.SPORTS_PNL_GAMMA_RETRIES, 3));
 const GAMMA_FETCH_RETRY_MS = Math.max(100, num(process.env.SPORTS_PNL_GAMMA_RETRY_MS, 500));
+const GAMMA_FETCH_TIMEOUT_MS = Math.max(1_000, num(process.env.SPORTS_PNL_GAMMA_TIMEOUT_MS, 8_000));
+// When Gamma is down entirely, retrying every slug for minutes blew the
+// systemd unit timeout and killed the Telegram send (Jul 8 digest). After
+// this many consecutive whole-slug failures the remaining fetches are
+// skipped and rows fall back to floor/mark pricing.
+const GAMMA_FETCH_BREAKER_FAILURES = Math.max(1, num(process.env.SPORTS_PNL_GAMMA_BREAKER, 10));
 
 function parseJsonArray(value: unknown): unknown[] {
   if (Array.isArray(value)) return value;
@@ -207,7 +213,7 @@ function sleep(ms: number): Promise<void> {
 async function fetchGammaEvent(slug: string): Promise<GammaEvent | null> {
   const response = await fetch(`${GAMMA_API}/events?${new URLSearchParams({ slug })}`, {
     headers: { Accept: "application/json", "User-Agent": "sports-pnl-report/1.0" },
-    signal: AbortSignal.timeout(20_000),
+    signal: AbortSignal.timeout(GAMMA_FETCH_TIMEOUT_MS),
   });
   if (!response.ok) throw new Error(`Gamma event fetch failed ${slug}: ${response.status} ${response.statusText}`);
   const data = await response.json();
@@ -232,16 +238,29 @@ async function fetchGammaEventWithRetry(slug: string): Promise<GammaEvent | null
 async function fetchEventMap(rows: JsonRow[]): Promise<Map<string, GammaEvent | null>> {
   const slugs = [...new Set(rows.map((row) => String(row.eventSlug ?? "")).filter(Boolean))];
   let failed = 0;
+  let consecutiveFailures = 0;
+  let breakerTripped = false;
   const pairs = await mapLimit(slugs, GAMMA_FETCH_CONCURRENCY, async (slug) => {
+    if (breakerTripped) {
+      failed += 1;
+      return [slug, null] as const;
+    }
     try {
-      return [slug, await fetchGammaEventWithRetry(slug)] as const;
+      const event = await fetchGammaEventWithRetry(slug);
+      consecutiveFailures = 0;
+      return [slug, event] as const;
     } catch {
       failed += 1;
+      consecutiveFailures += 1;
+      if (consecutiveFailures >= GAMMA_FETCH_BREAKER_FAILURES && !breakerTripped) {
+        breakerTripped = true;
+        console.warn(`[pnl-report] gamma breaker tripped after ${consecutiveFailures} consecutive failures; skipping remaining fetches`);
+      }
       return [slug, null] as const;
     }
   });
   if (failed > 0) {
-    console.warn(`[pnl-report] gamma fetch failed for ${failed}/${slugs.length} events (concurrency=${GAMMA_FETCH_CONCURRENCY}, retries=${GAMMA_FETCH_RETRIES})`);
+    console.warn(`[pnl-report] gamma fetch failed for ${failed}/${slugs.length} events (concurrency=${GAMMA_FETCH_CONCURRENCY}, retries=${GAMMA_FETCH_RETRIES}, breakerTripped=${breakerTripped})`);
   }
   return new Map(pairs);
 }
@@ -497,8 +516,29 @@ export async function buildSportsPnlReport() {
   return { html: htmlText, htmlPath: PATHS.pnlReportHtml, summary };
 }
 
+type PnlSummary = Awaited<ReturnType<typeof buildSportsPnlReport>>["summary"];
+
+const TELEGRAM_SUMMARY_REUSE_MS = Math.max(0, num(process.env.SPORTS_PNL_SUMMARY_REUSE_MS, 30 * 60_000));
+
+// The nightly digest runs report:pnl immediately before telegram:daily, so a
+// fresh summary.json is reused instead of rebuilding the whole report (which
+// re-fetches every Gamma event and previously doubled the runtime).
+function readRecentPnlSummary(): PnlSummary | null {
+  try {
+    const summary = JSON.parse(readFileSync(PATHS.pnlReportJson, "utf8")) as PnlSummary;
+    const ageMs = Date.now() - new Date(summary.generatedAt).getTime();
+    if (Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= TELEGRAM_SUMMARY_REUSE_MS) {
+      console.log(`[pnl-report] reusing summary.json (${Math.round(ageMs / 60_000)}m old) for telegram text`);
+      return summary;
+    }
+  } catch {
+    // fall through to a full rebuild
+  }
+  return null;
+}
+
 export async function sportsPnlTelegramText(): Promise<string> {
-  const { summary } = await buildSportsPnlReport();
+  const summary = readRecentPnlSummary() ?? (await buildSportsPnlReport()).summary;
   return [
     "Sports Arb P&L Report",
     `Generated: ${summary.generatedAt}`,

@@ -15,4 +15,4 @@ Environment=SPORTS_ARB_RUNTIME_DIR=/var/lib/sports-arb/runtime
 ExecStart=/bin/bash /opt/sports-arb/scripts/nightly-digest.sh telegram
 User=root
 Group=root
-TimeoutStartSec=900
+TimeoutStartSec=1500
