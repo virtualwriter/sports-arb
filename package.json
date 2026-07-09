@@ -27,6 +27,7 @@
     "sports:daemon": "bash scripts/govern-sports-middle-daemon.sh",
     "daemon": "tsx scripts/polymarket-arb-daemon.ts",
     "kalshi:mlb-screener": "tsx scripts/kalshi-mlb-screener.ts",
+    "crypto:middle-scanner": "tsx scripts/crypto-middle-scanner.ts",
     "updown:collector": "tsx scripts/updown-5m-book-collector.ts",
     "updown:maker-guess": "tsx scripts/updown-5m-maker-guess-test.ts",
     "updown:ws-test": "tsx scripts/updown-5m-market-ws-test.ts",

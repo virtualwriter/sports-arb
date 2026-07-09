@@ -1,4 +1,4 @@
-// Kalshi MLB shadow screener.
+// Kalshi sports shadow screener (MLB totals + soccer totals + UFC rounds).
 //
 // Discovery flow (validated 2026-06-28):
 //   1. Enumerate /events?series_ticker=KXMLBGAME&status=open to get the
@@ -45,6 +45,33 @@ const AUDIT_PATH = join(DATA_DIR, "kalshi-middle-audit.jsonl");
 const GAME_SERIES = process.env.KALSHI_MLB_GAME_SERIES ?? "KXMLBGAME";
 const TOTAL_PREFIX = process.env.KALSHI_MLB_TOTAL_PREFIX ?? "KXMLBTOTAL";
 const SPREAD_PREFIX = process.env.KALSHI_MLB_SPREAD_PREFIX ?? "KXMLBSPREAD";
+
+// Additional ladder series scanned directly via /events?series_ticker=...
+// (unlike MLB, these surface their ladder events in listEvents). Covers the
+// other markets followed on Polymarket: World Cup / UEL / generic soccer
+// goal totals and UFC "fight ends before round N" ladders.
+//
+// direction:
+//   "greater" — P(YES) decreases with strike (O/U totals). Middle =
+//               YES(over lo) + NO(over hi).
+//   "before"  — P(YES) increases with strike (cumulative "ends before round
+//               N"). Middle = YES(before hi) + NO(before lo).
+type SeriesSpec = {
+  series: string;
+  asset: string;
+  marketType: string;
+  direction: "greater" | "before";
+};
+
+const EXTRA_SERIES: SeriesSpec[] = (process.env.KALSHI_EXTRA_LADDER_SERIES
+  ?? "KXWCTOTAL:SOCCER:match_total:greater,KXUELTOTAL:SOCCER:match_total:greater,KXSOCCERTOTAL:SOCCER:match_total:greater,KXUFCROUNDS:UFC:rounds_total:before")
+  .split(",")
+  .map((raw) => raw.trim())
+  .filter(Boolean)
+  .map((raw) => {
+    const [series, asset, marketType, direction] = raw.split(":");
+    return { series, asset, marketType, direction: direction === "before" ? "before" : "greater" } as SeriesSpec;
+  });
 
 const REFRESH_MS = Number(process.env.KALSHI_SCREENER_REFRESH_MS ?? 60_000);
 const MAX_WIDTH = Number(process.env.KALSHI_SCREENER_MAX_WIDTH ?? 4);
@@ -115,8 +142,21 @@ async function fetchTotalEvent(client: KalshiClient, stamp: string): Promise<Kal
   return client.getEvent(`${TOTAL_PREFIX}-${stamp}`, true);
 }
 
+// Strike extraction: totals ladders carry floor_strike; cumulative round
+// ladders (KXUFCROUNDS-...-N = "ends before round N") only encode the round
+// in the ticker suffix.
+function marketStrike(market: KalshiMarket): number | null {
+  if (typeof market.floor_strike === "number") return market.floor_strike;
+  const suffix = market.ticker.match(/-(\d+(?:\.\d+)?)$/);
+  if (suffix) {
+    const n = Number(suffix[1]);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
 async function quoteMarket(client: KalshiClient, market: KalshiMarket): Promise<Quoted | null> {
-  const strike = typeof market.floor_strike === "number" ? market.floor_strike : null;
+  const strike = marketStrike(market);
   if (strike === null) return null;
   try {
     const book = await client.getOrderbook(market.ticker, 10);
@@ -186,16 +226,27 @@ async function buildGameLadders(client: KalshiClient, stamps: string[]): Promise
   return out;
 }
 
-function buildAndEmitCandidates(game: GameLadder): { evaluated: number; passed: number } {
+type LadderMeta = {
+  asset: string;
+  marketType: string;
+  direction: "greater" | "before";
+};
+
+const MLB_META: LadderMeta = { asset: "MLB", marketType: "total", direction: "greater" };
+
+function buildAndEmitCandidates(game: GameLadder, meta: LadderMeta = MLB_META): { evaluated: number; passed: number } {
   const observedAt = new Date().toISOString();
   let evaluated = 0;
   let passed = 0;
   const strikes = game.ladder;
   for (let i = 0; i < strikes.length; i++) {
     for (let j = i + 1; j < strikes.length; j++) {
-      const broad = strikes[i];
-      const narrow = strikes[j];
-      const width = narrow.strike - broad.strike;
+      // "greater" ladders: the LOW strike is the broad leg (over 1.5 covers
+      // more outcomes than over 3.5). "before" ladders invert: the HIGH
+      // strike is broad ("ends before round 5" covers "before round 2").
+      const broad = meta.direction === "before" ? strikes[j] : strikes[i];
+      const narrow = meta.direction === "before" ? strikes[i] : strikes[j];
+      const width = strikes[j].strike - strikes[i].strike;
       if (width <= 0 || width > MAX_WIDTH) continue;
 
       const yesAsk = broad.yesAsk;
@@ -216,8 +267,9 @@ function buildAndEmitCandidates(game: GameLadder): { evaluated: number; passed: 
       emitAudit({
         observedAt,
         venue: "kalshi",
-        asset: "MLB",
-        marketType: "total",
+        asset: meta.asset,
+        marketType: meta.marketType,
+        ladderDirection: meta.direction,
         eventTicker: game.totalEventTicker,
         eventTitle: game.title,
         stamp: game.stamp,
@@ -251,21 +303,67 @@ function buildAndEmitCandidates(game: GameLadder): { evaluated: number; passed: 
   return { evaluated, passed };
 }
 
+// Scan a directly-enumerable ladder series (soccer totals, UFC rounds):
+// every open event in the series IS one ladder, so no stamp indirection.
+async function scanExtraSeries(client: KalshiClient, spec: SeriesSpec): Promise<{ ladders: number; evaluated: number; passed: number }> {
+  let ladders = 0;
+  let evaluated = 0;
+  let passed = 0;
+  let cursor: string | undefined;
+  for (let page = 0; page < 5; page++) {
+    const resp = await client.listEvents({
+      series_ticker: spec.series,
+      status: "open",
+      with_nested_markets: true,
+      limit: 100,
+      cursor,
+    });
+    for (const ev of resp.events ?? []) {
+      const markets = ev.markets ?? [];
+      if (markets.length < 2) continue;
+      const ladder = await quoteLadder(client, markets);
+      if (ladder.length < 2) continue;
+      ladders += 1;
+      const r = buildAndEmitCandidates(
+        { stamp: ev.event_ticker, totalEventTicker: ev.event_ticker, title: ev.title ?? "", ladder },
+        { asset: spec.asset, marketType: spec.marketType, direction: spec.direction },
+      );
+      evaluated += r.evaluated;
+      passed += r.passed;
+    }
+    cursor = resp.cursor;
+    if (!cursor) break;
+  }
+  return { ladders, evaluated, passed };
+}
+
 async function runOnce(client: KalshiClient): Promise<void> {
   const stamps = await fetchGameStamps(client);
   log(`found ${stamps.length} open MLB game stamps`);
-  if (!stamps.length) return;
-
-  const ladders = await buildGameLadders(client, stamps);
-  log(`built ${ladders.length} totals ladders (avg strikes=${ladders.length ? (ladders.reduce((s, g) => s + g.ladder.length, 0) / ladders.length).toFixed(1) : 0})`);
 
   let evaluated = 0;
   let passed = 0;
-  for (const game of ladders) {
-    const r = buildAndEmitCandidates(game);
-    evaluated += r.evaluated;
-    passed += r.passed;
+  if (stamps.length) {
+    const ladders = await buildGameLadders(client, stamps);
+    log(`built ${ladders.length} MLB totals ladders (avg strikes=${ladders.length ? (ladders.reduce((s, g) => s + g.ladder.length, 0) / ladders.length).toFixed(1) : 0})`);
+    for (const game of ladders) {
+      const r = buildAndEmitCandidates(game);
+      evaluated += r.evaluated;
+      passed += r.passed;
+    }
   }
+
+  for (const spec of EXTRA_SERIES) {
+    try {
+      const r = await scanExtraSeries(client, spec);
+      if (r.ladders > 0) log(`${spec.series} (${spec.asset}): ${r.ladders} ladders, ${r.evaluated} pairs, ${r.passed} passed`);
+      evaluated += r.evaluated;
+      passed += r.passed;
+    } catch (err) {
+      log(`${spec.series} scan failed: ${(err as Error).message}`);
+    }
+  }
+
   log(`evaluated ${evaluated} candidate pairs, ${passed} passed cost+size gates`);
 }
 

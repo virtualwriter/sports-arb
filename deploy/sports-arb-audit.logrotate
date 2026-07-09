@@ -16,6 +16,7 @@
 /var/lib/sports-arb/data/monotonic-middle-audit.jsonl
 /var/lib/sports-arb/data/monotonic-candidate-snapshots.jsonl
 /var/lib/sports-arb/data/kalshi-middle-audit.jsonl
+/var/lib/sports-arb/data/crypto-middle-audit.jsonl
 {
     daily
     rotate 7

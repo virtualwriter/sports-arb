@@ -26,6 +26,10 @@ import { readCredentialsFromEnv, signRequest, type KalshiCredentials } from "./k
 
 const PROD_REST = process.env.KALSHI_REST_BASE ?? "https://external-api.kalshi.com/trade-api/v2";
 const DEMO_REST = process.env.KALSHI_DEMO_REST_BASE ?? "https://external-api.demo.kalshi.co/trade-api/v2";
+// Read-only endpoints (series/events/markets/orderbooks) are served without
+// authentication from the public elections host. Used when no API key is
+// configured so shadow scanners can run credential-free.
+const PUBLIC_REST = process.env.KALSHI_PUBLIC_REST_BASE ?? "https://api.elections.kalshi.com/trade-api/v2";
 const PROD_WS = process.env.KALSHI_WS_BASE ?? "wss://external-api-ws.kalshi.com/trade-api/ws/v2";
 const DEMO_WS = process.env.KALSHI_DEMO_WS_BASE ?? "wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2";
 
@@ -156,7 +160,7 @@ export function bookQuotes(book: KalshiOrderbook): {
 }
 
 export class KalshiClient {
-  private readonly creds: KalshiCredentials;
+  private readonly creds: KalshiCredentials | null;
   private readonly restBase: string;
   private readonly wsBase: string;
   private readonly timeoutMs: number;
@@ -169,10 +173,14 @@ export class KalshiClient {
   private nextAllowedMs = 0;
   private requestChain: Promise<void> = Promise.resolve();
 
-  constructor(config: KalshiClientConfig = {}) {
-    this.creds = config.credentials ?? readCredentialsFromEnv();
+  constructor(config: KalshiClientConfig & { unauthenticated?: boolean } = {}) {
+    const wantUnauthenticated = config.unauthenticated
+      ?? (!config.credentials && !process.env.KALSHI_API_KEY_ID);
+    this.creds = wantUnauthenticated ? null : (config.credentials ?? readCredentialsFromEnv());
     const env: KalshiEnv = config.env ?? ((process.env.KALSHI_ENV as KalshiEnv) ?? "production");
-    this.restBase = env === "demo" ? DEMO_REST : PROD_REST;
+    this.restBase = this.creds === null
+      ? PUBLIC_REST
+      : (env === "demo" ? DEMO_REST : PROD_REST);
     this.wsBase = env === "demo" ? DEMO_WS : PROD_WS;
     this.timeoutMs = config.fetchTimeoutMs ?? 15_000;
     this.ua = config.userAgent ?? "sports-arb-kalshi-screener/0.1";
@@ -206,8 +214,11 @@ export class KalshiClient {
     //   GET /trade-api/v2/markets?limit=10
     // sign the message "<timestamp_ms>GET/trade-api/v2/markets".
     await this.waitForSlot();
-    const signingPath = `/trade-api/v2${path.split("?")[0]}`;
-    const { headers } = signRequest(this.creds, method, signingPath);
+    let headers: Record<string, string> = {};
+    if (this.creds) {
+      const signingPath = `/trade-api/v2${path.split("?")[0]}`;
+      headers = signRequest(this.creds, method, signingPath).headers;
+    }
     const url = `${this.restBase}${path}`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -297,6 +308,7 @@ export class KalshiClient {
   buildWsHeaders(): Record<string, string> {
     // Kalshi WS auth uses the same RSA signature scheme. Sign the full
     // ws path from the API root: GET /trade-api/ws/v2
+    if (!this.creds) throw new Error("Kalshi WS requires credentials (KALSHI_API_KEY_ID / KALSHI_API_PRIVATE_KEY_PATH)");
     const { headers } = signRequest(this.creds, "GET", "/trade-api/ws/v2");
     return headers;
   }
