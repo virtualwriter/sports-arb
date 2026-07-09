@@ -75,6 +75,71 @@ describe("monotonic sports parsing", () => {
     expect(decision.gateFailures).toContain("adapter_shadow_only");
   });
 
+  it("builds a UFC rounds-total middle and keeps it shadow-only", () => {
+    const event: GammaEvent = {
+      slug: "ufc-max1-con-2026-07-11",
+      title: "UFC 329: Max Holloway vs. Conor McGregor (Welterweight, Main Card)",
+      markets: [],
+    };
+    const low = structuralMarketQuote(event, {
+      id: "low",
+      question: "O/U 1.5 Rounds",
+      outcomes: JSON.stringify(["Over", "Under"]),
+      clobTokenIds: JSON.stringify(["low-over", "low-under"]),
+      active: true,
+    });
+    const high = structuralMarketQuote(event, {
+      id: "high",
+      question: "O/U 2.5 Rounds",
+      outcomes: JSON.stringify(["Over", "Under"]),
+      clobTokenIds: JSON.stringify(["high-over", "high-under"]),
+      active: true,
+    });
+
+    expect(low?.ladderKey).toBe("sports:ufc:ufc-max1-con-2026-07-11:total:rounds");
+    expect(high?.ladderKey).toBe(low?.ladderKey);
+    expect(low?.strike).toBe(1.5);
+    expect(high?.strike).toBe(2.5);
+
+    // Non-total fight props must not parse into the ladder.
+    expect(structuralMarketQuote(event, {
+      id: "prop",
+      question: "Will the fight be won by KO or TKO?",
+      outcomes: JSON.stringify(["Yes", "No"]),
+      clobTokenIds: JSON.stringify(["yes", "no"]),
+      active: true,
+    })).toBeNull();
+
+    low!.yesBook = book({ tokenId: "low-over", ask: 0.55, askSize: 20 });
+    high!.noBook = book({ tokenId: "high-under", ask: 0.54, askSize: 20 });
+    const candidate = evaluatePair(
+      {
+        host: "https://clob.polymarket.com",
+        gammaApi: "https://gamma-api.polymarket.com",
+        fetchTimeoutMs: 1000,
+        marketConcurrency: 1,
+        eventConcurrency: 1,
+        allowedAssets: new Set(["UFC"]),
+        minEdge: -1,
+        maxSpread: 0.1,
+        minLiquidity: 0,
+        minAvailableShares: 1,
+      },
+      "UFC",
+      low!,
+      high!,
+      "2026-07-10T00:00:00.000Z",
+    );
+
+    expect(candidate.eligible).toBe(true);
+    expect(candidate.packageCost).toBeCloseTo(1.09);
+
+    const decision = evaluateSportsStrategy(candidate);
+    expect(decision.marketType).toBe("game_total");
+    expect(decision.liveEligible).toBe(false);
+    expect(decision.gateFailures).toContain("adapter_shadow_only");
+  });
+
   it("does not mix tennis set-game totals into full-match total capture", () => {
     const event: GammaEvent = {
       slug: "wta-dodin-sawangk-2026-06-25",
@@ -115,6 +180,14 @@ describe("polymarketAssetForSlug", () => {
     expect(polymarketAssetForSlug("wta-dodin-sawangk-2026-06-25")).toBe("WOMENS_TENNIS");
     expect(polymarketAssetForSlug("fifwc-can-bih-2026-06-12-more-markets")).toBe("SOCCER");
     expect(polymarketAssetForSlug("mls-sea-por-2026-06-20-more-markets")).toBe("SOCCER");
+    expect(polymarketAssetForSlug("uel-qar-ves-2026-07-09-more-markets")).toBe("SOCCER");
+    expect(polymarketAssetForSlug("col-esc-mor-2026-07-09-more-markets")).toBe("SOCCER");
+    expect(polymarketAssetForSlug("ufc-max1-con-2026-07-11")).toBe("UFC");
+  });
+
+  it("does not confuse col- soccer slugs with cl- oil ladders", () => {
+    expect(polymarketAssetForSlug("cl-over-under-jun-2026")).toBe("OIL");
+    expect(polymarketAssetForSlug("col-esc-mor-2026-07-09")).toBe("SOCCER");
   });
 
   it("leaves unknown slugs unclassified", () => {

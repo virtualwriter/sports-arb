@@ -9,7 +9,7 @@ export type SportAdapter = {
   gammaTags: string[];
   slugPatterns: RegExp[];
   defaultGender: SportGender;
-  middleWidthUnit: "goals" | "runs" | "points" | "games" | "strokes" | "unknown";
+  middleWidthUnit: "goals" | "runs" | "points" | "games" | "strokes" | "rounds" | "unknown";
   classifyMarket: (quote: MarketQuote) => MarketType;
   lineFamily: (candidate: Candidate) => string;
 };
@@ -67,11 +67,25 @@ export const SPORT_ADAPTERS: SportAdapter[] = [
     displayName: "Soccer",
     adapterVersion: "soccer-v1",
     mode: "live_enabled",
-    gammaTags: ["soccer", "mls", "fifa", "uefa"],
-    slugPatterns: [/^mls-/i, /^fifwc-/i, /soccer/i, /world-cup/i, /fifa/i, /uefa/i],
+    gammaTags: ["soccer", "mls", "fifa", "uefa", "uel", "europa-conference-league"],
+    slugPatterns: [/^mls-/i, /^fifwc-/i, /^uel-/i, /^col-[a-z0-9]+-[a-z0-9]+-\d{4}/i, /soccer/i, /world-cup/i, /fifa/i, /uefa/i],
     defaultGender: "unknown",
     middleWidthUnit: "goals",
     classifyMarket: soccerMarketClassifier,
+    lineFamily,
+  },
+  {
+    // Fight rounds totals ("O/U 2.5 Rounds") — shadow only until a
+    // statistically significant backtest shape emerges.
+    sportId: "UFC",
+    displayName: "UFC",
+    adapterVersion: "ufc-v1",
+    mode: "shadow_only",
+    gammaTags: ["ufc"],
+    slugPatterns: [/^ufc-/i],
+    defaultGender: "unknown",
+    middleWidthUnit: "rounds",
+    classifyMarket: (quote) => (/\bO\/U\s+[0-9]+(?:\.5)?\s+Rounds\b/i.test(quote.question) ? "game_total" : "unknown"),
     lineFamily,
   },
   {

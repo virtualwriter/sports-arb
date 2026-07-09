@@ -163,15 +163,19 @@ function normalizedOutcomeIndexes(outcomes: string[]): { yesIndex: number; noInd
   return yesIndex >= 0 && noIndex >= 0 ? { yesIndex, noIndex } : null;
 }
 
-function sportsSlugKind(eventSlug: string): "nba" | "mlb" | "soccer" | "tennis" | "womens-tennis" | null {
+function sportsSlugKind(eventSlug: string): "nba" | "mlb" | "soccer" | "tennis" | "womens-tennis" | "ufc" | null {
   if (eventSlug.startsWith("nba-")) return "nba";
   if (eventSlug.startsWith("mlb-")) return "mlb";
+  if (eventSlug.startsWith("ufc-")) return "ufc";
   // ITF events are mixed-gender; Polymarket doesn't tag them men/women so we
   // group them with men's tennis for ladder/strategy purposes (shadow only).
   if (eventSlug.startsWith("atp-") || eventSlug.startsWith("itf-") || eventSlug.includes("tennis")) return "tennis";
   if (eventSlug.startsWith("wta-")) return "womens-tennis";
+  // uel-* = Europa League, col-* = Europa Conference League game slugs.
   if (eventSlug.startsWith("fifwc-")
     || eventSlug.startsWith("mls-")
+    || eventSlug.startsWith("uel-")
+    || eventSlug.startsWith("col-")
     || eventSlug.includes("soccer")
     || eventSlug.includes("world-cup")
     || eventSlug.includes("fifa")
@@ -193,6 +197,18 @@ function parseSportsMarket(eventSlug: string, question: string, outcomes: string
     return normalized.replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
   };
   const teamKey = (team: string) => team.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+
+  // UFC fight totals: "O/U 2.5 Rounds" (no "<A> vs. <B>:" prefix; one fight per event slug).
+  const ufcRoundsTotal = question.match(/^O\/U\s+([0-9]+(?:\.5)?)\s+Rounds$/i);
+  if (sport === "ufc") {
+    if (!ufcRoundsTotal || !outcomeIndexes) return null;
+    return {
+      strike: parseNumber(ufcRoundsTotal[1]),
+      direction: "above",
+      ladderKey: `sports:${slugKey}:total:rounds`,
+      ...outcomeIndexes,
+    };
+  }
 
   const fullGameTotal = question.match(/^.+?\s+vs\.?\s+.+?:\s*O\/U\s+([0-9]+(?:\.5)?)$/i);
   if (fullGameTotal && outcomeIndexes) {
@@ -295,6 +311,7 @@ export function polymarketAssetForSlug(slug: string): string | null {
   if (slug.startsWith("mlb-")) return "MLB";
   if (slug.startsWith("atp-") || slug.startsWith("itf-") || slug.includes("tennis")) return "TENNIS";
   if (slug.startsWith("wta-")) return "WOMENS_TENNIS";
+  if (slug.startsWith("ufc-")) return "UFC";
   if (sportsSlugKind(slug) === "soccer") return "SOCCER";
   if (slug.includes("spacex-ipo-closing-market-cap-above")) return "FINANCE";
   if (slug.includes("bitcoin")) return "BTC";

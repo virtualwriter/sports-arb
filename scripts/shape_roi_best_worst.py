@@ -105,6 +105,9 @@ def classify_shape(
         market_type = "match_total" if ("total" in text or "o/u" in text or "over/under" in text) else "unknown"
     elif asset == "MLB":
         market_type = "game_total" if ("total" in text or "o/u" in text or "over/under" in text) else "unknown"
+    elif asset == "UFC":
+        # Fight rounds totals: "O/U 2.5 Rounds"
+        market_type = "game_total" if ("o/u" in text and "rounds" in text) else "unknown"
     else:
         market_type = "unknown"
     low = min(float(b_strike), float(n_strike))
@@ -298,7 +301,7 @@ def main() -> None:
         "from this directory (picks up rotated files automatically)",
     )
     parser.add_argument("--min-n", type=int, default=8)
-    parser.add_argument("--asset", action="append", default=["SOCCER", "MLB"])
+    parser.add_argument("--asset", action="append", default=["SOCCER", "MLB", "UFC"])
     parser.add_argument("--positive-only", action="store_true")
     parser.add_argument("--since", help="Inclusive YYYY-MM-DD on firstObserved/bestObserved")
     parser.add_argument("--until", help="Inclusive YYYY-MM-DD on firstObserved/bestObserved")

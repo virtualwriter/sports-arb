@@ -11,6 +11,7 @@ export type SportId =
   | "NFL"
   | "WNBA"
   | "NBA"
+  | "UFC"
   | "UNKNOWN";
 
 export type SportGender = "men" | "women" | "mixed" | "unknown";

@@ -25,7 +25,7 @@ import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 import { OrderType, Side, type TickSize } from "@polymarket/clob-client-v2";
 import { VpnGuard } from "./lib/VpnGuard.js";
-import { adapterForCandidate } from "./lib/sports-registry.js";
+import { adapterForCandidate, adapterForSlug } from "./lib/sports-registry.js";
 import {
   pickCheapestSoccerPackagesByEvent,
   shouldDeferSoccerPackage,
@@ -133,6 +133,12 @@ const NBA_LEDGER_ARCHIVE_GRACE_MS = Number(process.env.ARB_DAEMON_NBA_LEDGER_ARC
 const DISCOVER_NBA_GAMES = process.env.ARB_DAEMON_DISCOVER_NBA_GAMES !== "0";
 const DISCOVER_MLB_GAMES = process.env.ARB_DAEMON_DISCOVER_MLB_GAMES !== "0";
 const DISCOVER_SOCCER_GAMES = process.env.ARB_DAEMON_DISCOVER_SOCCER_GAMES !== "0";
+const DISCOVER_UFC_GAMES = process.env.ARB_DAEMON_DISCOVER_UFC_GAMES !== "0";
+// UEL / Europa Conference League share the SOCCER adapter (and would otherwise
+// inherit World Cup backtest shapes), but they trade in much thinner books.
+// Keep them shadow-only until their own backtest sample is significant.
+const NEW_SOCCER_LEAGUE_LIVE = process.env.ARB_DAEMON_ALLOW_NEW_SOCCER_LEAGUES_LIVE === "1";
+const NEW_SOCCER_LEAGUE_PREFIXES = ["uel-", "col-"];
 const DISCOVER_TENNIS_GAMES = process.env.ARB_DAEMON_DISCOVER_TENNIS_GAMES === "1";
 const DISCOVER_LADDERS = process.env.ARB_DAEMON_DISCOVER_LADDERS !== "0";
 const LADDER_DISCOVERY_TAGS = (process.env.ARB_DAEMON_LADDER_DISCOVERY_TAGS ?? "crypto,crypto-prices,stocks,commodities,indices,finance")
@@ -830,11 +836,11 @@ function registerToken(tokenId: string, key: string) {
 }
 
 function isSportsGameSlug(slug: string): boolean {
-  // Singles tennis / NBA / MLB:   <league>-<a>-<b>-YYYY-MM-DD
+  // Singles tennis / NBA / MLB / UFC: <league>-<a>-<b>-YYYY-MM-DD
   // Tennis doubles:               (atp|wta)-doubles-<a>-<b>-YYYY-MM-DD
   // ITF singles:                  itf-<a>-<b>-YYYY-MM-DD
-  // Soccer:                       (fifwc|mls)-<a>-<b>-YYYY-MM-DD(-more-markets)?
-  return /^(?:(?:nba|mlb|atp|wta|itf)-[a-z0-9]+-[a-z0-9]+|(?:atp|wta)-doubles-[a-z0-9]+-[a-z0-9]+|(?:fifwc|mls)-[a-z0-9]+-[a-z0-9]+)-\d{4}-\d{2}-\d{2}(?:-more-markets)?$/.test(slug);
+  // Soccer:                       (fifwc|mls|uel|col)-<a>-<b>-YYYY-MM-DD(-more-markets)?
+  return /^(?:(?:nba|mlb|atp|wta|itf|ufc)-[a-z0-9]+-[a-z0-9]+|(?:atp|wta)-doubles-[a-z0-9]+-[a-z0-9]+|(?:fifwc|mls|uel|col)-[a-z0-9]+-[a-z0-9]+)-\d{4}-\d{2}-\d{2}(?:-more-markets)?$/.test(slug);
 }
 
 function sportsGameDate(slug: string): string | null {
@@ -901,12 +907,13 @@ async function configuredEventSlugs(): Promise<string[]> {
   return out;
 }
 
-type SportsGameKind = "nba" | "mlb" | "soccer" | "tennis";
+type SportsGameKind = "nba" | "mlb" | "soccer" | "tennis" | "ufc";
 
 function sportsGameDiscoveryEnabled(kind: SportsGameKind): boolean {
   if (kind === "nba") return DISCOVER_NBA_GAMES;
   if (kind === "mlb") return DISCOVER_MLB_GAMES;
   if (kind === "tennis") return DISCOVER_TENNIS_GAMES;
+  if (kind === "ufc") return DISCOVER_UFC_GAMES;
   return DISCOVER_SOCCER_GAMES;
 }
 
@@ -914,11 +921,13 @@ function sportsGameDiscoveryTags(kind: SportsGameKind): string[] {
   if (kind === "nba") return ["nba", "basketball"];
   if (kind === "mlb") return ["mlb", "baseball"];
   if (kind === "tennis") return ["tennis", "atp", "wta", "itf"];
+  if (kind === "ufc") return ["ufc"];
   // Polymarket buries fifwc-* events past offset 300 under the `soccer` tag,
   // while the dedicated `fifa-world-cup` tag surfaces them on page 1. Include
   // both so we discover FIFA tournament matches without bumping the soccer
-  // pagination limit absurdly high.
-  return ["soccer", "fifa-world-cup"];
+  // pagination limit absurdly high. UEL / Conference League game events carry
+  // dedicated tags too, so include those for early-page coverage.
+  return ["soccer", "fifa-world-cup", "uel", "europa-conference-league"];
 }
 
 function sportsGameDiscoveryLimit(kind: SportsGameKind): number {
@@ -929,7 +938,8 @@ function matchesSportsGameKind(slug: string, kind: SportsGameKind): boolean {
   if (kind === "nba") return slug.startsWith("nba-");
   if (kind === "mlb") return slug.startsWith("mlb-");
   if (kind === "tennis") return slug.startsWith("atp-") || slug.startsWith("wta-") || slug.startsWith("itf-") || slug.includes("tennis");
-  return slug.startsWith("fifwc-") || slug.startsWith("mls-");
+  if (kind === "ufc") return slug.startsWith("ufc-");
+  return slug.startsWith("fifwc-") || slug.startsWith("mls-") || slug.startsWith("uel-") || slug.startsWith("col-");
 }
 
 function sportsGameHasLadder(event: GammaEvent): boolean {
@@ -1003,19 +1013,21 @@ async function discoverLadderEventSlugs(): Promise<string[]> {
 
 async function currentEventSlugs(): Promise<string[]> {
   const configured = await configuredEventSlugs();
-  const [discoveredNba, discoveredMlb, discoveredSoccer, discoveredTennis, discoveredLadders] = await Promise.all([
+  const [discoveredNba, discoveredMlb, discoveredSoccer, discoveredTennis, discoveredUfc, discoveredLadders] = await Promise.all([
     discoverSportsGameSlugs("nba"),
     discoverSportsGameSlugs("mlb"),
     discoverSportsGameSlugs("soccer"),
     discoverSportsGameSlugs("tennis"),
+    discoverSportsGameSlugs("ufc"),
     discoverLadderEventSlugs(),
   ]);
   if (discoveredNba.length) log(`nba discovery: ${discoveredNba.length} active game slugs`);
   if (discoveredMlb.length) log(`mlb discovery: ${discoveredMlb.length} active game slugs`);
   if (discoveredSoccer.length) log(`soccer discovery: ${discoveredSoccer.length} active game slugs`);
   if (discoveredTennis.length) log(`tennis discovery: ${discoveredTennis.length} active match slugs`);
+  if (discoveredUfc.length) log(`ufc discovery: ${discoveredUfc.length} active fight slugs`);
   if (discoveredLadders.length) log(`ladder discovery: ${discoveredLadders.length} active ladder events`);
-  return [...configured, ...TENNIS_EVENT_SLUGS, ...discoveredNba, ...discoveredMlb, ...discoveredSoccer, ...discoveredTennis, ...discoveredLadders].filter((slug, idx, slugs) => slugs.indexOf(slug) === idx);
+  return [...configured, ...TENNIS_EVENT_SLUGS, ...discoveredNba, ...discoveredMlb, ...discoveredSoccer, ...discoveredTennis, ...discoveredUfc, ...discoveredLadders].filter((slug, idx, slugs) => slugs.indexOf(slug) === idx);
 }
 
 async function refreshWatchlist(): Promise<void> {
@@ -1242,10 +1254,16 @@ function isSportsCandidate(candidate: Candidate): boolean {
   return candidate.asset === "NBA"
     || candidate.asset === "SOCCER"
     || candidate.asset === "MLB"
+    || candidate.asset === "UFC"
+    || candidate.asset === "TENNIS"
+    || candidate.asset === "WOMENS_TENNIS"
     || candidate.eventSlug.startsWith("nba-")
     || candidate.eventSlug.startsWith("mlb-")
     || candidate.eventSlug.startsWith("fifwc-")
     || candidate.eventSlug.startsWith("mls-")
+    || candidate.eventSlug.startsWith("uel-")
+    || candidate.eventSlug.startsWith("col-")
+    || candidate.eventSlug.startsWith("ufc-")
     || candidate.eventSlug.includes("soccer")
     || candidate.eventSlug.includes("world-cup")
     || candidate.eventSlug.includes("fifa")
@@ -1272,6 +1290,15 @@ function sportsExecutionBlocked(candidate: Candidate): string | null {
   if (!isSportsCandidate(candidate)) return null;
   if (!ALLOW_SPORTS_LIVE_EXECUTION) {
     return "sports live execution disabled: CLOB FAK pairs are not atomic and can leave naked inventory";
+  }
+  // Shadow/discovery-only sports (UFC, tennis, new leagues) must never reach
+  // live execution regardless of downstream gates: backtest data first.
+  const adapter = adapterForSlug(candidate.eventSlug);
+  if (adapter && adapter.mode !== "live_enabled") {
+    return `sports adapter ${adapter.sportId} mode=${adapter.mode}: shadow-only, no live execution`;
+  }
+  if (!NEW_SOCCER_LEAGUE_LIVE && NEW_SOCCER_LEAGUE_PREFIXES.some((prefix) => candidate.eventSlug.startsWith(prefix))) {
+    return "new soccer league (UEL/Conference League): shadow-only until its own backtest shapes are significant";
   }
   const entryBlock = sportsEntryBlocked(candidate);
   if (entryBlock) return entryBlock;
@@ -1322,6 +1349,9 @@ function isSportsSlug(slug: string | null | undefined): boolean {
   return isNbaSlug(slug)
     || slug.startsWith("fifwc-")
     || slug.startsWith("mls-")
+    || slug.startsWith("uel-")
+    || slug.startsWith("col-")
+    || slug.startsWith("ufc-")
     || slug.startsWith("mlb-")
     || slug.includes("soccer")
     || slug.includes("world-cup")
