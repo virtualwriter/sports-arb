@@ -48,6 +48,14 @@ const CLOB_HOST = process.env.CLOB_HOST ?? "https://clob.polymarket.com";
 
 const REFRESH_MS = Number(process.env.CRYPTO_SCANNER_REFRESH_MS ?? 120_000);
 const RECORD_MAX_COST = Number(process.env.CRYPTO_RECORD_MAX_COST ?? 1.05);
+// Implied probability that the middle actually pays out, proxied from the two
+// legs: P(middle) ~= P(broad) - P(narrow) ~= broadYesAsk - (1 - narrowNoAsk).
+// Dead-tail pairs (e.g. "XRP reaches $2.60 but not $3.00" when XRP trades at
+// $1.20) sum to ~1.00 with an impliedMiddle of ~0 — breakeven with no real
+// upside, not a mispricing. Rows below this threshold are flagged deadTail so
+// analysis can separate them from live middles. (cost < 1 still counts as
+// locked either way: the $1 floor is guaranteed regardless of middle odds.)
+const MIN_IMPLIED_MIDDLE = Number(process.env.CRYPTO_MIN_IMPLIED_MIDDLE ?? 0.01);
 const MIN_SIZE = Number(process.env.CRYPTO_SCANNER_MIN_SIZE ?? 5);
 const FETCH_TIMEOUT_MS = Number(process.env.CRYPTO_SCANNER_FETCH_TIMEOUT_MS ?? 10_000);
 const PM_DISCOVERY_PAGES = Number(process.env.CRYPTO_PM_DISCOVERY_PAGES ?? 5);
@@ -153,6 +161,10 @@ function emitPolymarketCandidates(slug: string, candidates: Candidate[]): { eval
     evaluated += 1;
     if (!(c.packageCost > 0) || c.packageCost > RECORD_MAX_COST) continue;
     const availableSize = c.availableSize;
+    const impliedMiddle = Math.max(0, c.broad.yesBook.ask - (1 - c.narrow.noBook.ask));
+    const deadTail = impliedMiddle < MIN_IMPLIED_MIDDLE;
+    // cost < 1 is riskless regardless of middle odds (guaranteed $1 floor);
+    // deadTail just means there is no middle upside beyond the locked edge.
     const isLocked = c.packageCost < 1 - 1e-9;
     if (isLocked) locked += 1;
     recorded += 1;
@@ -168,6 +180,8 @@ function emitPolymarketCandidates(slug: string, candidates: Candidate[]): { eval
       narrowStrike: c.narrow.strike,
       packageCost: c.packageCost,
       lockedEdge: 1 - c.packageCost,
+      impliedMiddle,
+      deadTail,
       locked: isLocked,
       availableSize,
       sizeOk: availableSize >= MIN_SIZE,
@@ -289,6 +303,8 @@ function emitKalshiPairs(
       const packageCost = broad.yesAsk + narrow.noAsk;
       if (!(packageCost > 0) || packageCost > RECORD_MAX_COST) continue;
       const availableSize = Math.min(broad.yesAskSize, narrow.noAskSize);
+      const impliedMiddle = Math.max(0, broad.yesAsk - (1 - narrow.noAsk));
+      const deadTail = impliedMiddle < MIN_IMPLIED_MIDDLE;
       const isLocked = packageCost < 1 - 1e-9;
       if (isLocked) locked += 1;
       recorded += 1;
@@ -306,6 +322,8 @@ function emitKalshiPairs(
         narrowStrike: narrow.strike,
         packageCost,
         lockedEdge: 1 - packageCost,
+        impliedMiddle,
+        deadTail,
         locked: isLocked,
         availableSize,
         sizeOk: availableSize >= MIN_SIZE,
