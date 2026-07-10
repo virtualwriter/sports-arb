@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from monotonic_middle_report import parse_ts, resolve_samples
+from score_strat2_state import p_middle
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -50,6 +51,10 @@ POST_WINDOW_S = 60.0
 MIN_AVAIL = 20.0
 DUST_YES = 0.02
 DUST_NO = 0.98
+# "Dead tail problem": right after a run scores, the cheapest package is often cheap
+# *because* the run pushed the game away from that middle. A package is a dead tail
+# when the post-event game state gives its middle band < this probability.
+DEAD_TAIL_P = 0.05
 
 
 def median(xs: list[float]) -> float | None:
@@ -105,6 +110,30 @@ def best_tradeable_pkg(row: dict[str, Any]) -> dict[str, Any] | None:
     if not pkgs:
         return None
     return min(pkgs, key=lambda p: float(p.get("packageCost") or 99))
+
+
+def pkg_p_middle(asset: str, feed: dict[str, Any], pkg: dict[str, Any]) -> float | None:
+    try:
+        lo = float(pkg.get("lo"))
+        hi = float(pkg.get("hi"))
+    except (TypeError, ValueError):
+        return None
+    p, _meta = p_middle(asset, feed, lo, hi)
+    return p
+
+
+def best_alive_pkg(row: dict[str, Any], asset: str, feed: dict[str, Any]) -> dict[str, Any] | None:
+    """Cheapest tradeable package whose middle is still alive given post-event game state."""
+    alive = []
+    for pkg in row.get("packages") or []:
+        if not tradeable(pkg):
+            continue
+        p = pkg_p_middle(asset, feed, pkg)
+        if p is not None and p >= DEAD_TAIL_P:
+            alive.append(pkg)
+    if not alive:
+        return None
+    return min(alive, key=lambda p: float(p.get("packageCost") or 99))
 
 
 def detect_first_jump(
@@ -180,6 +209,7 @@ def analyze_event(
         and s.get("kind") == "snapshot"
         and parse_ts(s.get("observedAt"))
     ]
+    feed_state = change_row.get("feed") or {}
     # Include change_row packages as t_feed book if present
     feed_pkg = best_tradeable_pkg(change_row)
     t_first, first_snap = detect_first_jump(event_snaps, t_feed)
@@ -199,6 +229,36 @@ def analyze_event(
     residual_s = (t_cohere - t_feed).total_seconds() if t_cohere else None
     discount = (post_level - lag_cost) if post_level is not None else None
     pkg = feed_pkg or (best_tradeable_pkg(first_snap) if first_snap else None)
+
+    def pkg_dict(p: dict[str, Any] | None, cost: float | None) -> dict[str, Any] | None:
+        if not p:
+            return None
+        return {
+            "packageId": p.get("packageId"),
+            "lo": p.get("lo"),
+            "hi": p.get("hi"),
+            "packageCost": cost if cost is not None else float(p.get("packageCost") or 99),
+            "availableSize": float(p.get("availableSize") or 0),
+            "broad": {
+                "marketId": p.get("broadMarketId"),
+                "yesTokenId": p.get("broadYesTokenId"),
+                "strike": p.get("lo"),
+            },
+            "narrow": {
+                "marketId": p.get("narrowMarketId"),
+                "noTokenId": p.get("narrowNoTokenId"),
+                "strike": p.get("hi"),
+            },
+            "eventSlug": slug,
+        }
+
+    p_mid = pkg_p_middle(asset, feed_state, pkg) if pkg else None
+    dead_tail = p_mid is not None and p_mid < DEAD_TAIL_P
+    alive_src = change_row if feed_pkg else first_snap
+    alive_raw = best_alive_pkg(alive_src, asset, feed_state) if alive_src else None
+    alive_pkg = pkg_dict(alive_raw, None)
+    if alive_pkg is not None:
+        alive_pkg["pMiddle"] = pkg_p_middle(asset, feed_state, alive_raw)
     return {
         "asset": asset,
         "eventSlug": slug,
@@ -211,34 +271,20 @@ def analyze_event(
         "discount": discount,
         "tradeable": bool(pkg and tradeable(pkg)),
         "availableSize": float(pkg.get("availableSize") or 0) if pkg else 0,
-        "package": {
-            "packageId": pkg.get("packageId") if pkg else None,
-            "lo": pkg.get("lo") if pkg else None,
-            "hi": pkg.get("hi") if pkg else None,
-            "packageCost": lag_cost,
-            "availableSize": float(pkg.get("availableSize") or 0) if pkg else 0,
-            "broad": {
-                "marketId": pkg.get("broadMarketId") if pkg else None,
-                "yesTokenId": pkg.get("broadYesTokenId") if pkg else None,
-                "strike": pkg.get("lo") if pkg else None,
-            },
-            "narrow": {
-                "marketId": pkg.get("narrowMarketId") if pkg else None,
-                "noTokenId": pkg.get("narrowNoTokenId") if pkg else None,
-                "strike": pkg.get("hi") if pkg else None,
-            },
-            "eventSlug": slug,
-        }
-        if pkg
-        else None,
+        "pMiddle": p_mid,
+        "deadTail": dead_tail,
+        "package": pkg_dict(pkg, lag_cost),
+        "alivePackage": alive_pkg,
     }
 
 
-def resolve_tradeable(events: list[dict[str, Any]]) -> dict[str, Any]:
+def resolve_tradeable(events: list[dict[str, Any]], key: str = "package") -> dict[str, Any]:
     samples: dict[str, dict[str, Any]] = {}
     for ev in events:
-        pkg = ev.get("package")
-        if not ev.get("tradeable") or not pkg or not pkg.get("packageId"):
+        pkg = ev.get(key)
+        if not pkg or not pkg.get("packageId"):
+            continue
+        if key == "package" and not ev.get("tradeable"):
             continue
         # Shape expected by resolve_samples
         samples[pkg["packageId"]] = {
@@ -337,6 +383,22 @@ def write_md(path: Path, report: dict[str, Any]) -> None:
             f"- checks: `{json.dumps(block['pass']['checks'])}`",
             "",
         ]
+        dt_block = block.get("deadTail")
+        if dt_block:
+            frac = dt_block.get("deadTailFrac")
+            lines += [
+                f"### Dead tail problem",
+                "",
+                f"- dead-tail fraction of tradeable picks: {dt_block['deadTailN']}/{dt_block['tradeableN']}"
+                f" ({frac*100:.0f}%)" if frac is not None else "- no tradeable picks",
+                f"- ROI cheapest-but-dead: {json.dumps(dt_block['cheapestButDeadResolved'].get('roi'))}"
+                f" (resolved={dt_block['cheapestButDeadResolved'].get('resolved')})",
+                f"- ROI cheapest-alive: {json.dumps(dt_block['cheapestAliveResolved'].get('roi'))}"
+                f" (resolved={dt_block['cheapestAliveResolved'].get('resolved')})",
+                f"- ROI alive-alternative selection: {json.dumps(dt_block['aliveAlternativeResolved'].get('roi'))}"
+                f" (resolved={dt_block['aliveAlternativeResolved'].get('resolved')})",
+                "",
+            ]
     path.write_text("\n".join(lines) + "\n")
 
 
@@ -387,9 +449,20 @@ def main() -> None:
     }
     for asset, evs in sorted(by_asset.items()):
         resolved = resolve_tradeable(evs)
+        tradeable_ev = [e for e in evs if e.get("tradeable")]
+        dead = [e for e in tradeable_ev if e.get("deadTail")]
+        alive_ev = [e for e in tradeable_ev if not e.get("deadTail")]
         report["byAsset"][asset] = {
             "pass": pass_bars(evs, resolved),
             "resolved": resolved,
+            "deadTail": {
+                "tradeableN": len(tradeable_ev),
+                "deadTailN": len(dead),
+                "deadTailFrac": len(dead) / len(tradeable_ev) if tradeable_ev else None,
+                "cheapestButDeadResolved": resolve_tradeable(dead),
+                "cheapestAliveResolved": resolve_tradeable(alive_ev),
+                "aliveAlternativeResolved": resolve_tradeable(evs, key="alivePackage"),
+            },
         }
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
