@@ -27,6 +27,8 @@ export const PATHS = {
   shadows: join(DATA_DIR, "sports-arb-shadows.jsonl"),
   resolvedShadows: join(DATA_DIR, "sports-arb-resolved-shadows.jsonl"),
   shadowBucketSummary: join(DATA_DIR, "sports-arb-shadow-bucket-summary.json"),
+  stateFeedShadow: join(DATA_DIR, "state-feed-shadow.jsonl"),
+  stateFeedEventMap: join(DATA_DIR, "state-feed-event-map.json"),
   tradesCsv: join(DATA_DIR, "sports-arb-trades.csv"),
   signalWeights: join(DATA_DIR, "sports-arb-signal-weights.json"),
   hypotheses: join(DATA_DIR, "sports-arb-hypotheses.json"),
