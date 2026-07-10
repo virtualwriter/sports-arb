@@ -643,10 +643,18 @@ type PreparedFakBuy = {
   orderType: OrderType;
 };
 
+// Tick sizes the installed clob-client SDK can round for (ROUNDING_CONFIG keys).
+// If Polymarket ships a new tick size, fail loudly here instead of letting the
+// SDK crash with "Cannot read properties of undefined (reading 'price')".
+const SDK_SUPPORTED_TICK_SIZES = new Set(["0.1", "0.01", "0.005", "0.0025", "0.001", "0.0001"]);
+
 async function tickSize(client: Clob, tokenId: string): Promise<TickSize> {
   const cached = tickSizeCache.get(tokenId);
   if (cached) return cached;
   const size = await client.getTickSize(tokenId) as TickSize;
+  if (!SDK_SUPPORTED_TICK_SIZES.has(String(size))) {
+    throw new Error(`unsupported_tick_size: token ${tokenId} has tick size ${String(size)}; upgrade @polymarket/clob-client-v2`);
+  }
   tickSizeCache.set(tokenId, size);
   return size;
 }

@@ -39,7 +39,7 @@
     "build": "tsc --noEmit"
   },
   "dependencies": {
-    "@polymarket/clob-client-v2": "^1.0.6",
+    "@polymarket/clob-client-v2": "^1.0.8",
     "dotenv": "^16.4.0",
     "ethers": "^5.8.0",
     "socks-proxy-agent": "^9.0.0",
