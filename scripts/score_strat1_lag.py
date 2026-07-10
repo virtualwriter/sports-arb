@@ -22,13 +22,28 @@ from typing import Any
 from monotonic_middle_report import parse_ts, resolve_samples
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SHADOW = Path(
-    __import__("os").environ.get(
-        "STATE_FEED_SHADOW_PATH",
-        __import__("os").environ.get("SPORTS_ARB_DATA_DIR", str(ROOT / "data"))
-        + "/state-feed-shadow.jsonl",
-    )
-)
+
+
+def _default_shadow() -> Path:
+    """Resolve the shadow file: env override first, then first existing known location."""
+    import os
+
+    override = os.environ.get("STATE_FEED_SHADOW_PATH")
+    if override:
+        return Path(override)
+    candidates = []
+    data_dir = os.environ.get("SPORTS_ARB_DATA_DIR")
+    if data_dir:
+        candidates.append(Path(data_dir) / "state-feed-shadow.jsonl")
+    candidates.append(Path("/var/lib/sports-arb/data/state-feed-shadow.jsonl"))
+    candidates.append(ROOT / "data" / "state-feed-shadow.jsonl")
+    for cand in candidates:
+        if cand.exists():
+            return cand
+    return candidates[0]
+
+
+DEFAULT_SHADOW = _default_shadow()
 JUMP_CENTS = 0.05
 COHERE_CENTS = 0.02
 POST_WINDOW_S = 60.0
@@ -333,6 +348,14 @@ def main() -> None:
     args = ap.parse_args()
 
     rows = load_rows(args.shadow)
+    if not rows:
+        import sys
+
+        print(
+            f"WARNING: no rows loaded from {args.shadow} "
+            f"(exists={args.shadow.exists()}); check STATE_FEED_SHADOW_PATH/SPORTS_ARB_DATA_DIR",
+            file=sys.stderr,
+        )
     snapshots = [r for r in rows if r.get("kind") == "snapshot"]
     changes = [
         r

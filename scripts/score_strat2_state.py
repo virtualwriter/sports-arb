@@ -22,13 +22,28 @@ from typing import Any
 from monotonic_middle_report import parse_ts, resolve_samples
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SHADOW = Path(
-    __import__("os").environ.get(
-        "STATE_FEED_SHADOW_PATH",
-        __import__("os").environ.get("SPORTS_ARB_DATA_DIR", str(ROOT / "data"))
-        + "/state-feed-shadow.jsonl",
-    )
-)
+
+
+def _default_shadow() -> Path:
+    """Resolve the shadow file: env override first, then first existing known location."""
+    import os
+
+    override = os.environ.get("STATE_FEED_SHADOW_PATH")
+    if override:
+        return Path(override)
+    candidates = []
+    data_dir = os.environ.get("SPORTS_ARB_DATA_DIR")
+    if data_dir:
+        candidates.append(Path(data_dir) / "state-feed-shadow.jsonl")
+    candidates.append(Path("/var/lib/sports-arb/data/state-feed-shadow.jsonl"))
+    candidates.append(ROOT / "data" / "state-feed-shadow.jsonl")
+    for cand in candidates:
+        if cand.exists():
+            return cand
+    return candidates[0]
+
+
+DEFAULT_SHADOW = _default_shadow()
 
 MIN_AVAIL = 20.0
 DUST_YES = 0.02
@@ -407,6 +422,14 @@ def main() -> None:
     args = ap.parse_args()
 
     rows = load_snapshots(args.shadow)
+    if not rows:
+        import sys
+
+        print(
+            f"WARNING: no snapshot rows loaded from {args.shadow} "
+            f"(exists={args.shadow.exists()}); check STATE_FEED_SHADOW_PATH/SPORTS_ARB_DATA_DIR",
+            file=sys.stderr,
+        )
     by_asset_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         by_asset_rows[str(row.get("asset") or "UNKNOWN")].append(row)
