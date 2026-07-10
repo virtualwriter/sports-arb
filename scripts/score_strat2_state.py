@@ -108,25 +108,57 @@ def parse_soccer_minutes_left(feed: dict[str, Any]) -> float | None:
 
 
 def parse_mlb_innings_left(feed: dict[str, Any]) -> float | None:
+    """Expected scoring innings remaining, using outs and walk-off truncation.
+
+    Counts remaining half-innings (two per inning): the current half contributes
+    its remaining outs, plus the bottom of the current inning if we're in the
+    top, plus both halves of every later inning through the 9th. Bottom-9+ with
+    the home team leading is a walk-off state (game effectively over), and a tie
+    in the 9th or later adds a crude expected-extras allowance.
+    """
     period = str(feed.get("period") or "")
     status = str(feed.get("status") or "").lower()
     if "final" in status:
         return 0.0
-    # "Top 5" / "Bottom 7"
     m = re.search(r"(\d{1,2})", period)
     if not m:
         return 4.5 if feed.get("live") else None
     inning = int(m.group(1))
     half = period.lower()
-    # Remaining full innings after current roughly
-    left = max(0, 9 - inning)
-    if "top" in half:
-        left += 1.0  # rest of this + home half-ish; keep simple
-    elif "bottom" in half:
-        left += 0.5
-    else:
-        left += 0.75
-    return float(left)
+    try:
+        outs = int(feed.get("outs")) if feed.get("outs") is not None else None
+    except (TypeError, ValueError):
+        outs = None
+    try:
+        home = int(feed.get("scoreHome")) if feed.get("scoreHome") is not None else None
+        away = int(feed.get("scoreAway")) if feed.get("scoreAway") is not None else None
+    except (TypeError, ValueError):
+        home = away = None
+
+    half_frac = 1.0 if outs is None else max(0.0, (3 - min(outs, 3)) / 3)
+    is_top = "top" in half
+    is_bottom = "bottom" in half
+
+    if inning >= 9:
+        if is_bottom and home is not None and away is not None:
+            if home > away:
+                return 0.0  # walk-off state; game is over or ends on the next play
+            if home == away:
+                # Tied in the bottom of the 9th+: rest of this half plus a crude
+                # expected-extras allowance (extras average ~1.5 innings).
+                return half_frac / 2 + 0.75
+            return half_frac / 2  # home trailing: this half ends the game unless they tie
+        if is_top:
+            base = half_frac / 2 + 0.5  # rest of top + bottom half
+            if home is not None and away is not None and home == away:
+                base += 0.75
+            return base
+        return half_frac / 2
+
+    remaining_halves = half_frac + (1.0 if is_top else 0.0) + 2.0 * max(0, 9 - inning)
+    if not is_top and not is_bottom:
+        remaining_halves = half_frac + 0.5 + 2.0 * max(0, 9 - inning)
+    return remaining_halves / 2
 
 
 def is_dust(pkg: dict[str, Any]) -> bool:
