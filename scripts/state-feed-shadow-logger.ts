@@ -385,7 +385,7 @@ async function main(): Promise<void> {
         if (te.lastFeedKey && te.lastFeedKey !== feed.rawScoreKey) {
           const scoreOnlyAwayHome = te.lastFeedKey.split("|")[0];
           const newAwayHome = feed.rawScoreKey.split("|")[0];
-          const scoring = scoreOnlyAwayHome !== newAwayHome;
+          const scoring = isNumericScore(scoreOnlyAwayHome) && isNumericScore(newAwayHome) && scoreOnlyAwayHome !== newAwayHome;
           appendJsonl(SHADOW_PATH, {
             schemaVersion: 1,
             kind: "score_change",
@@ -405,7 +405,9 @@ async function main(): Promise<void> {
       } else if (feed && te.lastFeedKey && te.lastFeedKey !== feed.rawScoreKey) {
         // Feed moved but books not refreshed this tick — still log score_change without ladder
         const foundAt = new Date().toISOString();
-        const scoring = te.lastFeedKey.split("|")[0] !== feed.rawScoreKey.split("|")[0];
+        const prevScorePart = te.lastFeedKey.split("|")[0];
+        const newScorePart = feed.rawScoreKey.split("|")[0];
+        const scoring = isNumericScore(prevScorePart) && isNumericScore(newScorePart) && prevScorePart !== newScorePart;
         appendJsonl(SHADOW_PATH, {
           schemaVersion: 1,
           kind: "score_change",
@@ -438,6 +440,12 @@ async function main(): Promise<void> {
 
     await sleep(250);
   }
+}
+
+// A real score looks like "0-3"; pre-game placeholders look like "x-x". A transition
+// from placeholder to "0-0" is game start, not a scoring play.
+function isNumericScore(scorePart: string): boolean {
+  return /^\d+-\d+$/.test(scorePart);
 }
 
 function sleep(ms: number): Promise<void> {
