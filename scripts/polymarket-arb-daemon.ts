@@ -2838,6 +2838,12 @@ async function executeLive(
   const sportsBlock = sportsExecutionBlocked(c);
   if (sportsBlock) throw new Error(`blocked_sports_non_atomic_execution: ${sportsBlock}`);
   if (isSportsCandidate(c)) {
+    const cooldownUntil = sportsOrderErrorCooldownUntil.get(pkg.key) ?? 0;
+    if (Date.now() < cooldownUntil) {
+      throw new Error(
+        `blocked_sports_order_error_cooldown: order creation failed recently; retry in ${Math.ceil((cooldownUntil - Date.now()) / 1000)}s`,
+      );
+    }
     return executeSportsCheapFirst(pkg, c, shares, quoteContext);
   }
   const client = clob.client;
@@ -3054,6 +3060,12 @@ async function executeLive(
   };
 }
 
+// Packages whose order CREATION (signing/metadata, before the exchange ever
+// sees an order) failed. Without a cooldown the daemon retries every tick and
+// spams hundreds of no-fill records for a market it structurally cannot trade.
+const sportsOrderErrorCooldownUntil = new Map<string, number>();
+const SPORTS_ORDER_ERROR_COOLDOWN_MS = Number(process.env.ARB_DAEMON_SPORTS_ORDER_ERROR_COOLDOWN_MS ?? 15 * 60 * 1000);
+
 async function executeSportsCheapFirst(
   pkg: WatchPackage,
   c: Candidate,
@@ -3213,6 +3225,10 @@ async function executeSportsCheapFirst(
     record.failureReason = nakedRole
       ? `sports_cheap_first_naked_${nakedRole}=${nakedShares} -> immediate_exit (no matched fill)${errSuffix}`
       : `sports_cheap_first_no_fill; no position${errSuffix}`;
+    if (!nakedRole && legErrors.length && Object.keys(record.legOrderIds ?? {}).length === 0) {
+      sportsOrderErrorCooldownUntil.set(pkg.key, Date.now() + SPORTS_ORDER_ERROR_COOLDOWN_MS);
+      log(`sports order-error cooldown ${pkg.key}: ${Math.round(SPORTS_ORDER_ERROR_COOLDOWN_MS / 60000)}min (${legErrors.join("; ").slice(0, 160)})`);
+    }
   }
   const actualPairCost = matched > 0 ? broadAvgPrice + narrowAvgPrice : null;
   attachExecutionQuote(record, quoteContext, actualPairCost);
@@ -3277,8 +3293,23 @@ async function executeSportsCheapFirst(
   };
 }
 
+// A "flat no-fill" row is bookkeeping residue: an execution attempt where no
+// order ever reached the exchange and no position exists. Keeping one such row
+// per package preserves the audit trail; keeping hundreds (one per retry tick)
+// is clutter that bloats the file and confuses P&L tooling.
+function isFlatNoFillRow(row: LivePackage): boolean {
+  return row.status === "unwind_required"
+    && (row.actualCost ?? 0) <= EPSILON
+    && (row.filledShares ?? 0) <= EPSILON
+    && Object.keys(row.legOrderIds ?? {}).length === 0
+    && !/orphan|naked|immediate_exit/i.test(row.failureReason ?? "");
+}
+
 function persist(record: LivePackage, orders: LiveOrder[]) {
-  const rows = readJsonArray<LivePackage>(PACKAGES_PATH).filter((row) => row.id !== record.id);
+  let rows = readJsonArray<LivePackage>(PACKAGES_PATH).filter((row) => row.id !== record.id);
+  if (isFlatNoFillRow(record)) {
+    rows = rows.filter((row) => !(row.packageId === record.packageId && isFlatNoFillRow(row)));
+  }
   writeJsonArray(PACKAGES_PATH, [...rows, record]);
   if (orders.length) appendJsonArray(ORDERS_PATH, orders);
 }
