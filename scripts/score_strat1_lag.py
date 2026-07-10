@@ -419,10 +419,18 @@ def main() -> None:
             file=sys.stderr,
         )
     snapshots = [r for r in rows if r.get("kind") == "snapshot"]
+    import re
+
+    def real_scoring(r: dict[str, Any]) -> bool:
+        # Historical rows logged before the logger fix flagged pre-game
+        # "x-x -> 0-0" transitions as scoring; require a numeric prev score.
+        prev = str(r.get("prevScoreKey") or "").split("|")[0]
+        return bool(re.fullmatch(r"\d+-\d+", prev))
+
     changes = [
         r
         for r in rows
-        if r.get("kind") == "score_change" and r.get("scoring")
+        if r.get("kind") == "score_change" and r.get("scoring") and real_scoring(r)
     ]
 
     events: list[dict[str, Any]] = []
