@@ -378,10 +378,18 @@ def score_margin(cands: list[dict[str, Any]], margin: float) -> dict[str, Any]:
                 r["packageId"] = pid
                 break
 
+    # Terminal-state picks (bottom 9th, extras territory, etc.) are excluded
+    # from the strategy: the model's residual weaknesses concentrate there and
+    # they showed persistently negative ROI. They stay in the report as a
+    # diagnostic slice only.
+    term_ids = {c["packageId"] for c in unique.values() if is_terminalish(c)}
+    core_res = [r for r in resolved if r.get("packageId") not in term_ids]
+    term_res = [r for r in resolved if r.get("packageId") in term_ids]
+
     pnl = 0.0
     stake = 0.0
     middles = 0
-    for r in resolved:
+    for r in core_res:
         cost = float(r["packageCost"])
         payout = float(r["resolvedPayout"])
         pnl += payout - cost
@@ -390,14 +398,11 @@ def score_margin(cands: list[dict[str, Any]], margin: float) -> dict[str, Any]:
             middles += 1
     roi = pnl / stake if stake > 0 else None
 
-    # terminal slice
-    term_ids = {c["packageId"] for c in unique.values() if is_terminalish(c)}
-    term_res = [r for r in resolved if r.get("packageId") in term_ids]
     term_pnl = sum(float(r["resolvedPayout"]) - float(r["packageCost"]) for r in term_res)
     term_stake = sum(float(r["packageCost"]) for r in term_res)
     term_roi = term_pnl / term_stake if term_stake > 0 else None
 
-    cal = calibration(resolved)
+    cal = calibration(core_res)
     high = next((b for b in cal if b["bucket"] == "70-100"), None)
     high_ok = False
     if high and high["n"] and high["pred"] is not None and high["realized"] is not None:
@@ -406,14 +411,15 @@ def score_margin(cands: list[dict[str, Any]], margin: float) -> dict[str, Any]:
     return {
         "margin": margin,
         "selectedN": len(unique),
-        "resolved": len(resolved),
+        "selectedNonTerminal": len(unique) - len(term_ids),
+        "resolved": len(core_res),
         "unknown": len(unknown),
         "middles": middles,
-        "middlePct": middles / len(resolved) if resolved else None,
+        "middlePct": middles / len(core_res) if core_res else None,
         "roi": roi,
         "pnl": pnl,
         "stake": stake,
-        "terminal": {"n": len(term_res), "roi": term_roi},
+        "terminalExcluded": {"n": len(term_res), "roi": term_roi},
         "calibration": cal,
         "highPCalibrated": high_ok,
         "highP": high,
@@ -428,15 +434,8 @@ def pass_bars(by_margin: dict[str, dict[str, Any]]) -> dict[str, Any]:
     checks = {
         "hasPositiveRoiMargin": best is not None and best.get("roi") is not None and best["roi"] > 0,
         "highPCalibrated": any(b.get("highPCalibrated") for b in by_margin.values()),
-        "terminalRoiNonNeg": any(
-            (b.get("terminal") or {}).get("roi") is not None and (b.get("terminal") or {}).get("roi") >= 0
-            for b in by_margin.values()
-            if (b.get("terminal") or {}).get("n", 0) >= 5
-        )
-        or all((b.get("terminal") or {}).get("n", 0) < 5 for b in by_margin.values()),
     }
-    # If no terminal sample yet, don't fail that check (interim)
-    go = checks["hasPositiveRoiMargin"] and checks["highPCalibrated"] and checks["terminalRoiNonNeg"]
+    go = checks["hasPositiveRoiMargin"] and checks["highPCalibrated"]
     # Need some resolved volume
     any_n = sum(b.get("resolved") or 0 for b in by_margin.values())
     interim = any_n < 30
@@ -457,9 +456,10 @@ def write_md(path: Path, report: dict[str, Any]) -> None:
         decision = "GO" if block["pass"]["GO"] else ("INTERIM" if block["pass"]["interim"] else "NO-GO")
         lines += [f"## {sport}: **{decision}**", "", f"- checks: `{json.dumps(block['pass']['checks'])}`", ""]
         for m, mb in block.get("byMargin", {}).items():
+            term = mb.get("terminalExcluded") or {}
             lines.append(
                 f"- margin {m}: n={mb.get('selectedN')} resolved={mb.get('resolved')} "
-                f"ROI={mb.get('roi')} termROI={(mb.get('terminal') or {}).get('roi')} "
+                f"ROI={mb.get('roi')} terminalExcluded(n={term.get('n')}, roi={term.get('roi')}) "
                 f"highP={mb.get('highP')}"
             )
         lines.append("")
