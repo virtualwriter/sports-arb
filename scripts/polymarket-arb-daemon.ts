@@ -37,6 +37,13 @@ import { packageFromCandidate } from "./lib/package-factory.js";
 import { evaluateSportsStrategy, soccerEffectiveMinNarrowYesBid, sportsEffectiveMaxEntryLegPrice } from "./lib/sports-strategy.js";
 import { sportsBacktestLiveGateBlock } from "./lib/soccer-backtest-live-gate.js";
 import {
+  STRAT2_MAX_DAILY_USD,
+  STRAT2_MAX_PACKAGE_USD,
+  STRAT2_MLB_LIVE,
+  refreshStrat2Feeds,
+  strat2MlbApproval,
+} from "./lib/strat2-mlb-live-gate.js";
+import {
   type Candidate,
   type Direction,
   type GammaEvent,
@@ -1308,8 +1315,20 @@ function sportsExecutionBlocked(candidate: Candidate): string | null {
   if (!NEW_SOCCER_LEAGUE_LIVE && NEW_SOCCER_LEAGUE_PREFIXES.some((prefix) => candidate.eventSlug.startsWith(prefix))) {
     return "new soccer league (UEL/Conference League): shadow-only until its own backtest shapes are significant";
   }
+  // Strat 2 (state-priced middles): an in-play MLB game-total entry approved by
+  // the calibrated game-state model bypasses the pre-game entry cutoff and the
+  // backtest shape gate — the model's edge margin is its cost authority. All
+  // operational gates (leg caps, depth, spread) still apply, plus its own
+  // daily spend cap.
+  const strat2 = strat2MlbApproval(candidate);
+  if (strat2?.ok) {
+    const capBlock = strat2DailyCapBlock();
+    if (capBlock) return capBlock;
+  }
   const entryBlock = sportsEntryBlocked(candidate);
-  if (entryBlock) return entryBlock;
+  if (entryBlock && !strat2?.ok) {
+    return strat2 ? `${entryBlock}; ${strat2.reason}` : entryBlock;
+  }
   const maxEntryLeg = Math.max(candidate.broad.yesBook.ask, candidate.narrow.noBook.ask);
   const effectiveLegCap = sportsEffectiveMaxEntryLegPrice(candidate, SPORTS_MAX_ENTRY_LEG_PRICE);
   if (effectiveLegCap > 0 && maxEntryLeg + EPSILON >= effectiveLegCap) {
@@ -1325,15 +1344,19 @@ function sportsExecutionBlocked(candidate: Candidate): string | null {
       return `soccer narrow yes bid above live band bid=${narrowYesBid.toFixed(4)} max=${SOCCER_MAX_NARROW_YES_BID.toFixed(4)}`;
     }
   }
-  if (candidate.asset === "MLB" && MLB_MIN_NARROW_YES_BID > 0 && narrowYesBid + EPSILON < MLB_MIN_NARROW_YES_BID) {
+  // Strat 2 entries use the shadow scorer's dust filters instead of the
+  // pre-game MLB narrow-bid band (the backtested selection included packages
+  // with narrow YES trading well below 0.30).
+  if (candidate.asset === "MLB" && !strat2?.ok && MLB_MIN_NARROW_YES_BID > 0 && narrowYesBid + EPSILON < MLB_MIN_NARROW_YES_BID) {
     return `mlb narrow yes bid below live band bid=${narrowYesBid.toFixed(4)} min=${MLB_MIN_NARROW_YES_BID.toFixed(4)}`;
   }
   if (candidate.asset === "SOCCER" || candidate.asset === "MLB") {
     // Backtest gate is the sole shape/cost authority for both sports: only
     // shapes with positive ROI@worst trade live, capped at the EV-margin cost.
+    // (Strat 2 approvals substitute the model gate for MLB in-play entries.)
     const strategy = evaluateSportsStrategy(candidate);
     const backtestBlock = sportsBacktestLiveGateBlock(candidate, strategy.marketType);
-    if (backtestBlock) return backtestBlock;
+    if (backtestBlock && !strat2?.ok) return backtestBlock;
   }
   const bestSeenBlock = soccerBestSeenCostBlock(candidate);
   if (bestSeenBlock) return bestSeenBlock;
@@ -1496,7 +1519,13 @@ function juneBreakevenRangeBlock(candidate: Candidate): string | null {
 }
 
 function minEdgeFor(candidate: Candidate): number {
-  if (isSportsCandidate(candidate)) return SPORTS_MIN_EDGE;
+  if (isSportsCandidate(candidate)) {
+    // Strat 2 entries price against model fair value (1 + pMiddle), not locked
+    // edge; a cost of e.g. 1.35 with p=0.5 is a valid entry. The strat2 gate
+    // enforces its own cost ceiling and edge margin.
+    if (strat2MlbApproval(candidate)?.ok) return -1;
+    return SPORTS_MIN_EDGE;
+  }
   // June expiries are allowed at breakeven (cost <= 1.0000) to fish for middles.
   // Sizing/outlay rules remain exactly the normal daemon rules.
   if (isJuneExpiryCandidate(candidate)) return Number(process.env.ARB_DAEMON_JUNE_EXPIRY_MIN_EDGE ?? 0);
@@ -1662,7 +1691,13 @@ function strictLiveStrategyFailures(decision: SportsStrategyGate): string[] {
 
 function sportsStrategyGate(candidate: Candidate): { decision: SportsStrategyGate; reason: string | null } {
   const decision = evaluateSportsStrategy(candidate);
-  const strategyFailures = strictLiveStrategyFailures(decision);
+  let strategyFailures = strictLiveStrategyFailures(decision);
+  if (strategyFailures.length && strat2MlbApproval(candidate)?.ok) {
+    // Strat 2 replaces the pre-game MLB narrow-bid band with the shadow
+    // scorer's dust filters (enforced inside the strat2 gate); every other
+    // strategy failure (market shape, leg price cap, adapter mode) still holds.
+    strategyFailures = strategyFailures.filter((failure) => failure !== "mlb_narrow_yes_bid_too_low");
+  }
   if (!ENFORCE_SPORTS_STRATEGY_LIVE || !isSportsCandidate(candidate) || strategyFailures.length === 0) {
     return { decision, reason: null };
   }
@@ -2692,8 +2727,16 @@ async function tryExecuteInner(pkg: WatchPackage, legs: LiveLegs): Promise<void>
     return;
   }
   const executionCandidate = executionSizingCandidate(c);
+  // Strat 2 (in-play model-priced) entries run on their own small budget until
+  // forward-validated; normal backtest-gate entries keep the standard budget.
+  const strat2Entry = strat2MlbApproval(c)?.ok === true;
+  const budgetCapUsd = strat2Entry ? STRAT2_MAX_PACKAGE_USD : Number.POSITIVE_INFINITY;
   const spendableUsd = spendableUsdAfterReservations();
-  const sized = sizeForCandidate(executionCandidate, packageRows, sizingSpendableUsd(spendableUsd) * budgetFactorForCandidate(executionCandidate));
+  const sized = sizeForCandidate(
+    executionCandidate,
+    packageRows,
+    Math.min(sizingSpendableUsd(spendableUsd) * budgetFactorForCandidate(executionCandidate), budgetCapUsd),
+  );
   if (capture) {
     capture.sizing = {
       stage: "initial",
@@ -2756,7 +2799,11 @@ async function tryExecuteInner(pkg: WatchPackage, legs: LiveLegs): Promise<void>
     return;
   }
   const freshSpendableUsd = spendableUsdAfterReservations();
-  const freshSized = sizeForCandidate(executionCandidate, freshPackageRows, sizingSpendableUsd(freshSpendableUsd) * budgetFactorForCandidate(executionCandidate));
+  const freshSized = sizeForCandidate(
+    executionCandidate,
+    freshPackageRows,
+    Math.min(sizingSpendableUsd(freshSpendableUsd) * budgetFactorForCandidate(executionCandidate), budgetCapUsd),
+  );
   if (capture) {
     capture.sizing = {
       stage: "fresh",
@@ -3071,6 +3118,77 @@ async function executeLive(
 // Packages whose order CREATION (signing/metadata, before the exchange ever
 // sees an order) failed. Without a cooldown the daemon retries every tick and
 // spams hundreds of no-fill records for a market it structurally cannot trade.
+// Strat 2 daily spend tracking. Rebuilt from disk on day change / restart so
+// the cap survives daemon restarts; incremented in-memory on each entry.
+let strat2SpendDayKey = "";
+let strat2SpentTodayUsd = 0;
+
+function strat2SpendFromDisk(dayKey: string): number {
+  try {
+    const rows = readJsonArray<LivePackage>(PACKAGES_PATH);
+    let total = 0;
+    for (const row of rows) {
+      if ((row as { entryStrategy?: string }).entryStrategy !== "strat2_state") continue;
+      if (!String(row.createdAt ?? "").startsWith(dayKey)) continue;
+      total += Math.max(0, row.actualCost ?? 0);
+    }
+    return total;
+  } catch {
+    return 0;
+  }
+}
+
+function strat2RefreshDailySpend(): void {
+  const dayKey = new Date().toISOString().slice(0, 10);
+  if (strat2SpendDayKey !== dayKey) {
+    strat2SpendDayKey = dayKey;
+    strat2SpentTodayUsd = strat2SpendFromDisk(dayKey);
+  }
+}
+
+function strat2DailyCapBlock(): string | null {
+  strat2RefreshDailySpend();
+  if (strat2SpentTodayUsd >= STRAT2_MAX_DAILY_USD) {
+    return `strat2_daily_cap spent=$${strat2SpentTodayUsd.toFixed(2)} cap=$${STRAT2_MAX_DAILY_USD}`;
+  }
+  return null;
+}
+
+function noteStrat2Spend(usd: number): void {
+  strat2RefreshDailySpend();
+  strat2SpentTodayUsd += Math.max(0, usd);
+}
+
+// Poll live MLB game state (StatsAPI) for watchlist events so the strat2 gate
+// always evaluates against fresh score/inning/outs.
+const STRAT2_FEED_POLL_MS = Number(process.env.ARB_DAEMON_STRAT2_FEED_POLL_MS ?? 20_000);
+let strat2FeedTickInFlight = false;
+
+async function strat2FeedTick(): Promise<void> {
+  if (strat2FeedTickInFlight) return;
+  strat2FeedTickInFlight = true;
+  try {
+    const events = new Map<string, { slug: string; title: string; startMs: number | null }>();
+    for (const pkg of packages.values()) {
+      const base = pkg.base;
+      if (base.asset !== "MLB" || !base.eventSlug.startsWith("mlb-")) continue;
+      if (events.has(base.eventSlug)) continue;
+      const startRaw = base.broad.endDate ?? base.narrow.endDate;
+      const startMs = startRaw ? Date.parse(startRaw) : Number.NaN;
+      events.set(base.eventSlug, {
+        slug: base.eventSlug,
+        title: base.eventTitle,
+        startMs: Number.isFinite(startMs) ? startMs : null,
+      });
+    }
+    await refreshStrat2Feeds([...events.values()], log);
+  } catch (err: any) {
+    log(`strat2 feed tick failed: ${err?.message ?? String(err)}`);
+  } finally {
+    strat2FeedTickInFlight = false;
+  }
+}
+
 const sportsOrderErrorCooldownUntil = new Map<string, number>();
 const SPORTS_ORDER_ERROR_COOLDOWN_MS = Number(process.env.ARB_DAEMON_SPORTS_ORDER_ERROR_COOLDOWN_MS ?? 15 * 60 * 1000);
 
@@ -3083,6 +3201,12 @@ async function executeSportsCheapFirst(
   if (!clob) throw new Error("CLOB client not initialized");
   const client = clob.client;
   const record = packageRecord(c, reconcileAddress, shares, false);
+  const strat2 = strat2MlbApproval(c);
+  if (strat2?.ok) {
+    (record as { entryStrategy?: string; entryStrategyDetail?: string } & LivePackage).entryStrategy = "strat2_state";
+    (record as { entryStrategyDetail?: string } & LivePackage).entryStrategyDetail = strat2.reason;
+    log(`strat2 entry ${pkg.key}: ${strat2.reason}`);
+  }
   const submittedAt = new Date().toISOString();
   const broadLeg = { role: "broad_yes" as const, tokenId: pkg.broadYesToken, price: c.broad.yesBook.ask };
   const narrowLeg = { role: "narrow_no" as const, tokenId: pkg.narrowNoToken, price: c.narrow.noBook.ask };
@@ -3241,6 +3365,9 @@ async function executeSportsCheapFirst(
   const actualPairCost = matched > 0 ? broadAvgPrice + narrowAvgPrice : null;
   attachExecutionQuote(record, quoteContext, actualPairCost);
   record.updatedAt = new Date().toISOString();
+  if ((record as { entryStrategy?: string }).entryStrategy === "strat2_state" && (record.actualCost ?? 0) > 0) {
+    noteStrat2Spend(record.actualCost ?? 0);
+  }
   persist(record, orders);
 
   if (nakedRole && nakedShares >= SPORTS_ORPHAN_DUST_SHARES) {
@@ -4675,6 +4802,10 @@ async function main() {
   setInterval(() => flushLedger(), LEDGER_FLUSH_MS);
   setInterval(() => orphanLoop(), ORPHAN_POLL_MS);
   setInterval(() => flushNearMissTelemetry(), NEAR_MISS_LOG_MS);
+  if (STRAT2_MLB_LIVE) {
+    log(`strat2 MLB live gate ENABLED: maxPackage=$${STRAT2_MAX_PACKAGE_USD} maxDaily=$${STRAT2_MAX_DAILY_USD} lambdaScale=${process.env.ARB_DAEMON_STRAT2_LAMBDA_SCALE ?? "1.8"} edgeMargin=${process.env.ARB_DAEMON_STRAT2_EDGE_MARGIN ?? "0.08"}`);
+    setInterval(() => { void strat2FeedTick(); }, STRAT2_FEED_POLL_MS);
+  }
 
   // Resubscribe the market WS to any newly discovered tokens after a watchlist
   // refresh by cycling the socket (cheap; books re-seed over REST on reconnect).
