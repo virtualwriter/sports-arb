@@ -55,6 +55,25 @@ SOCCER_MATCH_MIN = 90.0
 # MLB: ~0.5 runs/inning remaining rough prior
 MLB_RUNS_PER_INNING = 0.48
 
+# Per-asset multiplier applied to the raw Poisson lambda. Populated from the
+# empirical calibration fit (fit_strat2_calibration.py) when available; the raw
+# priors above systematically overpredict middle rates (e.g. MLB fit ≈ 1.8).
+LAMBDA_SCALES: dict[str, float] = {}
+
+
+def load_lambda_scales(path: Path) -> dict[str, float]:
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    scales: dict[str, float] = {}
+    for asset, block in (data.get("byAsset") or {}).items():
+        fit = block.get("fit") or {}
+        scale = fit.get("lambdaScale")
+        if isinstance(scale, (int, float)) and scale > 0:
+            scales[str(asset)] = float(scale)
+    return scales
+
 
 def poisson_pmf(k: int, lam: float) -> float:
     if lam < 0:
@@ -190,20 +209,21 @@ def p_middle(asset: str, feed: dict[str, Any], lo: float, hi: float) -> tuple[fl
     cur = current_total(feed)
     if cur is None:
         return None, {"reason": "no_score"}
+    scale = LAMBDA_SCALES.get(asset, 1.0)
     if asset == "SOCCER":
         mins = parse_soccer_minutes_left(feed)
         if mins is None:
             return None, {"reason": "no_clock"}
-        lam = SOCCER_LAMBDA_PER_MIN * mins
+        lam = SOCCER_LAMBDA_PER_MIN * mins * scale
         p = poisson_p_in_band(cur, lo, hi, lam)
-        return p, {"currentTotal": cur, "minutesLeft": mins, "lambda": lam}
+        return p, {"currentTotal": cur, "minutesLeft": mins, "lambda": lam, "lambdaScale": scale}
     if asset == "MLB":
         inn = parse_mlb_innings_left(feed)
         if inn is None:
             return None, {"reason": "no_inning"}
-        lam = MLB_RUNS_PER_INNING * inn
+        lam = MLB_RUNS_PER_INNING * inn * scale
         p = poisson_p_in_band(cur, lo, hi, lam)
-        return p, {"currentTotal": cur, "inningsLeft": inn, "lambda": lam}
+        return p, {"currentTotal": cur, "inningsLeft": inn, "lambda": lam, "lambdaScale": scale}
     return None, {"reason": "bad_asset"}
 
 
@@ -451,7 +471,17 @@ def main() -> None:
     ap.add_argument("--shadow", type=Path, default=DEFAULT_SHADOW)
     ap.add_argument("--out", type=Path, default=ROOT / "analysis" / "strat2-state-score.json")
     ap.add_argument("--md", type=Path, default=ROOT / "analysis" / "strat2-state-score.md")
+    ap.add_argument(
+        "--calibration",
+        type=Path,
+        default=ROOT / "analysis" / "strat2-calibration.json",
+        help="Calibration fit JSON providing per-asset lambdaScale (pass /dev/null to score raw)",
+    )
     args = ap.parse_args()
+
+    LAMBDA_SCALES.clear()
+    LAMBDA_SCALES.update(load_lambda_scales(args.calibration))
+    print(f"lambda scales: {LAMBDA_SCALES or '(none; raw model)'}")
 
     rows = load_snapshots(args.shadow)
     if not rows:
@@ -470,6 +500,7 @@ def main() -> None:
         "generatedAt": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
         "shadowPath": str(args.shadow),
         "snapshotRows": len(rows),
+        "lambdaScales": dict(LAMBDA_SCALES),
         "byAsset": {},
     }
 
