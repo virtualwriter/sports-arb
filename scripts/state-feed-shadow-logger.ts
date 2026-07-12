@@ -51,6 +51,14 @@ const SDIO_KEY = (process.env.SPORTSDATAIO_API_KEY ?? "").trim();
 const SDIO_POLL_MS = Number(process.env.STATE_FEED_SDIO_POLL_MS ?? 5_000);
 const SDIO_IDLE_POLL_MS = Number(process.env.STATE_FEED_SDIO_IDLE_POLL_MS ?? 60_000);
 
+// The Odds API scores comparison feed (MLB only). Same shadow-only role as
+// SportsDataIO: latency/accuracy vs StatsAPI. Scores update ~every 30s and each
+// call costs 1 quota credit (no daysFrom), so poll slower than StatsAPI.
+// Disabled unless THE_ODDS_API_KEY is set.
+const ODDS_API_KEY = (process.env.THE_ODDS_API_KEY ?? "").trim();
+const ODDS_API_POLL_MS = Number(process.env.STATE_FEED_ODDS_API_POLL_MS ?? 30_000);
+const ODDS_API_IDLE_POLL_MS = Number(process.env.STATE_FEED_ODDS_API_IDLE_POLL_MS ?? 120_000);
+
 const arbConfig: ArbCoreConfig = {
   host: CLOB_HOST,
   gammaApi: GAMMA_API,
@@ -375,6 +383,124 @@ async function pollSdioSlate(tracked: Map<string, TrackedEvent>): Promise<void> 
   }
 }
 
+// --- The Odds API scores comparison feed (shadow-only) ---
+
+type OddsApiScore = { name?: string; score?: string };
+type OddsApiGame = {
+  id?: string;
+  commence_time?: string;
+  completed?: boolean;
+  home_team?: string;
+  away_team?: string;
+  scores?: OddsApiScore[] | null;
+  last_update?: string | null;
+};
+
+// Polymarket MLB slug abbreviations -> Odds API full team names.
+const ODDS_API_TEAM_BY_ABBR: Record<string, string> = {
+  ari: "Arizona Diamondbacks",
+  atl: "Atlanta Braves",
+  bal: "Baltimore Orioles",
+  bos: "Boston Red Sox",
+  chc: "Chicago Cubs",
+  cin: "Cincinnati Reds",
+  cle: "Cleveland Guardians",
+  col: "Colorado Rockies",
+  cws: "Chicago White Sox",
+  det: "Detroit Tigers",
+  hou: "Houston Astros",
+  kc: "Kansas City Royals",
+  laa: "Los Angeles Angels",
+  lad: "Los Angeles Dodgers",
+  mia: "Miami Marlins",
+  mil: "Milwaukee Brewers",
+  min: "Minnesota Twins",
+  nym: "New York Mets",
+  nyy: "New York Yankees",
+  oak: "Athletics",
+  ath: "Athletics",
+  phi: "Philadelphia Phillies",
+  pit: "Pittsburgh Pirates",
+  sd: "San Diego Padres",
+  sea: "Seattle Mariners",
+  sf: "San Francisco Giants",
+  stl: "St. Louis Cardinals",
+  tb: "Tampa Bay Rays",
+  tex: "Texas Rangers",
+  tor: "Toronto Blue Jays",
+  wsh: "Washington Nationals",
+  was: "Washington Nationals",
+  chw: "Chicago White Sox",
+  az: "Arizona Diamondbacks",
+};
+
+function oddsApiScoreOf(game: OddsApiGame, teamName: string): number | null {
+  const row = (game.scores ?? []).find((s) => s.name === teamName);
+  if (!row || row.score == null || row.score === "") return null;
+  const n = Number(row.score);
+  return Number.isFinite(n) ? n : null;
+}
+
+function oddsApiScoreKey(game: OddsApiGame): string {
+  const away = oddsApiScoreOf(game, String(game.away_team ?? ""));
+  const home = oddsApiScoreOf(game, String(game.home_team ?? ""));
+  const awayPart = away == null ? "x" : String(away);
+  const homePart = home == null ? "x" : String(home);
+  const status = game.completed ? "Final" : (away == null && home == null ? "Scheduled" : "InProgress");
+  return `${awayPart}-${homePart}|${status}`;
+}
+
+const lastOddsApiKeys = new Map<string, string>();
+
+async function pollOddsApiSlate(tracked: Map<string, TrackedEvent>): Promise<void> {
+  // No daysFrom: live + upcoming only, costs 1 quota credit per call.
+  const url = `https://api.the-odds-api.com/v4/sports/baseball_mlb/scores/?apiKey=${ODDS_API_KEY}`;
+  const games = await fetchJson(url, Number(process.env.STATE_FEED_FETCH_TIMEOUT_MS ?? 12_000)) as OddsApiGame[];
+  if (!Array.isArray(games)) return;
+  const observedAt = new Date().toISOString();
+  for (const te of tracked.values()) {
+    if (te.asset !== "MLB") continue;
+    const parsed = parseSportsSlug(te.slug);
+    if (!parsed) continue;
+    const nameA = ODDS_API_TEAM_BY_ABBR[canonTeam(parsed.teamA)];
+    const nameB = ODDS_API_TEAM_BY_ABBR[canonTeam(parsed.teamB)];
+    if (!nameA || !nameB) continue;
+    const slugTeams = new Set([nameA, nameB]);
+    const game = games.find((g) =>
+      slugTeams.has(String(g.away_team ?? ""))
+      && slugTeams.has(String(g.home_team ?? ""))
+      && g.away_team !== g.home_team,
+    );
+    if (!game) continue;
+    const key = oddsApiScoreKey(game);
+    const prev = lastOddsApiKeys.get(te.slug);
+    if (prev === key) continue;
+    lastOddsApiKeys.set(te.slug, key);
+    if (prev === undefined) continue;
+    const scoreAway = oddsApiScoreOf(game, String(game.away_team ?? ""));
+    const scoreHome = oddsApiScoreOf(game, String(game.home_team ?? ""));
+    appendJsonl(SHADOW_PATH, {
+      schemaVersion: 1,
+      kind: "oddsapi_change",
+      observedAt,
+      eventSlug: te.slug,
+      asset: te.asset,
+      prevOddsApiKey: prev,
+      oddsApiKey: key,
+      statsapiKey: te.lastFeedKey,
+      oddsapi: {
+        eventId: game.id ?? null,
+        completed: game.completed ?? null,
+        scoreAway,
+        scoreHome,
+        lastUpdate: game.last_update ?? null,
+        commenceTime: game.commence_time ?? null,
+      },
+    });
+    log(`oddsapi_change slug=${te.slug} ${prev} -> ${key} (statsapi=${te.lastFeedKey})`);
+  }
+}
+
 async function main(): Promise<void> {
   ensureStateDirs();
   log(`starting shadowPath=${SHADOW_PATH} mapPath=${MAP_PATH} dataDir=${DATA_DIR}`);
@@ -384,7 +510,9 @@ async function main(): Promise<void> {
   const tracked = new Map<string, TrackedEvent>();
   let lastDiscovery = 0;
   let lastSdioPollAt = 0;
+  let lastOddsApiPollAt = 0;
   if (SDIO_KEY) log(`sportsdata.io comparison feed enabled (MLB, poll=${SDIO_POLL_MS}ms live / ${SDIO_IDLE_POLL_MS}ms idle)`);
+  if (ODDS_API_KEY) log(`the-odds-api comparison feed enabled (MLB, poll=${ODDS_API_POLL_MS}ms live / ${ODDS_API_IDLE_POLL_MS}ms idle)`);
 
   async function refreshDiscovery(): Promise<void> {
     const found = await discoverSlugs();
@@ -440,6 +568,19 @@ async function main(): Promise<void> {
           await pollSdioSlate(tracked);
         } catch (err: any) {
           log(`sdio poll failed: ${err?.message ?? err}`);
+        }
+      }
+    }
+
+    if (ODDS_API_KEY) {
+      const anyMlbLive = [...tracked.values()].some((t) => t.asset === "MLB" && t.feedLive);
+      const oddsInterval = anyMlbLive ? ODDS_API_POLL_MS : ODDS_API_IDLE_POLL_MS;
+      if (now - lastOddsApiPollAt >= oddsInterval) {
+        lastOddsApiPollAt = now;
+        try {
+          await pollOddsApiSlate(tracked);
+        } catch (err: any) {
+          log(`oddsapi poll failed: ${err?.message ?? err}`);
         }
       }
     }

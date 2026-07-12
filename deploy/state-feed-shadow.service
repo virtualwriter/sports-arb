@@ -20,6 +20,9 @@ Environment=STATE_FEED_DISCOVERY_MS=60000
 # SportsDataIO comparison feed (MLB): key comes from /etc/sports-arb.env
 # (SPORTSDATAIO_API_KEY); if unset the SDIO poll is silently disabled.
 Environment=STATE_FEED_SDIO_POLL_MS=5000
+# The Odds API scores comparison feed (MLB): key from /etc/sports-arb.env
+# (THE_ODDS_API_KEY). Scores refresh ~30s; each call costs 1 quota credit.
+Environment=STATE_FEED_ODDS_API_POLL_MS=30000
 ExecStart=/opt/sports-arb/node_modules/.bin/tsx /opt/sports-arb/scripts/state-feed-shadow-logger.ts
 Restart=always
 RestartSec=15
