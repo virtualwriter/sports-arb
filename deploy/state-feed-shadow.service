@@ -17,6 +17,9 @@ Environment=STATE_FEED_LIVE_POLL_MS=2000
 Environment=STATE_FEED_FOTMOB_POLL_MS=3000
 Environment=STATE_FEED_IDLE_POLL_MS=30000
 Environment=STATE_FEED_DISCOVERY_MS=60000
+# SportsDataIO comparison feed (MLB): key comes from /etc/sports-arb.env
+# (SPORTSDATAIO_API_KEY); if unset the SDIO poll is silently disabled.
+Environment=STATE_FEED_SDIO_POLL_MS=5000
 ExecStart=/opt/sports-arb/node_modules/.bin/tsx /opt/sports-arb/scripts/state-feed-shadow-logger.ts
 Restart=always
 RestartSec=15

@@ -23,6 +23,7 @@ import {
   type FeedSnapshot,
   ensureBinding,
   loadEventMap,
+  parseSportsSlug,
   pollFotmobFeed,
   pollMlbFeed,
   saveEventMap,
@@ -41,6 +42,14 @@ const MAX_WIDTH = Number(process.env.STATE_FEED_MAX_WIDTH ?? 4);
 const BOOK_CONCURRENCY = Number(process.env.STATE_FEED_BOOK_CONCURRENCY ?? 6);
 const DISCOVERY_LIMIT = Number(process.env.STATE_FEED_DISCOVERY_LIMIT ?? 400);
 const DISCOVERY_DAYS = Number(process.env.STATE_FEED_DISCOVERY_DAYS ?? 1);
+
+// SportsDataIO trial comparison feed (MLB only). Runs alongside StatsAPI so we
+// can measure relative latency/accuracy; production (daemon strat2 gate) stays
+// on StatsAPI. One GamesByDate call covers the whole slate, so polling is cheap
+// even on a rate-limited trial key. Disabled unless SPORTSDATAIO_API_KEY is set.
+const SDIO_KEY = (process.env.SPORTSDATAIO_API_KEY ?? "").trim();
+const SDIO_POLL_MS = Number(process.env.STATE_FEED_SDIO_POLL_MS ?? 5_000);
+const SDIO_IDLE_POLL_MS = Number(process.env.STATE_FEED_SDIO_IDLE_POLL_MS ?? 60_000);
 
 const arbConfig: ArbCoreConfig = {
   host: CLOB_HOST,
@@ -265,6 +274,107 @@ async function pollFeed(bindingSource: "statsapi" | "fotmob", feedId: string): P
   return bindingSource === "statsapi" ? pollMlbFeed(feedId) : pollFotmobFeed(feedId);
 }
 
+// --- SportsDataIO comparison feed (shadow-only; production stays on StatsAPI) ---
+
+type SdioGame = {
+  GameID?: number;
+  Status?: string;
+  AwayTeam?: string;
+  HomeTeam?: string;
+  AwayTeamRuns?: number | null;
+  HomeTeamRuns?: number | null;
+  Inning?: number | null;
+  InningHalf?: string | null; // T (top), B (bottom), M (middle), E (end), null
+  Outs?: number | null;
+  Balls?: number | null;
+  Strikes?: number | null;
+  DateTime?: string | null;
+};
+
+// Polymarket slug abbreviations vs SportsDataIO abbreviations occasionally
+// differ; canonicalize both sides before matching.
+const SDIO_TEAM_ALIASES: Record<string, string> = {
+  chw: "cws",
+  was: "wsh",
+  az: "ari",
+  oak: "ath",
+};
+
+function canonTeam(abbr: string): string {
+  const a = abbr.toLowerCase();
+  return SDIO_TEAM_ALIASES[a] ?? a;
+}
+
+function sdioDateKey(): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+  return `${get("year")}-${get("month").toUpperCase()}-${get("day")}`;
+}
+
+function sdioScoreKey(g: SdioGame): string {
+  const away = g.AwayTeamRuns ?? "x";
+  const home = g.HomeTeamRuns ?? "x";
+  const period = g.Inning != null ? `${g.InningHalf ?? ""}${g.Inning}` : "";
+  return `${away}-${home}|${period}|${g.Outs ?? ""}|${g.Status ?? ""}`;
+}
+
+const lastSdioKeys = new Map<string, string>();
+
+async function pollSdioSlate(tracked: Map<string, TrackedEvent>): Promise<void> {
+  const url = `https://api.sportsdata.io/v3/mlb/scores/json/GamesByDate/${sdioDateKey()}?key=${SDIO_KEY}`;
+  const games = await fetchJson(url, Number(process.env.STATE_FEED_FETCH_TIMEOUT_MS ?? 12_000)) as SdioGame[];
+  if (!Array.isArray(games)) return;
+  const observedAt = new Date().toISOString();
+  for (const te of tracked.values()) {
+    if (te.asset !== "MLB") continue;
+    const parsed = parseSportsSlug(te.slug);
+    if (!parsed) continue;
+    // Match teams order-insensitively; slug order is usually away-home but not guaranteed.
+    const slugTeams = new Set([canonTeam(parsed.teamA), canonTeam(parsed.teamB)]);
+    const game = games.find((g) =>
+      slugTeams.has(canonTeam(String(g.AwayTeam ?? "")))
+      && slugTeams.has(canonTeam(String(g.HomeTeam ?? "")))
+      && g.AwayTeam !== g.HomeTeam,
+    );
+    if (!game) continue;
+    const key = sdioScoreKey(game);
+    const prev = lastSdioKeys.get(te.slug);
+    if (prev === key) continue;
+    lastSdioKeys.set(te.slug, key);
+    // First observation just seeds the key (mirrors lastFeedKey handling) so a
+    // logger restart mid-game doesn't fabricate a change event.
+    if (prev === undefined) continue;
+    appendJsonl(SHADOW_PATH, {
+      schemaVersion: 1,
+      kind: "sdio_change",
+      observedAt,
+      eventSlug: te.slug,
+      asset: te.asset,
+      prevSdioKey: prev,
+      sdioKey: key,
+      // StatsAPI's latest key at this instant, for direct lead/lag comparison.
+      statsapiKey: te.lastFeedKey,
+      sdio: {
+        gameId: game.GameID ?? null,
+        status: game.Status ?? null,
+        scoreAway: game.AwayTeamRuns ?? null,
+        scoreHome: game.HomeTeamRuns ?? null,
+        inning: game.Inning ?? null,
+        inningHalf: game.InningHalf ?? null,
+        outs: game.Outs ?? null,
+        balls: game.Balls ?? null,
+        strikes: game.Strikes ?? null,
+      },
+    });
+    log(`sdio_change slug=${te.slug} ${prev} -> ${key} (statsapi=${te.lastFeedKey})`);
+  }
+}
+
 async function main(): Promise<void> {
   ensureStateDirs();
   log(`starting shadowPath=${SHADOW_PATH} mapPath=${MAP_PATH} dataDir=${DATA_DIR}`);
@@ -273,6 +383,8 @@ async function main(): Promise<void> {
   const map = loadEventMap(MAP_PATH);
   const tracked = new Map<string, TrackedEvent>();
   let lastDiscovery = 0;
+  let lastSdioPollAt = 0;
+  if (SDIO_KEY) log(`sportsdata.io comparison feed enabled (MLB, poll=${SDIO_POLL_MS}ms live / ${SDIO_IDLE_POLL_MS}ms idle)`);
 
   async function refreshDiscovery(): Promise<void> {
     const found = await discoverSlugs();
@@ -316,6 +428,19 @@ async function main(): Promise<void> {
         await refreshDiscovery();
       } catch (err: any) {
         log(`discovery failed: ${err?.message ?? err}`);
+      }
+    }
+
+    if (SDIO_KEY) {
+      const anyMlbLive = [...tracked.values()].some((t) => t.asset === "MLB" && t.feedLive);
+      const sdioInterval = anyMlbLive ? SDIO_POLL_MS : SDIO_IDLE_POLL_MS;
+      if (now - lastSdioPollAt >= sdioInterval) {
+        lastSdioPollAt = now;
+        try {
+          await pollSdioSlate(tracked);
+        } catch (err: any) {
+          log(`sdio poll failed: ${err?.message ?? err}`);
+        }
       }
     }
 
