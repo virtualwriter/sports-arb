@@ -3161,7 +3161,7 @@ function noteStrat2Spend(usd: number): void {
 
 // Poll live MLB game state (StatsAPI) for watchlist events so the strat2 gate
 // always evaluates against fresh score/inning/outs.
-const STRAT2_FEED_POLL_MS = Number(process.env.ARB_DAEMON_STRAT2_FEED_POLL_MS ?? 20_000);
+const STRAT2_FEED_POLL_MS = Number(process.env.ARB_DAEMON_STRAT2_FEED_POLL_MS ?? 2_000);
 let strat2FeedTickInFlight = false;
 
 async function strat2FeedTick(): Promise<void> {
