@@ -3,9 +3,12 @@ import type { Candidate, MarketQuote } from "./monotonic-arb-core.js";
 import type { FeedSnapshot } from "./state-feed-map.js";
 import {
   computeStrat2State,
+  computeStrat2SpreadState,
   isTerminalState,
   parseMlbInningsLeft,
+  poissonDiffPInBand,
   poissonPInBand,
+  resolveSpreadSide,
   setStrat2FeedForTests,
   strat2MlbApproval,
 } from "./strat2-mlb-live-gate.js";
@@ -79,6 +82,30 @@ function mlbCandidate(overrides: Partial<Candidate> = {}): Candidate {
   };
 }
 
+function mlbSpreadCandidate(overrides: Partial<Candidate> = {}): Candidate {
+  const ladderKey = "sports:mlb:mlb-sea-tb-2026-07-12:spread:full-game:seattle-mariners";
+  const broad = quote({
+    strike: 1.5,
+    question: "Spread: Seattle Mariners (-1.5)",
+    ladderKey,
+    eventTitle: "Seattle Mariners vs. Tampa Bay Rays",
+  });
+  const narrow = quote({
+    strike: 3.5,
+    question: "Spread: Seattle Mariners (-3.5)",
+    ladderKey,
+    eventTitle: "Seattle Mariners vs. Tampa Bay Rays",
+    noBook: { tokenId: "no-narrow", bid: 0.55, bidSize: 50, ask: 0.6, askSize: 50, spread: 0.01, minOrderSize: 1 },
+  });
+  return mlbCandidate({
+    eventTitle: "Seattle Mariners vs. Tampa Bay Rays",
+    broad,
+    narrow,
+    packageCost: 1.10,
+    ...overrides,
+  });
+}
+
 describe("poissonPInBand parity with Python", () => {
   it("matches score_strat2_state for current=7 band (8.5, 9.5] lam=0.48*4.5*1.8", () => {
     expect(poissonPInBand(7, 8.5, 9.5, 0.48 * 4.5 * 1.8)).toBeCloseTo(0.15484085873095085, 12);
@@ -90,6 +117,50 @@ describe("poissonPInBand parity with Python", () => {
 
   it("returns 0 when the band is already passed", () => {
     expect(poissonPInBand(10, 8.5, 9.5, 2)).toBe(0);
+  });
+});
+
+describe("poissonDiffPInBand (Skellam / spread)", () => {
+  it("is 1 when margin is already locked in-band and no runs remain", () => {
+    expect(poissonDiffPInBand(2, 1.5, 3.5, 0, 0)).toBe(1);
+  });
+
+  it("is 0 when margin is already above the band and no runs remain", () => {
+    expect(poissonDiffPInBand(4, 1.5, 3.5, 0, 0)).toBe(0);
+  });
+
+  it("matches the mirrored underdog band under swapped lambdas", () => {
+    const p = poissonDiffPInBand(0, 1.5, 2.5, 0.5, 0.5);
+    expect(p).toBeGreaterThan(0.04);
+    expect(p).toBeLessThan(0.25);
+    const mirrored = poissonDiffPInBand(0, -2.5, -1.5, 0.5, 0.5);
+    expect(mirrored).toBeCloseTo(p, 12);
+  });
+});
+
+describe("resolveSpreadSide", () => {
+  it("maps the named team to away/home from the title", () => {
+    expect(
+      resolveSpreadSide(
+        "Seattle Mariners vs. Tampa Bay Rays",
+        "sports:mlb:x:spread:full-game:seattle-mariners",
+      ),
+    ).toBe("away");
+    expect(
+      resolveSpreadSide(
+        "Seattle Mariners vs. Tampa Bay Rays",
+        "sports:mlb:x:spread:full-game:tampa-bay-rays",
+      ),
+    ).toBe("home");
+  });
+
+  it("rejects first-half ladders", () => {
+    expect(
+      resolveSpreadSide(
+        "Seattle Mariners vs. Tampa Bay Rays",
+        "sports:mlb:x:spread:first-half:seattle-mariners",
+      ),
+    ).toBeNull();
   });
 });
 
@@ -166,12 +237,16 @@ describe("strat2MlbApproval gate (enabled)", () => {
 
   it("approves a live mid-game package with sufficient model edge", async () => {
     const gate = await enabledGate();
-    // Top 5, 1 out (4.833 innings left), total 5, band (8.5, 9.5]:
-    // p=0.19463 (Python reference), fair≈1.195. cost=1.05 → edge≈0.145 ≥ 0.08.
+    // Top 5, 1 out, total 5, band (8.5, 9.5]. Gate fair now comes from the
+    // PA-chain MC (Poisson only as fallback); cost=1.05 leaves ≥8¢ edge.
+    const { computeMlbBandState } = await import("./mlb-pa-chain.js");
+    const chain = computeMlbBandState(feed(), 8.5, 9.5);
     gate.setStrat2FeedForTests("mlb-sea-tb-2026-07-12", feed());
     const approval = gate.strat2MlbApproval(mlbCandidate({ packageCost: 1.05 }));
     expect(approval?.ok).toBe(true);
-    expect(approval?.state?.pMiddle).toBeCloseTo(0.19463321739693978, 12);
+    expect(approval?.state?.model).toBe("pa_chain");
+    expect(approval?.reason).toContain("model=pa_chain");
+    expect(approval?.state?.pMiddle).toBeCloseTo(chain!.pMiddle, 12);
   });
 
   it("rejects when the edge margin is not met", async () => {
@@ -198,5 +273,32 @@ describe("strat2MlbApproval gate (enabled)", () => {
     expect(gate.strat2MlbApproval(mlbCandidate())?.reason).toBe("strat2_no_fresh_feed");
     gate.setStrat2FeedForTests("mlb-sea-tb-2026-07-12", feed({ live: false, status: "Scheduled" }));
     expect(gate.strat2MlbApproval(mlbCandidate())?.reason).toBe("strat2_game_not_live");
+  });
+
+  it("ignores spreads unless ARB_DAEMON_STRAT2_MLB_SPREADS=1", async () => {
+    delete process.env.ARB_DAEMON_STRAT2_MLB_SPREADS;
+    const gate = await enabledGate();
+    gate.setStrat2FeedForTests("mlb-sea-tb-2026-07-12", feed());
+    expect(gate.strat2MlbApproval(mlbSpreadCandidate())).toBeNull();
+  });
+
+  it("approves a spread middle when spreads are enabled", async () => {
+    process.env.ARB_DAEMON_STRAT2_MLB_SPREADS = "1";
+    const gate = await enabledGate();
+    // Away SEA 3, home TB 2 → SEA margin = +1. Band (1.5, 3.5].
+    // Gate fair is the PA-chain margin distribution.
+    const { computeMlbSpreadBandState } = await import("./mlb-pa-chain.js");
+    const state = computeMlbSpreadBandState(feed(), 1.5, 3.5, "away");
+    expect(state).not.toBeNull();
+    expect(state!.currentMargin).toBe(1);
+    expect(state!.marketType).toBe("spread");
+    expect(state!.model).toBe("pa_chain");
+    gate.setStrat2FeedForTests("mlb-sea-tb-2026-07-12", feed());
+    // Price below fair so edge clears the 8¢ margin.
+    const cost = Math.max(0.5, state!.fair - 0.10);
+    const approval = gate.strat2MlbApproval(mlbSpreadCandidate({ packageCost: cost }));
+    expect(approval?.ok).toBe(true);
+    expect(approval?.reason).toMatch(/strat2_spread_edge/);
+    expect(approval?.state?.pMiddle).toBeCloseTo(state!.pMiddle, 12);
   });
 });

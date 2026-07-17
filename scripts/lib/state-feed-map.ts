@@ -210,7 +210,32 @@ export type FeedSnapshot = {
   clock: string | null;
   status: string | null;
   rawScoreKey: string;
+  /** Runners currently on base (0–3). Null if unknown. */
+  runnersOn?: number | null;
+  onFirst?: boolean;
+  onSecond?: boolean;
+  onThird?: boolean;
+  /** Team currently batting (Top = away, Bottom = home). */
+  battingSide?: "home" | "away" | null;
 };
+
+/** Count occupied bases from StatsAPI linescore.offense.{first,second,third}. */
+export function countRunnersOn(offense: { first?: unknown; second?: unknown; third?: unknown } | null | undefined): {
+  runnersOn: number;
+  onFirst: boolean;
+  onSecond: boolean;
+  onThird: boolean;
+} {
+  const onFirst = Boolean(offense?.first);
+  const onSecond = Boolean(offense?.second);
+  const onThird = Boolean(offense?.third);
+  return {
+    runnersOn: Number(onFirst) + Number(onSecond) + Number(onThird),
+    onFirst,
+    onSecond,
+    onThird,
+  };
+}
 
 export async function pollMlbFeed(gamePk: string): Promise<FeedSnapshot> {
   const data = await fetchWithUa(
@@ -227,6 +252,13 @@ export async function pollMlbFeed(gamePk: string): Promise<FeedSnapshot> {
   const period = inning && half ? `${half} ${inning}` : inning;
   const scoreHome = Number.isFinite(home) ? home : null;
   const scoreAway = Number.isFinite(away) ? away : null;
+  const bases = countRunnersOn(linescore?.offense);
+  const halfLower = String(half ?? "").toLowerCase();
+  const battingSide: "home" | "away" | null = halfLower.includes("bottom")
+    ? "home"
+    : halfLower.includes("top")
+      ? "away"
+      : null;
   return {
     source: "statsapi",
     feedId: gamePk,
@@ -237,7 +269,12 @@ export async function pollMlbFeed(gamePk: string): Promise<FeedSnapshot> {
     outs,
     clock: null,
     status,
-    rawScoreKey: `${scoreAway ?? "x"}-${scoreHome ?? "x"}|${period ?? ""}|${outs ?? ""}|${status}`,
+    runnersOn: bases.runnersOn,
+    onFirst: bases.onFirst,
+    onSecond: bases.onSecond,
+    onThird: bases.onThird,
+    battingSide,
+    rawScoreKey: `${scoreAway ?? "x"}-${scoreHome ?? "x"}|${period ?? ""}|${outs ?? ""}|${bases.runnersOn}|${status}`,
   };
 }
 

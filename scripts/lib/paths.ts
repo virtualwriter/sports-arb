@@ -29,6 +29,17 @@ export const PATHS = {
   shadowBucketSummary: join(DATA_DIR, "sports-arb-shadow-bucket-summary.json"),
   stateFeedShadow: join(DATA_DIR, "state-feed-shadow.jsonl"),
   stateFeedEventMap: join(DATA_DIR, "state-feed-event-map.json"),
+  /** Empirical PA RBI priors for MLB paper path (repo analysis artifact). */
+  mlbPaRbiPriors: join(REPO_ROOT, "analysis", "per-plate-rbi-p-backtest.json"),
+  mlbPaRbiApplesToApples: join(REPO_ROOT, "analysis", "per-plate-rbi-p-apples-to-apples.json"),
+  /** PA-chain transition kernel (2024 train) for MLB band fair (build_pa_chain_transitions.py). */
+  mlbPaChainTransitions: join(REPO_ROOT, "analysis", "pa-chain-transitions-2024.json"),
+  pinnacleMlbOdds: join(DATA_DIR, "pinnacle-mlb-odds.jsonl"),
+  pinnacleMlbOddsLatest: join(DATA_DIR, "pinnacle-mlb-odds-latest.json"),
+  pinnacleScoreCompare: join(DATA_DIR, "pinnacle-score-compare.jsonl"),
+  pinnaclePmPaired: join(DATA_DIR, "pinnacle-pm-paired.jsonl"),
+  pinnaclePmPairedEvents: join(DATA_DIR, "pinnacle-pm-paired-events.jsonl"),
+  pinnaclePmPairedStatus: join(DATA_DIR, "pinnacle-pm-paired-status.json"),
   tradesCsv: join(DATA_DIR, "sports-arb-trades.csv"),
   signalWeights: join(DATA_DIR, "sports-arb-signal-weights.json"),
   hypotheses: join(DATA_DIR, "sports-arb-hypotheses.json"),

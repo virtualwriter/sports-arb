@@ -1,17 +1,29 @@
-// Strat 2 (state-priced middles) live gate for MLB game totals.
+// Strat 2 (state-priced middles) live gate for MLB.
 //
-// Validated in shadow (analysis/strat2-state-score.md): calibrated Poisson
-// middle probabilities (lambdaScale fitted at 1.8), an edge margin over fair
-// value, and exclusion of terminal game states produced +10-14% ROI across
-// a few hundred resolved packages. This module ports that exact selection
-// logic so the daemon can take those entries live, in-play, with its own
-// (small) sizing caps.
+// Fair model (2026-07-16): the empirical PA-chain MC (mlb-pa-chain.ts) prices
+// both totals and spread bands, conditioning on inning/half/outs/bases with
+// walk-off structure; it beat the Poisson on 2025 hold-out
+// (analysis/per-plate-rbi-p-apples-to-apples.md) and fixes the live late-game
+// fair inflation seen 2026-07-16 (Poisson fair 1.47 vs chain ~1.31 on 4.5-6.5).
+// The Poisson below remains as the fallback when the kernel artifact or a
+// parseable game state is unavailable — approval reasons log model=… either way.
+//
+// Poisson history — validated in shadow (analysis/strat2-state-score.md):
+// calibrated lambdaScale 1.8, edge margin over fair, terminal-state exclusion
+// produced +10-14% ROI across a few hundred resolved packages.
+//
+// Spreads — Skellam-style extension (independent team remaining-run Poissons)
+// as fallback; PA-chain margin distribution when available. Live trading for
+// spreads is opt-in via ARB_DAEMON_STRAT2_MLB_SPREADS=1.
 //
 // Fail-closed by design: no feed binding, stale feed, non-live game, terminal
-// state, or insufficient model edge all reject. Enabled only when
-// ARB_DAEMON_STRAT2_MLB_LIVE=1.
+// state, or insufficient model edge all reject. Totals enabled when
+// ARB_DAEMON_STRAT2_MLB_LIVE=1; spreads also need STRAT2_MLB_SPREADS=1.
 import type { Candidate } from "./monotonic-arb-core.js";
 import { evaluateSportsStrategy } from "./sports-strategy.js";
+// Circular at module level (mlb-pa-chain imports the Poisson fallback from
+// here); safe because both sides only reference functions at call time.
+import { computeMlbBandState, computeMlbSpreadBandState } from "./mlb-pa-chain.js";
 import {
   type EventMapFile,
   type FeedSnapshot,
@@ -23,9 +35,13 @@ import {
 import { PATHS } from "./paths.js";
 
 export const STRAT2_MLB_LIVE = process.env.ARB_DAEMON_STRAT2_MLB_LIVE === "1";
+/** Opt-in: allow Strat2 fair-value gate on MLB spread middles (Skellam). */
+export const STRAT2_MLB_SPREADS = process.env.ARB_DAEMON_STRAT2_MLB_SPREADS === "1";
 // Frozen calibration from fit_strat2_calibration.py (Jul 12 fit on 36 games /
 // ~29k observations). Re-fit periodically and update deliberately; do not
 // auto-read the nightly analysis file so live behavior only changes on purpose.
+// Spread path reuses this scale as a starting prior; re-fit once shadow has
+// enough spread observations.
 const LAMBDA_SCALE = Number(process.env.ARB_DAEMON_STRAT2_LAMBDA_SCALE ?? 1.8);
 // Required model edge over fair value (fair = 1 + pMiddle). Shadow ROI was
 // +10.5%/+11.8%/+13.7% at margins 0.05/0.08/0.12; 0.08 balances volume vs edge.
@@ -58,6 +74,78 @@ export function poissonPInBand(current: number, lo: number, hi: number, lam: num
   let total = 0;
   for (let x = lowX; x <= Math.min(highX, maxExtra); x++) total += poissonPmf(x, lam);
   return Math.max(0, Math.min(1, total));
+}
+
+/**
+ * P(final margin in (lo, hi]) where
+ *   final = currentMargin + X_team - X_opp,
+ *   X_team ~ Poisson(lamTeam), X_opp ~ Poisson(lamOpp) independent.
+ *
+ * For a same-team spread ladder YES@(-lo) + NO@(-hi), the middle is the named
+ * team winning by more than `lo` and at most `hi` runs (half-run lines).
+ */
+export function poissonDiffPInBand(
+  currentMargin: number,
+  lo: number,
+  hi: number,
+  lamTeam: number,
+  lamOpp: number,
+  maxExtra = 20,
+): number {
+  if (!(lamTeam >= 0) || !(lamOpp >= 0)) return 0;
+  const teamPmfs: number[] = [];
+  const oppPmfs: number[] = [];
+  for (let k = 0; k <= maxExtra; k++) {
+    teamPmfs.push(poissonPmf(k, lamTeam));
+    oppPmfs.push(poissonPmf(k, lamOpp));
+  }
+  let total = 0;
+  for (let xt = 0; xt <= maxExtra; xt++) {
+    const pt = teamPmfs[xt]!;
+    if (pt <= 0) continue;
+    for (let xo = 0; xo <= maxExtra; xo++) {
+      const finalMargin = currentMargin + xt - xo;
+      if (finalMargin > lo && finalMargin <= hi) total += pt * oppPmfs[xo]!;
+    }
+  }
+  return Math.max(0, Math.min(1, total));
+}
+
+export function teamKeyFromName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+
+/** Extract `seattle-mariners` from `sports:mlb:…:spread:full-game:seattle-mariners`. */
+export function spreadTeamKeyFromLadder(ladderKey: string): string | null {
+  const m = ladderKey.match(/:spread:(?:full-game|first-half):([^:]+)$/i);
+  return m?.[1] ?? null;
+}
+
+export function isFullGameSpreadLadder(ladderKey: string): boolean {
+  return /:spread:full-game:/i.test(ladderKey);
+}
+
+/**
+ * Map the spread ladder's named team to home/away using the event title
+ * ("Away vs. Home"). Returns null if we cannot resolve unambiguously.
+ */
+export function resolveSpreadSide(
+  eventTitle: string,
+  ladderKey: string,
+): "home" | "away" | null {
+  if (!isFullGameSpreadLadder(ladderKey)) return null;
+  const teamKey = spreadTeamKeyFromLadder(ladderKey);
+  if (!teamKey) return null;
+  const m = eventTitle.match(/^(.+?)\s+vs\.?\s+(.+?)(?:\s*:.*)?$/i);
+  if (!m) return null;
+  const awayKey = teamKeyFromName(m[1]!.trim());
+  const homeKey = teamKeyFromName(m[2]!.trim());
+  if (teamKey === awayKey) return "away";
+  if (teamKey === homeKey) return "home";
+  // Soft match: team key contains / is contained by title token (abbr slugs).
+  if (awayKey.includes(teamKey) || teamKey.includes(awayKey)) return "away";
+  if (homeKey.includes(teamKey) || teamKey.includes(homeKey)) return "home";
+  return null;
 }
 
 /** Port of score_strat2_state.parse_mlb_innings_left (expected scoring innings remaining). */
@@ -97,11 +185,18 @@ export function parseMlbInningsLeft(feed: Pick<FeedSnapshot, "period" | "status"
 }
 
 export type Strat2State = {
+  marketType: "game_total" | "spread";
   currentTotal: number;
+  currentMargin: number | null;
   inningsLeft: number;
   lambda: number;
+  lambdaTeam: number | null;
+  lambdaOpp: number | null;
+  side: "home" | "away" | null;
   pMiddle: number;
   fair: number;
+  /** Fair source: empirical PA-chain MC or the flat Poisson fallback. */
+  model?: "pa_chain" | "poisson";
 };
 
 /** Port of score_strat2_state.is_terminalish: the model's residual weaknesses
@@ -110,6 +205,18 @@ export type Strat2State = {
 export function isTerminalState(inningsLeft: number, currentTotal: number, lo: number, hi: number): boolean {
   if (inningsLeft <= 1.5) return true;
   if (lo < currentTotal && currentTotal <= hi && inningsLeft <= 3) return true;
+  return false;
+}
+
+export function isTerminalSpreadState(
+  inningsLeft: number,
+  currentMargin: number,
+  lo: number,
+  hi: number,
+): boolean {
+  if (inningsLeft <= 1.5) return true;
+  // Already locked inside the middle band with little baseball left.
+  if (lo < currentMargin && currentMargin <= hi && inningsLeft <= 3) return true;
   return false;
 }
 
@@ -125,7 +232,53 @@ export function computeStrat2State(
   if (inningsLeft === null) return null;
   const lambda = MLB_RUNS_PER_INNING * inningsLeft * LAMBDA_SCALE;
   const pMiddle = poissonPInBand(currentTotal, lo, hi, lambda);
-  return { currentTotal, inningsLeft, lambda, pMiddle, fair: 1 + pMiddle };
+  return {
+    marketType: "game_total",
+    currentTotal,
+    currentMargin: null,
+    inningsLeft,
+    lambda,
+    lambdaTeam: null,
+    lambdaOpp: null,
+    side: null,
+    pMiddle,
+    fair: 1 + pMiddle,
+    model: "poisson",
+  };
+}
+
+export function computeStrat2SpreadState(
+  feed: Pick<FeedSnapshot, "period" | "status" | "outs" | "scoreHome" | "scoreAway" | "live">,
+  lo: number,
+  hi: number,
+  side: "home" | "away",
+): Strat2State | null {
+  if (feed.scoreHome === null || feed.scoreAway === null) return null;
+  const home = Number(feed.scoreHome);
+  const away = Number(feed.scoreAway);
+  if (!Number.isFinite(home) || !Number.isFinite(away)) return null;
+  const currentTotal = home + away;
+  const currentMargin = side === "home" ? home - away : away - home;
+  const inningsLeft = parseMlbInningsLeft(feed);
+  if (inningsLeft === null) return null;
+  // Equal split of the totals lambda across both lineups (neutral prior).
+  const lambda = MLB_RUNS_PER_INNING * inningsLeft * LAMBDA_SCALE;
+  const lambdaTeam = lambda / 2;
+  const lambdaOpp = lambda / 2;
+  const pMiddle = poissonDiffPInBand(currentMargin, lo, hi, lambdaTeam, lambdaOpp);
+  return {
+    marketType: "spread",
+    currentTotal,
+    currentMargin,
+    inningsLeft,
+    lambda,
+    lambdaTeam,
+    lambdaOpp,
+    side,
+    pMiddle,
+    fair: 1 + pMiddle,
+    model: "poisson",
+  };
 }
 
 type CachedFeed = { feed: FeedSnapshot; fetchedAt: number };
@@ -149,8 +302,8 @@ export type Strat2Approval = {
 };
 
 /**
- * Decide whether a live in-play MLB game-total package qualifies for a Strat 2
- * entry. Cheap early-outs keep this safe to call from hot gate paths: it does
+ * Decide whether a live in-play MLB package qualifies for a Strat 2 entry.
+ * Cheap early-outs keep this safe to call from hot gate paths: it does
  * nothing unless the flag is on, the asset is MLB, and a fresh live feed exists.
  */
 export function strat2MlbApproval(candidate: Candidate): Strat2Approval | null {
@@ -160,9 +313,13 @@ export function strat2MlbApproval(candidate: Candidate): Strat2Approval | null {
   if (!feed) return { ok: false, reason: "strat2_no_fresh_feed" };
   if (!feed.live) return { ok: false, reason: "strat2_game_not_live" };
   const marketType = evaluateSportsStrategy(candidate).marketType;
-  if (marketType !== "game_total") return { ok: false, reason: `strat2_market_type_${marketType}` };
-  const lo = candidate.broad.strike;
-  const hi = candidate.narrow.strike;
+  if (marketType === "spread") {
+    if (!STRAT2_MLB_SPREADS) return null; // no opinion until spreads flag is on
+  } else if (marketType !== "game_total") {
+    return { ok: false, reason: `strat2_market_type_${marketType}` };
+  }
+  const lo = Math.min(candidate.broad.strike, candidate.narrow.strike);
+  const hi = Math.max(candidate.broad.strike, candidate.narrow.strike);
   if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo) {
     return { ok: false, reason: "strat2_bad_strikes" };
   }
@@ -172,22 +329,46 @@ export function strat2MlbApproval(candidate: Candidate): Strat2Approval | null {
   if (candidate.packageCost >= MAX_PACKAGE_COST) {
     return { ok: false, reason: `strat2_cost_above_max cost=${candidate.packageCost.toFixed(4)}` };
   }
-  const state = computeStrat2State(feed, lo, hi);
-  if (!state) return { ok: false, reason: "strat2_no_game_state" };
-  if (isTerminalState(state.inningsLeft, state.currentTotal, lo, hi)) {
-    return { ok: false, reason: `strat2_terminal_state inningsLeft=${state.inningsLeft.toFixed(2)}`, state };
+
+  let state: Strat2State | null = null;
+  if (marketType === "spread") {
+    const side = resolveSpreadSide(candidate.eventTitle, candidate.broad.ladderKey);
+    if (!side) return { ok: false, reason: "strat2_spread_side_unresolved" };
+    state = computeMlbSpreadBandState(feed, lo, hi, side);
+    if (!state) return { ok: false, reason: "strat2_no_game_state" };
+    if (state.currentMargin === null) return { ok: false, reason: "strat2_no_game_state" };
+    if (isTerminalSpreadState(state.inningsLeft, state.currentMargin, lo, hi)) {
+      return {
+        ok: false,
+        reason: `strat2_terminal_state inningsLeft=${state.inningsLeft.toFixed(2)}`,
+        state,
+      };
+    }
+  } else {
+    state = computeMlbBandState(feed, lo, hi);
+    if (!state) return { ok: false, reason: "strat2_no_game_state" };
+    if (isTerminalState(state.inningsLeft, state.currentTotal, lo, hi)) {
+      return {
+        ok: false,
+        reason: `strat2_terminal_state inningsLeft=${state.inningsLeft.toFixed(2)}`,
+        state,
+      };
+    }
   }
+
   const edge = state.fair - candidate.packageCost;
+  const kind = marketType === "spread" ? "spread" : "state";
+  const model = state.model ?? "poisson";
   if (edge < EDGE_MARGIN) {
     return {
       ok: false,
-      reason: `strat2_insufficient_edge p=${state.pMiddle.toFixed(3)} fair=${state.fair.toFixed(4)} cost=${candidate.packageCost.toFixed(4)} edge=${edge.toFixed(4)} need=${EDGE_MARGIN.toFixed(2)}`,
+      reason: `strat2_insufficient_edge kind=${kind} model=${model} p=${state.pMiddle.toFixed(3)} fair=${state.fair.toFixed(4)} cost=${candidate.packageCost.toFixed(4)} edge=${edge.toFixed(4)} need=${EDGE_MARGIN.toFixed(2)}`,
       state,
     };
   }
   return {
     ok: true,
-    reason: `strat2_state_edge p=${state.pMiddle.toFixed(3)} fair=${state.fair.toFixed(4)} cost=${candidate.packageCost.toFixed(4)} edge=${edge.toFixed(4)} inningsLeft=${state.inningsLeft.toFixed(2)}`,
+    reason: `strat2_${kind}_edge model=${model} p=${state.pMiddle.toFixed(3)} fair=${state.fair.toFixed(4)} cost=${candidate.packageCost.toFixed(4)} edge=${edge.toFixed(4)} inningsLeft=${state.inningsLeft.toFixed(2)}`,
     state,
   };
 }
