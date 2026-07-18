@@ -515,11 +515,34 @@ function hasAtMostDecimals(value: number, decimals: number): boolean {
   return Math.abs(value * scale - Math.round(value * scale)) < 1e-7;
 }
 
+/** Marketable BUY: maker (USDC) ≤2dp, taker (shares) ≤4dp. */
+function clobBuyAmountValid(price: number, shares: number): boolean {
+  return hasAtMostDecimals(price * shares, 2) && hasAtMostDecimals(shares, 4);
+}
+
 function clobBuyAmountsValid(candidate: Candidate, shares: number): boolean {
   // For marketable BUY orders the CLOB accepts USDC maker amounts only to cents.
   // Both arb legs are separate FAK BUYs, so both leg notionals must be cent-exact.
-  return hasAtMostDecimals(shares * candidate.broad.yesBook.ask, 2)
-    && hasAtMostDecimals(shares * candidate.narrow.noBook.ask, 2);
+  return clobBuyAmountValid(candidate.broad.yesBook.ask, shares)
+    && clobBuyAmountValid(candidate.narrow.noBook.ask, shares);
+}
+
+/**
+ * Largest share size in [minShares, maxShares] (centi-share steps) whose
+ * marketable BUY amounts satisfy CLOB decimal rules at `price`.
+ * Used for hedges/completions after a first-leg fill that may not be
+ * precision-safe at the complement ask (e.g. 6.1 @ 0.93 → $5.673).
+ */
+function precisionSafeBuyShares(price: number, minShares: number, maxShares: number): number | null {
+  if (!(price > 0)) return null;
+  const start = Math.ceil((minShares - EPSILON) * 100) / 100;
+  const end = Math.floor((maxShares + EPSILON) * 100) / 100;
+  if (end + EPSILON < start) return null;
+  for (let units = Math.round(end * 100); units >= Math.round(start * 100); units -= 1) {
+    const shares = units / 100;
+    if (clobBuyAmountValid(price, shares)) return shares;
+  }
+  return null;
 }
 
 function precisionSafeShares(candidate: Candidate, minShares: number, maxShares: number): number | null {
@@ -585,9 +608,17 @@ function roundShares(value: number): number {
 }
 
 async function postFakBuy(client: ClobClient, tokenId: string, price: number, shares: number): Promise<any> {
+  // Last-line defense: never submit a marketable BUY the CLOB will reject for
+  // maker/taker decimal rules (seen live as narrow_no size=0 / "invalid amounts").
+  const safeShares = precisionSafeBuyShares(price, 0, shares);
+  if (!safeShares || safeShares <= 0) {
+    throw new Error(
+      `clob_amount_precision_unavailable price=${price} shares=${shares} (maker≤2dp taker≤4dp)`,
+    );
+  }
   const tickSize = await client.getTickSize(tokenId) as TickSize;
   const signedOrder = await client.createOrder(
-    { tokenID: tokenId, price, size: Number(shares.toFixed(6)), side: Side.BUY, ...(POLY_BUILDER_CODE ? { builderCode: POLY_BUILDER_CODE } : {}) },
+    { tokenID: tokenId, price, size: Number(safeShares.toFixed(4)), side: Side.BUY, ...(POLY_BUILDER_CODE ? { builderCode: POLY_BUILDER_CODE } : {}) },
     { tickSize, negRisk: false },
   );
   return client.postOrder(signedOrder, OrderType.FAK);
@@ -598,9 +629,15 @@ async function postFakBuyBatch(
   legs: Array<{ tokenId: string; price: number; shares: number }>,
 ): Promise<any[]> {
   const signed = await Promise.all(legs.map(async (leg) => {
+    const safeShares = precisionSafeBuyShares(leg.price, 0, leg.shares);
+    if (!safeShares || safeShares <= 0) {
+      throw new Error(
+        `clob_amount_precision_unavailable price=${leg.price} shares=${leg.shares} (maker≤2dp taker≤4dp)`,
+      );
+    }
     const tickSize = await client.getTickSize(leg.tokenId) as TickSize;
     const order = await client.createOrder(
-      { tokenID: leg.tokenId, price: leg.price, size: Number(leg.shares.toFixed(6)), side: Side.BUY, ...(POLY_BUILDER_CODE ? { builderCode: POLY_BUILDER_CODE } : {}) },
+      { tokenID: leg.tokenId, price: leg.price, size: Number(safeShares.toFixed(4)), side: Side.BUY, ...(POLY_BUILDER_CODE ? { builderCode: POLY_BUILDER_CODE } : {}) },
       { tickSize, negRisk: false },
     );
     return { order, orderType: OrderType.FAK };
@@ -1023,6 +1060,8 @@ export {
   postLimitBuy,
   postLimitSell,
   postFakSell,
+  clobBuyAmountValid,
+  precisionSafeBuyShares,
   sizeForCandidate,
   reconcilePackage,
   reconcileTokenBalance,

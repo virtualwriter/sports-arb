@@ -87,6 +87,7 @@ import {
   postLimitBuy,
   postLimitSell,
   postFakSell,
+  precisionSafeBuyShares,
   proxyCollateralProbe,
   readJsonArray,
   reconcileTokenBalance,
@@ -667,12 +668,18 @@ async function tickSize(client: Clob, tokenId: string): Promise<TickSize> {
 }
 
 async function prepareFakBuy(client: Clob, leg: { role: "broad_yes" | "narrow_no"; tokenId: string; price: number; shares: number }): Promise<PreparedFakBuy> {
+  const safeShares = precisionSafeBuyShares(leg.price, 0, leg.shares);
+  if (!safeShares || safeShares <= 0) {
+    throw new Error(
+      `clob_amount_precision_unavailable role=${leg.role} price=${leg.price} shares=${leg.shares}`,
+    );
+  }
   const size = await tickSize(client, leg.tokenId);
   const order = await client.createOrder(
-    { tokenID: leg.tokenId, price: leg.price, size: Number(leg.shares.toFixed(6)), side: Side.BUY, ...(process.env.POLY_BUILDER_CODE?.trim() ? { builderCode: process.env.POLY_BUILDER_CODE.trim() } : {}) },
+    { tokenID: leg.tokenId, price: leg.price, size: Number(safeShares.toFixed(4)), side: Side.BUY, ...(process.env.POLY_BUILDER_CODE?.trim() ? { builderCode: process.env.POLY_BUILDER_CODE.trim() } : {}) },
     { tickSize: size, negRisk: false },
   );
-  return { ...leg, order, orderType: OrderType.FAK };
+  return { ...leg, shares: safeShares, order, orderType: OrderType.FAK };
 }
 
 async function postPreparedFakBuys(client: Clob, prepared: PreparedFakBuy[], forceBatch: boolean) {
@@ -3262,10 +3269,26 @@ async function executeSportsCheapFirst(
   if (hedgePrice > second.price + EPSILON) {
     log(`sports hedge ceiling ${pkg.key}: ${second.role} snapshot=${second.price.toFixed(4)} -> breakeven=${hedgePrice.toFixed(4)} cheapFill=${cheapAvgFill.toFixed(4)} pairCeil=${(cheapAvgFill + hedgePrice).toFixed(4)}`);
   }
-  const complementNotional = firstFilled * hedgePrice;
-  if (firstFilled > 0 && complementNotional + EPSILON >= MIN_MARKETABLE_BUY_USD) {
+  // First-leg FAK can over-fill on price improvement (e.g. intended 6 → filled
+  // 6.1). Re-size the hedge so maker USDC is cent-exact at the hedge price —
+  // submitting firstFilled@0.93 produced $5.673 and a CLOB "invalid amounts" reject.
+  const secondMinShares = Math.max(
+    MIN_ORDER_SHARES,
+    second.role === "narrow_no" ? c.narrow.noBook.minOrderSize : c.broad.yesBook.minOrderSize,
+  );
+  const hedgeShares = firstFilled > 0
+    ? precisionSafeBuyShares(hedgePrice, secondMinShares, firstFilled)
+    : null;
+  const complementNotional = (hedgeShares ?? 0) * hedgePrice;
+  if (firstFilled > 0 && hedgeShares && complementNotional + EPSILON >= MIN_MARKETABLE_BUY_USD) {
+    if (hedgeShares + EPSILON < firstFilled) {
+      log(
+        `sports hedge resize ${pkg.key}: ${second.role} fill=${firstFilled} -> hedge=${hedgeShares} @ ${hedgePrice.toFixed(4)} `
+        + `(clob cent precision; residual=${roundShares(firstFilled - hedgeShares)})`,
+      );
+    }
     try {
-      secondResp = await postFakBuy(client, second.tokenId, hedgePrice, firstFilled);
+      secondResp = await postFakBuy(client, second.tokenId, hedgePrice, hedgeShares);
       assertOrderResponse(secondResp, second.role);
       record.legOrderIds[second.role === "broad_yes" ? "broadYes" : "narrowNo"] = orderId(secondResp);
     } catch (err: any) {
@@ -3276,7 +3299,10 @@ async function executeSportsCheapFirst(
     if (second.role === "broad_yes") broadFilled = secondFilled;
     else narrowFilled = secondFilled;
   } else if (firstFilled > 0) {
-    legErrors.push(`${second.role}:skipped complement notional ${complementNotional.toFixed(4)} below minimum marketable buy`);
+    const why = !hedgeShares
+      ? `clob_amount_precision_unavailable fill=${firstFilled} price=${hedgePrice}`
+      : `complement notional ${complementNotional.toFixed(4)} below minimum marketable buy`;
+    legErrors.push(`${second.role}:skipped ${why}`);
   }
   const orders: LiveOrder[] = [firstOrder];
   if (secondResp !== undefined) {
@@ -3807,26 +3833,6 @@ function repairEvidenceAllowed(asset: string, repairedPackageCost: number): { ev
   return { evidence, reason: null };
 }
 
-function hasAtMostDecimals(value: number, decimals: number): boolean {
-  const scale = 10 ** decimals;
-  return Math.abs(value * scale - Math.round(value * scale)) < 1e-7;
-}
-
-function clobBuyAmountValid(price: number, shares: number): boolean {
-  return hasAtMostDecimals(price * shares, 2) && hasAtMostDecimals(shares, 5);
-}
-
-function precisionSafeCompletionShares(price: number, minShares: number, maxShares: number): number | null {
-  const maxCents = Math.floor((maxShares * price + EPSILON) * 100);
-  const minCents = Math.ceil((minShares * price - EPSILON) * 100);
-  for (let cents = maxCents; cents >= minCents; cents -= 1) {
-    const shares = Math.floor(((cents / 100) / price) * 100_000) / 100_000;
-    if (shares + EPSILON < minShares || shares - EPSILON > maxShares) continue;
-    if (clobBuyAmountValid(price, shares)) return shares;
-  }
-  return null;
-}
-
 // Build the structurally-valid complement set for an orphan over a live ladder
 // and pick the best positive-EV completion. Returns the structural count so the
 // caller can distinguish "no valid complement exists" (stranded -> unwind) from
@@ -3854,7 +3860,7 @@ function findCompletion(o: Orphan, quotes: MarketQuote[]): { pick: CompletionPic
     if (!(complementAsk > 0)) continue;
     const completionEdge = 1 - (o.fillPrice + complementAsk);
     if (completionEdge <= orphanCompletionMargin(o)) continue;
-    const completionShares = precisionSafeCompletionShares(
+    const completionShares = precisionSafeBuyShares(
       complementAsk,
       compBook.minOrderSize,
       Math.min(o.shares, compBook.askSize),
@@ -3884,7 +3890,7 @@ function immediateSportsRepairPick(o: Orphan, candidate: Candidate): { pick: Com
   const repairedPackageCost = o.fillPrice + complementAsk;
   const { evidence, reason } = repairEvidenceAllowed(o.asset, repairedPackageCost);
   if (reason) return { pick: null, reason };
-  const completionShares = precisionSafeCompletionShares(
+  const completionShares = precisionSafeBuyShares(
     complementAsk,
     complementBook.minOrderSize,
     Math.min(o.shares, complementBook.askSize),

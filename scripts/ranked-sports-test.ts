@@ -7,6 +7,7 @@ import {
   POLYMARKET_FUNDER_ADDRESS,
   postFakBuy,
   postFakSell,
+  precisionSafeBuyShares,
   proxyCollateralProbe,
   readJsonArray,
   reconcileTokenBalance,
@@ -898,10 +899,12 @@ async function executeCheapFirst(client: any, walletAddress: string, candidate: 
   record.status = "leg2_submitted";
   record.updatedAt = new Date().toISOString();
   let secondResp: any | undefined;
-  if (firstFilled > 0 && firstFilled * second.price + 1e-9 >= MIN_MARKETABLE_BUY_USD) {
+  const secondMin = Math.max(1, second.role === "narrow_no" ? candidate.narrow.noBook.minOrderSize : candidate.broad.yesBook.minOrderSize);
+  const hedgeShares = firstFilled > 0 ? precisionSafeBuyShares(second.price, secondMin, firstFilled) : null;
+  if (firstFilled > 0 && hedgeShares && hedgeShares * second.price + 1e-9 >= MIN_MARKETABLE_BUY_USD) {
     bothLegsSubmitted = true;
     try {
-      secondResp = await postFakBuy(client, second.tokenId, second.price, firstFilled);
+      secondResp = await postFakBuy(client, second.tokenId, second.price, hedgeShares);
       assertOrderResponse(secondResp, second.role);
       record.legOrderIds[second.role === "broad_yes" ? "broadYes" : "narrowNo"] = orderId(secondResp);
     } catch (err: any) {
@@ -913,7 +916,11 @@ async function executeCheapFirst(client: any, walletAddress: string, candidate: 
     else narrowFilled = secondFilled;
     orders.push({ packageId: record.packageId, createdAt: new Date().toISOString(), role: second.role, tokenId: second.tokenId, side: "BUY", price: second.price, size: secondFilled, orderType: "FAK", response: secondResp });
   } else if (firstFilled > 0) {
-    errors.push(`${second.role}:skipped complement notional below minimum`);
+    errors.push(
+      !hedgeShares
+        ? `${second.role}:skipped clob_amount_precision_unavailable fill=${firstFilled} price=${second.price}`
+        : `${second.role}:skipped complement notional below minimum`,
+    );
   }
 
   const matched = roundShares(Math.min(broadFilled, narrowFilled));
