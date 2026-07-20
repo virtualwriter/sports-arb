@@ -1,0 +1,9 @@
+[Unit]
+Description=Nightly MLB fire-sample collection (08:30 UTC = 4:30 ET)
+
+[Timer]
+OnCalendar=*-*-* 08:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

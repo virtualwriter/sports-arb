@@ -106,6 +106,10 @@ export async function resolveMlbFeedId(slug: string, title: string): Promise<Fee
     if (abbrInName(parsed.teamA, `${awayName} ${homeName}`)) score += 1;
     if (abbrInName(parsed.teamB, `${awayName} ${homeName}`)) score += 1;
     score += fuzzyOverlap(title, `${awayName} ${homeName}`);
+    // Doubleheader tie-break: prefer the game that is live now over one already final.
+    const state = String(game?.status?.abstractGameState ?? "");
+    if (state === "Live") score += 0.5;
+    else if (state === "Final") score -= 0.25;
     if (!best || score > best.score) best = { game, score };
   }
   if (!best || best.score < 3) return null;

@@ -126,8 +126,12 @@ function parseOrderbookSide(raw: unknown): KalshiOrderbookLevel[] {
 export function parseOrderbookResponse(resp: unknown): KalshiOrderbook {
   const r = (resp as any)?.orderbook_fp ?? (resp as any)?.orderbook ?? resp;
   return {
-    yesBids: parseOrderbookSide((r as any)?.yes_dollars ?? (r as any)?.yes),
-    noBids: parseOrderbookSide((r as any)?.no_dollars ?? (r as any)?.no),
+    yesBids: parseOrderbookSide(
+      (r as any)?.yes_dollars_fp ?? (r as any)?.yes_dollars ?? (r as any)?.yes,
+    ),
+    noBids: parseOrderbookSide(
+      (r as any)?.no_dollars_fp ?? (r as any)?.no_dollars ?? (r as any)?.no,
+    ),
   };
 }
 

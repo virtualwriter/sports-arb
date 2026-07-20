@@ -1,0 +1,12 @@
+[Unit]
+Description=MLB slate sweep — launch/reap ladder-lag-race recorders
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Root: the sweep spawns recorders as transient systemd units (systemd-run).
+WorkingDirectory=/opt/sports-arb-recorder
+EnvironmentFile=/etc/sports-arb-recorder.env
+Environment=SWEEP_ENV_FILE=/etc/sports-arb-recorder.env
+ExecStart=/usr/bin/python3 scripts/mlb-slate-sweep.py

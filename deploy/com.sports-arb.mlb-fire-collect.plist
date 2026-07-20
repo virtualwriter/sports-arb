@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.sports-arb.mlb-fire-collect</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>cd "/Users/johnskapwingpc/repos/sports-arb" &amp;&amp; /usr/bin/env python3 scripts/collect-mlb-fire-samples.py</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>4</integer>
+    <key>Minute</key><integer>30</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/johnskapwingpc/repos/sports-arb/.runtime/mlb-fire-collect.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/johnskapwingpc/repos/sports-arb/.runtime/mlb-fire-collect.err.log</string>
+  <key>WorkingDirectory</key>
+  <string>/Users/johnskapwingpc/repos/sports-arb</string>
+</dict>
+</plist>
