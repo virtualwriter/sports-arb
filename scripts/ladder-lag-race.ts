@@ -459,24 +459,15 @@ async function record(): Promise<void> {
   // ---- bwin fixture (match by PM team names) ----
   let bwinFixtureId = process.env.PLR_BWIN_FIXTURE ?? "";
   const teams = teamTokens(ev.title);
+  // Match on team nicknames in the fixture *name* only. The old any-word-in-
+  // name+players substring match once bound STL@LAA to a TB@TOR fixture
+  // (player-name collision), poisoning the paper score feed.
+  const nickname = (t: string): string =>
+    t.split(" ").filter((w) => w.length >= 3).pop() ?? t;
   const matchesTeams = (f: { name: string; players: string[] }): boolean => {
-    const hay = `${f.name} ${f.players.join(" ")}`.toLowerCase();
-    return teams.length >= 2 && teams.every((t) => t.split(" ").some((w) => w.length >= 3 && hay.includes(w)));
+    const name = f.name.toLowerCase();
+    return teams.length >= 2 && teams.every((t) => name.includes(nickname(t)));
   };
-  if (!bwinFixtureId) {
-    try {
-      const fx = await bwinLiveFixtures(BWIN_SPORT);
-      const hit = fx.find(matchesTeams);
-      if (hit) {
-        bwinFixtureId = hit.id;
-        log(`bwin fixture ${hit.id} ${hit.name}`);
-      } else {
-        log(`bwin: fixture for [${teams.join(" / ")}] not found among ${fx.length} live fixtures (set PLR_BWIN_FIXTURE to override)`);
-      }
-    } catch (e) {
-      log(`bwin discovery failed: ${String(e).slice(0, 60)}`);
-    }
-  }
   const lastOdds = new Map<string, string>();
   let bwin: BwinPushClient | null = null;
   const reconnectBwin = (reason: string) => {
@@ -536,9 +527,39 @@ async function record(): Promise<void> {
       () => { if (gen === bwinGen && !shuttingDown) reconnectBwin("socket_closed"); },
     );
   };
+  // Games launched pregame aren't on bwin's live list yet, so keep retrying
+  // discovery until the fixture appears (it lists at first pitch).
+  let bwinRetryTimer: ReturnType<typeof setInterval> | null = null;
+  const discoverBwin = async (): Promise<void> => {
+    if (bwinFixtureId || shuttingDown) return;
+    try {
+      const fx = await bwinLiveFixtures(BWIN_SPORT);
+      const hit = fx.find(matchesTeams);
+      if (hit) {
+        bwinFixtureId = hit.id;
+        log(`bwin fixture ${hit.id} ${hit.name}`);
+        bwin = makeBwin();
+        bwin.connect();
+        lastBwin = now();
+      }
+    } catch (e) {
+      log(`bwin discovery failed: ${String(e).slice(0, 60)}`);
+    }
+    if (bwinFixtureId && bwinRetryTimer) {
+      clearInterval(bwinRetryTimer);
+      bwinRetryTimer = null;
+    }
+  };
   if (bwinFixtureId) {
     bwin = makeBwin();
     bwin.connect();
+  } else {
+    await discoverBwin();
+    if (!bwinFixtureId) {
+      const retryMs = Number(process.env.PLR_BWIN_RETRY_MS ?? 120_000);
+      log(`bwin: fixture for [${teams.join(" / ")}] not live yet — retrying every ${retryMs / 1000}s`);
+      bwinRetryTimer = setInterval(() => { void discoverBwin(); }, retryMs);
+    }
   }
 
   // ---- OpticOdds SSE relay (sharp books + PM itself, for relay-lag measurement) ----
@@ -677,6 +698,10 @@ async function record(): Promise<void> {
   if (kalshiRetryTimer) {
     clearInterval(kalshiRetryTimer);
     kalshiRetryTimer = null;
+  }
+  if (bwinRetryTimer) {
+    clearInterval(bwinRetryTimer);
+    bwinRetryTimer = null;
   }
   try { kalshiFeed?.stop(); } catch {}
   try { kalshiSpreadFeed?.stop(); } catch {}

@@ -646,6 +646,21 @@ export class MlbMiddleArbPaperSidecar {
       away = listed.away;
       home = listed.home;
     }
+    // Sanity gate: statsapi polls every ~2s, so a genuine bwin lead is at most
+    // one scoring event (≤4 runs, grand slam). A bigger jump — or any score
+    // before statsapi establishes a baseline — means the wrong fixture is
+    // attached (saw STL@LAA poisoned by a TB@TOR scoreboard). Drop it.
+    const jump = Math.min(dSwap, dList);
+    if (!this.seenScore && away + home > 0) {
+      this.opts.log?.(`bwin_score ${away}-${home} ignored (no statsapi baseline yet)`);
+      return;
+    }
+    if (jump > 4) {
+      this.opts.log?.(
+        `bwin_score ${away}-${home} ignored (jump ${jump} vs known ${cur.away}-${cur.home} — fixture mismatch?)`,
+      );
+      return;
+    }
     this.noteScore("bwin_score", away, home, t, {
       period: sb?.period != null ? String(sb.period) : null,
     });
