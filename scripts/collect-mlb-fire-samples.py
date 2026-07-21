@@ -10,9 +10,14 @@ Appends one JSON row per fire occurrence to data/backtest/mlb-fire-samples.jsonl
 (idempotent — rows already in the repo are skipped) and a per-day summary to
 data/backtest/mlb-fire-days.jsonl.
 
+Each row also carries the post-score ms detail joined from the paper
+mlb_paper_score_window record: scoreSignals (per-feed arrival offsets),
+bookSignals (first book reprice ms), fireDtMs (fire vs first score signal),
+and the package's 15s edge/cost path with persistence timers.
+
 After a successful collection the day's raw recordings + paper logs are
-gzipped in place (COLLECT_COMPRESS=0 to disable) and .gz older than
-COLLECT_RETAIN_DAYS (default 21) are deleted.
+gzipped in place (COLLECT_COMPRESS=0 to disable). Ladder recording .gz older
+than COLLECT_RETAIN_DAYS (default 21) are deleted; paper .gz are kept.
 
 Usage:
   python3 scripts/collect-mlb-fire-samples.py            # yesterday (ET)
@@ -53,10 +58,17 @@ def parse_family(fam):
     return float(m.group(1)), float(m.group(2))
 
 
+def jopen(path):
+    """Open plain or gzipped JSONL transparently (post-collection archives)."""
+    if str(path).endswith(".gz"):
+        return gzip.open(path, "rt")
+    return open(path)
+
+
 def head_kind(path, kind_field="kind"):
     """First few parsed lines of a JSONL file."""
     out = []
-    with open(path) as fh:
+    with jopen(path) as fh:
         for _ in range(5):
             line = fh.readline()
             if not line:
@@ -73,7 +85,8 @@ def paper_files_for(day: str):
     d = date.fromisoformat(day)
     stamps = {day, (d + timedelta(days=1)).isoformat()}
     files = []
-    for p in sorted(glob.glob(str(DATA_DIR / "mlb-middle-arb-paper-*.jsonl"))):
+    for p in sorted(glob.glob(str(DATA_DIR / "mlb-middle-arb-paper-*.jsonl"))
+                    + glob.glob(str(DATA_DIR / "mlb-middle-arb-paper-*.jsonl.gz"))):
         if not any(s in p for s in stamps):
             continue
         for o in head_kind(p):
@@ -89,7 +102,8 @@ def recordings_for(day: str):
     d = date.fromisoformat(day)
     stamps = {day, (d + timedelta(days=1)).isoformat()}
     recs = []
-    for p in sorted(glob.glob(str(DATA_DIR / "ladder-lag-race-*.jsonl"))):
+    for p in sorted(glob.glob(str(DATA_DIR / "ladder-lag-race-*.jsonl"))
+                    + glob.glob(str(DATA_DIR / "ladder-lag-race-*.jsonl.gz"))):
         if not any(s in p for s in stamps):
             continue
         slug = None
@@ -102,7 +116,7 @@ def recordings_for(day: str):
                 break
         if not slug or day not in str(slug):
             continue
-        with open(p) as fh:
+        with jopen(p) as fh:
             try:
                 t0 = json.loads(fh.readline()).get("t") or 0
             except Exception:
@@ -112,41 +126,77 @@ def recordings_for(day: str):
 
 
 def extract_fires(paper_files, day):
-    """Every real wouldFire occurrence, deduped per (slug, score, package)."""
+    """Every real wouldFire occurrence, deduped per (slug, score, package),
+    enriched with ms timing from the matching mlb_paper_score_window."""
     fires, seen = [], set()
+    windows = {}  # (slug, eventId) -> score_window record
     for path, slug, feed_id in paper_files:
-        with open(path) as fh:
+        with jopen(path) as fh:
             for line in fh:
-                if '"mlb_paper_score_event"' not in line:
-                    continue
-                try:
-                    o = json.loads(line)
-                except Exception:
-                    continue
-                if o.get("kind") != "mlb_paper_score_event":
-                    continue
-                if o.get("source") == "phone_ping" or o.get("booksFrozenAtTap"):
-                    continue  # synthetic phone tests
-                wf = o.get("wouldFire") or [
-                    g for g in (o.get("topEdgeGains") or []) if g.get("screenOk")
-                ]
-                for g in wf:
-                    key = (slug, o.get("scoreAway"), o.get("scoreHome"),
-                           g.get("venue"), g.get("lineFamily"), g.get("marketType"))
-                    if key in seen:
+                if '"mlb_paper_score_event"' in line:
+                    try:
+                        o = json.loads(line)
+                    except Exception:
                         continue
-                    seen.add(key)
-                    fires.append({
-                        "day": day, "slug": slug, "feedId": feed_id,
-                        "t": o.get("t"),
-                        "scoreAway": o.get("scoreAway"), "scoreHome": o.get("scoreHome"),
-                        "source": o.get("source"),
-                        "venue": g.get("venue"),
-                        "marketType": g.get("marketType"),
-                        "lineFamily": g.get("lineFamily"),
-                        "cost0": g.get("cost0") or g.get("cost"),
-                        "postEdge": g.get("postEdge"),
-                    })
+                    if o.get("kind") != "mlb_paper_score_event":
+                        continue
+                    if o.get("source") == "phone_ping" or o.get("booksFrozenAtTap"):
+                        continue  # synthetic phone tests
+                    wf = o.get("wouldFire") or [
+                        g for g in (o.get("topEdgeGains") or []) if g.get("screenOk")
+                    ]
+                    for g in wf:
+                        key = (slug, o.get("scoreAway"), o.get("scoreHome"),
+                               g.get("venue"), g.get("lineFamily"), g.get("marketType"))
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        fires.append({
+                            "day": day, "slug": slug, "feedId": feed_id,
+                            "t": o.get("t"),
+                            "eventId": o.get("eventId"),
+                            "scoreT0": o.get("t0"),
+                            "fireDtMs": (o.get("t") - o.get("t0"))
+                            if o.get("t") and o.get("t0") else None,
+                            "scoreAway": o.get("scoreAway"), "scoreHome": o.get("scoreHome"),
+                            "source": o.get("source"),
+                            "venue": g.get("venue"),
+                            "marketType": g.get("marketType"),
+                            "lineFamily": g.get("lineFamily"),
+                            "cost0": g.get("cost0") or g.get("cost"),
+                            "postEdge": g.get("postEdge"),
+                        })
+                elif '"mlb_paper_score_window"' in line:
+                    try:
+                        o = json.loads(line)
+                    except Exception:
+                        continue
+                    if o.get("kind") == "mlb_paper_score_window":
+                        windows[(slug, o.get("eventId"))] = o
+
+    # Attach the 15s post-score window: feed-race ms, book first-move ms, and
+    # this package's edge/cost path + persistence within the window.
+    for f in fires:
+        w = windows.get((f["slug"], f.get("eventId")))
+        if not w:
+            continue
+        f["scoreSignals"] = w.get("scoreSignals")
+        f["bookSignals"] = w.get("bookSignals")
+        for pkg in w.get("watched") or []:
+            if (pkg.get("venue") == f["venue"]
+                    and pkg.get("lineFamily") == f["lineFamily"]
+                    and pkg.get("marketType") == f["marketType"]):
+                f["window"] = {
+                    "preEdge": pkg.get("preEdge"),
+                    "postEdge": pkg.get("postEdge"),
+                    "edgeGain": pkg.get("edgeGain"),
+                    "timeEdgeGeMarginMs": pkg.get("timeEdgeGeMarginMs"),
+                    "timeCostPlus3cMs": pkg.get("timeCostPlus3cMs"),
+                    "finalEdge": pkg.get("finalEdge"),
+                    "finalCost": pkg.get("finalCost"),
+                    "path": pkg.get("path"),
+                }
+                break
     return fires
 
 
@@ -188,7 +238,7 @@ def attach_tob(fires, recs):
         fl.sort(key=lambda f: f["t"])
         tmax = fl[-1]["t"] + 1000
         book, idx = {}, 0
-        with open(rp) as fh:
+        with jopen(rp) as fh:
             for line in fh:
                 if '"kind":"kalshi_ladder"' not in line and '"kind":"ladder"' not in line:
                     continue
@@ -368,12 +418,13 @@ def compress_day(day: str) -> None:
                 os.remove(p)
             except Exception as e:
                 print(f"compress failed for {p}: {e}")
+    # Prune only the bulky ladder recordings (~200MB/day gz). Paper archives
+    # (~1MB/day gz) are kept forever — they hold the score/window ms detail.
     retain = int(os.environ.get("COLLECT_RETAIN_DAYS", "21"))
     cutoff = (datetime.now(ET) - timedelta(days=retain)).timestamp()
-    for pat in ("ladder-lag-race-*.jsonl.gz", "mlb-middle-arb-paper-*.jsonl.gz"):
-        for p in glob.glob(str(DATA_DIR / pat)):
-            if os.path.getmtime(p) < cutoff:
-                os.remove(p)
+    for p in glob.glob(str(DATA_DIR / "ladder-lag-race-*.jsonl.gz")):
+        if os.path.getmtime(p) < cutoff:
+            os.remove(p)
 
 
 if __name__ == "__main__":
