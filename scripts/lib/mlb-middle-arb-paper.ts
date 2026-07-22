@@ -222,6 +222,9 @@ export class MlbMiddleArbPaperSidecar {
   private scoreAway = 0;
   private scoreHome = 0;
   private seenScore = false;
+  /** True only once StatsAPI itself has reported a score (bwin can't count —
+   *  a bwin 0:0 must not unlock the bwin gate, see OAK@ARI 2026-07-21). */
+  private statsapiSeen = false;
   private eventMap: EventMapFile | null = null;
   private feedId: string | null = null;
   private latestFeed: FeedSnapshot | null = null;
@@ -371,6 +374,7 @@ export class MlbMiddleArbPaperSidecar {
           this.scoreAway = this.latestFeed.scoreAway;
           this.scoreHome = this.latestFeed.scoreHome;
           this.seenScore = true;
+          this.statsapiSeen = true;
         }
       } catch (e) {
         log(`mlb-paper: initial StatsAPI poll failed: ${String(e).slice(0, 80)}`);
@@ -560,6 +564,7 @@ export class MlbMiddleArbPaperSidecar {
       this.scoreAway = feed.scoreAway;
       this.scoreHome = feed.scoreHome;
       this.seenScore = true;
+      this.statsapiSeen = true;
       if (this.cache) this.cache = refreshMlbMiddleArbCacheState(this.cache, feed);
     }
     this.opts.emit({
@@ -651,7 +656,10 @@ export class MlbMiddleArbPaperSidecar {
     // before statsapi establishes a baseline — means the wrong fixture is
     // attached (saw STL@LAA poisoned by a TB@TOR scoreboard). Drop it.
     const jump = Math.min(dSwap, dList);
-    if (!this.seenScore && away + home > 0) {
+    if (!this.statsapiSeen) {
+      // Without a StatsAPI baseline we can neither validate the fixture nor
+      // orient home/away — and a bwin 0:0 must not unlock this gate either
+      // (it used to flip seenScore and let a mis-oriented feed through).
       this.opts.log?.(`bwin_score ${away}-${home} ignored (no statsapi baseline yet)`);
       return;
     }
@@ -688,6 +696,7 @@ export class MlbMiddleArbPaperSidecar {
         this.emitRbiMenu("statsapi_poll");
       }
       if (feed.scoreAway != null && feed.scoreHome != null) {
+        this.statsapiSeen = true;
         this.noteScore("statsapi", feed.scoreAway, feed.scoreHome, Date.now(), {
           period: feed.period,
           outs: feed.outs,

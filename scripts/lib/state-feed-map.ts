@@ -86,6 +86,13 @@ async function fetchWithUa(url: string): Promise<any> {
   return fetchJson(url, FETCH_TIMEOUT_MS);
 }
 
+// Slug codes that no longer appear in the StatsAPI team name/abbreviation
+// (e.g. the A's are just "Athletics" abbr "ATH" since leaving Oakland).
+const MLB_SLUG_ALIASES: Record<string, string[]> = {
+  oak: ["ath", "athletics"],
+  ari: ["az"],
+};
+
 export async function resolveMlbFeedId(slug: string, title: string): Promise<FeedBinding | null> {
   const parsed = parseSportsSlug(slug);
   if (!parsed || parsed.asset !== "MLB") return null;
@@ -100,11 +107,12 @@ export async function resolveMlbFeedId(slug: string, title: string): Promise<Fee
     const awayName = String(game?.teams?.away?.team?.name ?? "");
     const homeName = String(game?.teams?.home?.team?.name ?? "");
     const abbrs = new Set([away, home].filter(Boolean));
+    const variants = (t: string): string[] => [t, ...(MLB_SLUG_ALIASES[t] ?? [])];
     let score = 0;
-    if (abbrs.has(parsed.teamA)) score += 2;
-    if (abbrs.has(parsed.teamB)) score += 2;
-    if (abbrInName(parsed.teamA, `${awayName} ${homeName}`)) score += 1;
-    if (abbrInName(parsed.teamB, `${awayName} ${homeName}`)) score += 1;
+    if (variants(parsed.teamA).some((v) => abbrs.has(v))) score += 2;
+    if (variants(parsed.teamB).some((v) => abbrs.has(v))) score += 2;
+    if (variants(parsed.teamA).some((v) => abbrInName(v, `${awayName} ${homeName}`))) score += 1;
+    if (variants(parsed.teamB).some((v) => abbrInName(v, `${awayName} ${homeName}`))) score += 1;
     score += fuzzyOverlap(title, `${awayName} ${homeName}`);
     // Doubleheader tie-break: prefer the game that is live now over one already final.
     const state = String(game?.status?.abstractGameState ?? "");
