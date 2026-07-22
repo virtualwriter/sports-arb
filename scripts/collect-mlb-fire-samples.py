@@ -15,6 +15,13 @@ mlb_paper_score_window record: scoreSignals (per-feed arrival offsets),
 bookSignals (first book reprice ms), fireDtMs (fire vs first score signal),
 and the package's 15s edge/cost path with persistence timers.
 
+A second replay pass tracks each fired package's legs for up to 30 min after
+the fire and stores edgeLife {move3cMs, halfGoneMs, goneMs, pulled, horizonMs,
+censored} plus a cause label: "lag" (book repriced to our fair within 2 min —
+stale-book money), "model" (quote persisted — market disagrees with pa_chain),
+"quote" (sub-$1 package / >=35c edge / instantly pulled). This is computed at
+collection time because raw recordings are pruned after COLLECT_RETAIN_DAYS.
+
 After a successful collection the day's raw recordings + paper logs are
 gzipped in place (COLLECT_COMPRESS=0 to disable). Ladder recording .gz older
 than COLLECT_RETAIN_DAYS (default 21) are deleted; paper .gz are kept.
@@ -266,6 +273,115 @@ def attach_tob(fires, recs):
                 idx += 1
 
 
+EDGE_LIFE_HORIZON_MS = 30 * 60 * 1000
+
+
+def package_leg_keys(f):
+    """Book keys for the two legs of a fired package (matches attach_tob)."""
+    lo, hi = parse_family(f["lineFamily"])
+    venue = "kalshi" if f["venue"] == "kalshi" else "pm"
+    if f["marketType"] == "game_total":
+        return ((venue, "total", "", lo, "yes"), (venue, "total", "", hi, "no"))
+    tm = f.get("team") or ""
+    return ((venue, "spread", tm, hi, "yes"), (venue, "spread", tm, lo, "no"))
+
+
+def attach_edge_life(fires, recs):
+    """Replay each recording past the fire timestamps: how long did the fired
+    edge survive at top-of-book before the package repriced to fair?"""
+    def recording_for(slug, t):
+        cands = [r for r in recs if r[0] == slug and r[1] <= t]
+        return max(cands, key=lambda r: r[1])[2] if cands else None
+
+    by_rec = defaultdict(list)
+    for f in fires:
+        if f.get("costFill") is None:
+            continue
+        rp = recording_for(f["slug"], f["t"])
+        if rp:
+            by_rec[rp].append(f)
+
+    for rp, fl in by_rec.items():
+        keys = set()
+        for f in fl:
+            keys.update(package_leg_keys(f))
+        ticks, last_t = [], 0
+        with jopen(rp) as fh:
+            for line in fh:
+                if '"kind":"kalshi_ladder"' not in line and '"kind":"ladder"' not in line:
+                    continue
+                try:
+                    o = json.loads(line)
+                except Exception:
+                    continue
+                t = o.get("t") or 0
+                last_t = max(last_t, t)
+                if o.get("klass") not in ("total", "spread"):
+                    continue
+                ln, side = o.get("line"), o.get("side")
+                if ln is None or side not in ("yes", "no"):
+                    continue
+                venue = "kalshi" if o.get("kind") == "kalshi_ladder" else "pm"
+                k = (venue, o.get("klass"), o.get("teamKey") or "", float(ln), side)
+                if k in keys:
+                    ask = o.get("bestAsk")
+                    ticks.append((t, k, float(ask) if ask is not None else None))
+
+        for f in fl:
+            yes_k, no_k = package_leg_keys(f)
+            cost0, edge = f["costFill"], f.get("postEdge") or 0
+            asks = {}
+            res = {"move3cMs": None, "halfGoneMs": None, "goneMs": None,
+                   "pulled": False}
+            t_fire = f["t"]
+            t_end = t_fire + EDGE_LIFE_HORIZON_MS
+            for t, k, ask in ticks:
+                if t > t_end:
+                    break
+                if t <= t_fire:
+                    asks[k] = ask
+                    continue
+                if k not in (yes_k, no_k):
+                    continue
+                asks[k] = ask
+                dt = t - t_fire
+                ya, na = asks.get(yes_k), asks.get(no_k)
+                if ya is None or na is None:
+                    # a leg's TOB ask was pulled: the fired liquidity is gone
+                    res["pulled"] = True
+                    if res["goneMs"] is None:
+                        res["goneMs"] = dt
+                    break
+                cost = ya + na
+                if res["move3cMs"] is None and cost >= cost0 + 0.03 - 1e-9:
+                    res["move3cMs"] = dt
+                if res["halfGoneMs"] is None and cost >= cost0 + edge / 2 - 1e-9:
+                    res["halfGoneMs"] = dt
+                if res["goneMs"] is None and cost >= cost0 + edge - 1e-9:
+                    res["goneMs"] = dt
+                    break
+            res["horizonMs"] = min(last_t, t_end) - t_fire
+            res["censored"] = res["goneMs"] is None
+            f["edgeLife"] = res
+            f["cause"] = classify_cause(f)
+
+
+def classify_cause(f):
+    """lag = stale-book reprice within 2 min; model = market persistently
+    disagrees with pa_chain; quote = pricing error (pulled fast / absurd)."""
+    el = f.get("edgeLife") or {}
+    gone = el.get("goneMs")
+    if el.get("pulled") and gone is not None and gone <= 60_000:
+        return "quote"
+    if (f.get("costFill") or 9) < 1.0 or (f.get("postEdge") or 0) >= 0.35:
+        return "quote"
+    if gone is not None and gone <= 120_000:
+        return "lag"
+    if gone is not None or (el.get("horizonMs") or 0) >= 120_000:
+        return "model"
+    return None  # not enough tape after the fire to judge
+
+
 def fetch_finals(day: str):
     d = date.fromisoformat(day)
     url = (f"https://statsapi.mlb.com/api/v1/schedule?sportId=1"
@@ -348,8 +464,10 @@ def main():
 
     fires = extract_fires(paper, day)
     print(f"{day}: {len(fires)} deduped wouldFire occurrences")
-    attach_tob(fires, recordings_for(day))
+    recs = recordings_for(day)
+    attach_tob(fires, recs)
     settle(fires, fetch_finals(day))
+    attach_edge_life(fires, recs)
 
     # first-fire flag per unique package (the fill-once backtest view)
     first_seen = set()
@@ -385,6 +503,8 @@ def main():
         "pendingNoFinal": pending,
         "skipped": len(fires) - len(settled) - pending,
         "uniquePackages": len(uniq),
+        "causes": {c: sum(1 for f in settled if f.get("cause") == c)
+                   for c in ("lag", "model", "quote")},
         "pnlTobAllFires": round(sum(f["pnlTob"] for f in settled), 2),
         "pnlTobFirstFire": round(sum(f["pnlTob"] for f in uniq), 2),
         "notionalFirstFire": round(sum(f["costFill"] * f["size"] for f in uniq), 2),
