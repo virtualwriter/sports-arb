@@ -23,6 +23,8 @@
 | `reference/legacy/trading-engine.ts` | Broad parent trader file containing older MONOTONIC_ARB shadow and settlement logic; reference only. |
 | `docs/reference/*` | Parent repo deployment/cleanup references that mention Japan/monotonic paths and guardrails. |
 | `cursor-rules/sports-arb-event-lifecycle.mdc` | Cursor rule for sports arb event lifecycle behavior. |
+| `cursor-rules/hft-market-making-systems.mdc` | Cursor rule internalizing Brett Harrison's HFT market-making systems framework (market data, fair value, order placement, connectivity, offline training). |
+| `docs/reference/hft-market-making-systems.md` | Short reference + sports-arb component mapping for the HFT MM systems framework. |
 | `reference/helpers/polymarket-clob-book.ts` | CLOB depth utility noted as needed for monotonic arb depth checks. |
 | `reference/helpers/reporting-position.ts` | Reporting parser that recognizes monotonic arb package labels. |
 | `reference/legacy/market-scanner.ts` | Broad market scanner reference with spot-column dependency for monotonic settlement. |
