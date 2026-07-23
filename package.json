@@ -36,7 +36,9 @@
     "updown:ws-test": "tsx scripts/updown-5m-market-ws-test.ts",
     "ranked-sports:test": "tsx scripts/ranked-sports-test.ts",
     "test": "vitest run",
-    "build": "tsc --noEmit"
+    "build": "tsc --noEmit",
+    "crypto:kalshi-ws": "tsx scripts/crypto-kalshi-ws-scanner.ts",
+    "weather:softball": "tsx scripts/weather-softball-daemon.ts"
   },
   "dependencies": {
     "@polymarket/clob-client-v2": "^1.0.8",

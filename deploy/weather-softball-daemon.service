@@ -1,0 +1,37 @@
+[Unit]
+Description=Polymarket weather YES-basket softball daemon (shadow; LIVE via env)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/sports-arb
+EnvironmentFile=/etc/sports-arb.env
+Environment=SPORTS_ARB_STATE_DIR=/var/lib/sports-arb
+Environment=SPORTS_ARB_DATA_DIR=/var/lib/sports-arb/data
+Environment=SPORTS_ARB_RUNTIME_DIR=/var/lib/sports-arb/runtime
+Environment=NODE_NO_WARNINGS=1
+Environment=WEATHER_SOFTBALL_LIVE=0
+Environment=WEATHER_SOFTBALL_POLL_MS=15000
+Environment=SOFTBALL_MIN_NET_EDGE=0.02
+Environment=SOFTBALL_MIN_SIZE=10
+Environment=SOFTBALL_MIN_COST=0.85
+Environment=SOFTBALL_MAX_COST=0.99
+Environment=SOFTBALL_MIN_LEG_ASK=0.01
+ExecStart=/opt/sports-arb/node_modules/.bin/tsx /opt/sports-arb/scripts/weather-softball-daemon.ts
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+KillSignal=SIGTERM
+TimeoutStopSec=15
+User=sports-arb
+Group=sports-arb
+StateDirectory=sports-arb
+RuntimeDirectory=sports-arb
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
