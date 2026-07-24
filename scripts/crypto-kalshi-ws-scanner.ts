@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
-// Kalshi crypto + weather ladder middle scanner over WebSocket orderbooks
-// (shadow only), plus a Polymarket daily-temperature polling leg.
+// Kalshi crypto + weather ladder middle scanner over WebSocket orderbooks,
+// plus a Polymarket daily-temperature polling leg.
+// Kalshi weather softballs can go live via KALSHI_SOFTBALL_LIVE=1.
 //
 // Kalshi: discovers open markets in CRYPTO_KALSHI_SERIES and
 // WEATHER_KALSHI_SERIES via REST, then streams orderbook_delta over Kalshi WS
@@ -37,6 +38,11 @@ import {
 import { KalshiBookStore } from "./lib/kalshi-ws-books.js";
 import { bestLevel, fetchJson, parseJsonArray, type BookLevel } from "./lib/monotonic-arb-core.js";
 import { isSoftball, softballGateLabel } from "./lib/softball-gates.js";
+import {
+  enqueueKalshiSoftball,
+  kalshiSoftballExecLabel,
+  type KalshiSoftballRow,
+} from "./lib/kalshi-softball-exec.js";
 
 const DATA_DIR = resolve(
   process.env.SPORTS_ARB_DATA_DIR
@@ -110,7 +116,10 @@ function emitAudit(row: Record<string, unknown>): void {
   appendFileSync(AUDIT_PATH, `${JSON.stringify(row)}\n`);
 }
 
-/** Attach softball flag; loud-log when the three entry gates pass. */
+/** Live Kalshi client set in main(); used to fire weather softballs on WS ticks. */
+let liveKalshiClient: KalshiClient | null = null;
+
+/** Attach softball flag; loud-log when the entry gates pass; enqueue Kalshi live. */
 function withSoftball(
   row: Record<string, unknown> & {
     packageCost: number;
@@ -121,6 +130,7 @@ function withSoftball(
   },
 ): Record<string, unknown> & { softball: boolean } {
   const softball = isSoftball(row);
+  const out = { ...row, softball };
   if (softball) {
     log(
       `!!! SOFTBALL FIRE ${row.venue}/${row.packageKind} `
@@ -129,8 +139,11 @@ function withSoftball(
       + `size=${Number(row.availableSize).toFixed(1)} `
       + `id=${row.packageId}`,
     );
+    if (liveKalshiClient && row.venue === "kalshi") {
+      enqueueKalshiSoftball(liveKalshiClient, out as KalshiSoftballRow);
+    }
   }
-  return { ...row, softball };
+  return out;
 }
 
 const lastEmitted = new Map<string, { cost: number; at: number }>();
@@ -665,6 +678,7 @@ async function main(): Promise<void> {
     throw new Error("Kalshi WS requires KALSHI_API_KEY_ID and KALSHI_API_PRIVATE_KEY_PATH");
   }
   const client = new KalshiClient();
+  liveKalshiClient = client;
   const books = new KalshiBookStore();
   let ladders: LadderMeta[] = [];
   let socket: WebSocket | null = null;
@@ -732,6 +746,7 @@ async function main(): Promise<void> {
   }
 
   log(`softball gates: ${softballGateLabel()}`);
+  log(`kalshi softball exec: ${kalshiSoftballExecLabel()}`);
   ladders = await discoverLadders(client);
   await reconnectAndSubscribe(ladders);
 

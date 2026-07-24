@@ -16,6 +16,18 @@ Environment=SPORTS_ARB_RUNTIME_DIR=/var/lib/sports-arb/runtime
 Environment=NODE_NO_WARNINGS=1
 Environment=CRYPTO_KALSHI_WS_REEVAL_MS=250
 Environment=CRYPTO_KALSHI_DISCOVER_MS=120000
+Environment=SOFTBALL_MIN_NET_EDGE=0.02
+Environment=SOFTBALL_MIN_SIZE=10
+Environment=SOFTBALL_MIN_COST=0.85
+Environment=SOFTBALL_MAX_COST=0.99
+Environment=SOFTBALL_MIN_LEG_ASK=0.01
+Environment=KALSHI_SOFTBALL_LIVE=0
+Environment=KALSHI_SOFTBALL_DOMAIN=weather
+Environment=KALSHI_SOFTBALL_MAX_CONTRACTS=25
+Environment=KALSHI_SOFTBALL_MAX_PACKAGE_USD=50
+Environment=KALSHI_SOFTBALL_MAX_DAILY_USD=250
+Environment=KALSHI_SOFTBALL_COOLDOWN_MS=120000
+Environment=KALSHI_SOFTBALL_TIF=fill_or_kill
 ExecStart=/opt/sports-arb/node_modules/.bin/tsx /opt/sports-arb/scripts/crypto-kalshi-ws-scanner.ts
 Restart=always
 RestartSec=15

@@ -307,6 +307,46 @@ export class KalshiClient {
     }
   }
 
+  async post<T>(path: string, body?: unknown): Promise<T> {
+    return this.request<T>("POST", path, body);
+  }
+
+  /**
+   * V2 event-market order create.
+   * Book side is YES-only: `bid` = buy YES, `ask` = sell YES (≈ buy NO @ 1-price).
+   */
+  async createOrderV2(order: {
+    ticker: string;
+    side: "bid" | "ask";
+    count: number | string;
+    price: number | string;
+    time_in_force?: "fill_or_kill" | "good_till_canceled" | "immediate_or_cancel";
+    self_trade_prevention_type?: "taker_at_cross" | "maker";
+    client_order_id?: string;
+    post_only?: boolean;
+  }): Promise<{
+    order_id: string;
+    client_order_id?: string;
+    fill_count: string;
+    remaining_count: string;
+    average_fill_price?: string;
+    ts_ms?: number;
+  }> {
+    if (!this.creds) throw new Error("Kalshi createOrderV2 requires credentials");
+    const count = typeof order.count === "number" ? order.count.toFixed(2) : order.count;
+    const price = typeof order.price === "number" ? order.price.toFixed(4) : order.price;
+    return this.post("/portfolio/events/orders", {
+      ticker: order.ticker,
+      side: order.side,
+      count,
+      price,
+      time_in_force: order.time_in_force ?? "immediate_or_cancel",
+      self_trade_prevention_type: order.self_trade_prevention_type ?? "taker_at_cross",
+      ...(order.client_order_id ? { client_order_id: order.client_order_id } : {}),
+      ...(order.post_only !== undefined ? { post_only: order.post_only } : {}),
+    });
+  }
+
   // ---- WebSocket helpers ----
 
   buildWsHeaders(): Record<string, string> {
