@@ -2,7 +2,7 @@
  * Live Kalshi softball execution for weather packages detected by the WS scanner.
  *
  * Gates (shared with shadow tagging): net≥2¢, size≥10, cost∈[0.85,0.99], minLegAsk≥1¢.
- * Live requires KALSHI_SOFTBALL_LIVE=1. Default domain allowlist = weather only.
+ * Live requires KALSHI_SOFTBALL_LIVE=1. Default domain allowlist = weather,crypto.
  *
  * Book side convention (Kalshi YES book):
  *   bid @ yesAsk  = buy YES
@@ -29,7 +29,7 @@ const MAX_PACKAGE_USD = Math.max(1, Number(process.env.KALSHI_SOFTBALL_MAX_PACKA
 const MAX_DAILY_USD = Math.max(1, Number(process.env.KALSHI_SOFTBALL_MAX_DAILY_USD ?? 250));
 const COOLDOWN_MS = Math.max(0, Number(process.env.KALSHI_SOFTBALL_COOLDOWN_MS ?? 120_000));
 const DOMAIN_ALLOW = new Set(
-  (process.env.KALSHI_SOFTBALL_DOMAIN ?? "weather")
+  (process.env.KALSHI_SOFTBALL_DOMAIN ?? "weather,crypto")
     .split(",")
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean),
