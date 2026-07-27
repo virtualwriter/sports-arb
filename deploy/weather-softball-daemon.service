@@ -1,5 +1,5 @@
 [Unit]
-Description=Polymarket weather YES-basket softball daemon (shadow; LIVE via env)
+Description=Polymarket weather softball daemon (YES basket + bin NO/NO; LIVE via env)
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=300

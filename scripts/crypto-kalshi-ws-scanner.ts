@@ -43,6 +43,11 @@ import {
   kalshiSoftballExecLabel,
   type KalshiSoftballRow,
 } from "./lib/kalshi-softball-exec.js";
+import {
+  enqueuePmSoftball,
+  pmSoftballExecLabel,
+  type PmSoftballRow,
+} from "./lib/pm-softball-exec.js";
 
 const DATA_DIR = resolve(
   process.env.SPORTS_ARB_DATA_DIR
@@ -141,6 +146,8 @@ function withSoftball(
     );
     if (liveKalshiClient && row.venue === "kalshi") {
       enqueueKalshiSoftball(liveKalshiClient, out as KalshiSoftballRow);
+    } else if (row.venue === "polymarket") {
+      enqueuePmSoftball(out as PmSoftballRow);
     }
   }
   return out;
@@ -747,6 +754,7 @@ async function main(): Promise<void> {
 
   log(`softball gates: ${softballGateLabel()}`);
   log(`kalshi softball exec: ${kalshiSoftballExecLabel()}`);
+  log(`pm softball exec: ${pmSoftballExecLabel()}`);
   ladders = await discoverLadders(client);
   await reconnectAndSubscribe(ladders);
 

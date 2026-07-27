@@ -28,6 +28,7 @@ Environment=KALSHI_SOFTBALL_MAX_PACKAGE_USD=50
 Environment=KALSHI_SOFTBALL_MAX_DAILY_USD=250
 Environment=KALSHI_SOFTBALL_COOLDOWN_MS=120000
 Environment=KALSHI_SOFTBALL_TIF=fill_or_kill
+Environment=WEATHER_SOFTBALL_LIVE=0
 ExecStart=/opt/sports-arb/node_modules/.bin/tsx /opt/sports-arb/scripts/crypto-kalshi-ws-scanner.ts
 Restart=always
 RestartSec=15
