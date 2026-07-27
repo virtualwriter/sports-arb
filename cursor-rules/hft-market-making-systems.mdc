@@ -1,0 +1,55 @@
+---
+description: HFT market-making systems architecture (Brett Harrison) — design lens for trading stack work
+globs: scripts/**/*.{ts,py},docs/**/*.md,docs/reference/quant-model-roadmap.md
+alwaysApply: false
+---
+
+# HFT Market-Making Systems (Internalized)
+
+Source: Brett Harrison (@BrettHarrison), 2026-07-23 —
+https://x.com/BrettHarrison/status/2080297166229094480
+
+Use this as the default mental model when designing, reviewing, or refactoring any trading path in this repo (monotonic arb, sports middle, Up/Down, Kalshi/Polymarket connectivity, Strat2 fair-value gates, offline learning). Components below are the real system; AI/ML is mostly offline.
+
+## Components
+
+### 1. Market data
+
+- Need realtime orderbook deltas and trades — not only for the quoted symbol, but for every related instrument used in theoretical fair value.
+- Exchange protocols differ: JSON/websocket (slowest) → FIX (common) → fixed-width binary (fastest).
+- Lowest-latency systems ingest market data on a **separate thread/process** so feed handling never stalls core trading logic.
+- **Here:** Polymarket CLOB WS / REST books, Gamma metadata, Kalshi orderbook deltas, state-feed shadows. Keep feed ingest isolated from decision/execution hot paths when latency or backpressure matters.
+
+### 2. Fair value
+
+- Fair value is the indifference point between buying and selling, after fees and other costs.
+- Complexity ranges from a few parameters on one/two instruments to highly multivariate basket models.
+- This is usually a firm's **most guarded IP**.
+- **Here:** Strat2 model edge over `1 + pMiddle`, Skellam/state models, monotonic package cost vs middle EV. Do not casually merge "signal heuristics" into fair value without treating it as the pricing core.
+
+### 3. Order placement
+
+- Predicting price is only half the P&L; **where/how** to place orders is equally decisive.
+- Includes: balanced two-sided quotes, queue position, order-rate-limit hygiene, cancel-to-avoid-adverse-selection, and sizing — all strategy-designer determined.
+- **Here:** maker vs taker choices, cancel/replace on sports/UpDown paths, capital gates, orphan shutdown, rate limits. Treat placement policy as first-class strategy, not glue code around a price prediction.
+
+### 4. Exchange connectivity
+
+- Orders and cancels use each venue's messaging protocol (JSON, FIX, binary).
+- Connectivity may be in-process with placement or a **segregated gateway**.
+- **Here:** `@polymarket/clob-client-v2`, venue WS auth, Kalshi APIs, VPN/country guards. Prefer clear gateway boundaries when adding venues or changing auth/transport.
+
+### 5. Offline training
+
+- Not part of the realtime tick→trade loop, but a major firm differentiator.
+- Fair-value and placement parameters are set by offline compute, often ML-guided (model discovery + parameter optimization). Large HFT GPU spend is mostly here.
+- Online GPU inference for valuation still rare — used when predictive power beats last-nanosecond latency. Purpose-built inference silicon may push more online ML into the loop over time.
+- **Here:** `llm:learn` / learning journals, shadow ledgers, ROI/report rollups, backtests, strategy-bucket rebuilds. Prefer offline parameter discovery → config/gates in the live loop; do not put heavy ML in the hot path unless predictive value clearly dominates latency/reliability.
+
+## Design rules derived from this model
+
+1. **Separate the five components** in code ownership and process boundaries when practical: feed → fair value → placement → gateway; training stays offline.
+2. **Do not confuse offline ML with realtime alpha.** Journals, fitters, and parameter sweeps improve models; they are not substitutes for fair value + placement logic in the live loop.
+3. **Fair value and placement are co-equal P&L drivers.** A change that only improves a forecast but ignores queue, cancels, fees, or sizing is incomplete.
+4. **Related instruments belong in the data plane.** If fair value uses another market/state feed, that feed is required market data, not optional enrichment.
+5. When reviewing architecture or the quant roadmap, map work onto these five buckets before inventing new layers.
