@@ -247,6 +247,7 @@ export async function executeKalshiSoftball(
 
   lastFire.set(row.packageId, now);
   const observedAt = new Date().toISOString();
+  const submitStartedMs = Date.now();
   log(
     `!!! LIVE FIRE ${row.packageKind} contracts=${count} cost=${row.packageCost.toFixed(3)} `
     + `net=${(row.netLockedEdge * 100).toFixed(2)}c notional≈$${notional.toFixed(2)} `
@@ -266,8 +267,10 @@ export async function executeKalshiSoftball(
         time_in_force: TIF,
         client_order_id: clientOrderId,
       };
+      const legStartedMs = Date.now();
       try {
         const resp = await client.createOrderV2(payload);
+        const rttMs = Date.now() - legStartedMs;
         const fillCount = Number((resp as { fill_count?: string }).fill_count ?? 0);
         results.push({
           type: "order",
@@ -275,16 +278,19 @@ export async function executeKalshiSoftball(
           ...payload,
           resp,
           fillCount,
+          rttMs,
         });
-        return { leg, resp, fillCount, ok: true as const };
+        return { leg, resp, fillCount, rttMs, ok: true as const };
       } catch (err) {
+        const rttMs = Date.now() - legStartedMs;
         results.push({
           type: "order_error",
           outcome: leg.outcome,
           ...payload,
+          rttMs,
           error: (err as Error).message.slice(0, 400),
         });
-        return { leg, error: (err as Error).message, ok: false as const };
+        return { leg, error: (err as Error).message, rttMs, ok: false as const };
       }
     }),
   );
@@ -337,6 +343,9 @@ export async function executeKalshiSoftball(
     }
   }
 
+  const submitMs = Date.now() - submitStartedMs;
+  const legRttMs = fills.map((f) => (f && "rttMs" in f ? Number(f.rttMs) : null));
+
   emitOrder({
     observedAt,
     type: "softball_attempt",
@@ -350,11 +359,14 @@ export async function executeKalshiSoftball(
     matchedContracts: minFill,
     notionalMatched: minFill * row.packageCost,
     spentTodayUsd,
+    submitMs,
+    legRttMs,
     results,
   });
 
   log(
     `done id=${row.packageId} fills=[${fillCounts.join(",")}] matched=${minFill} `
+    + `submitMs=${submitMs} legRttMs=[${legRttMs.map((ms) => (ms == null ? "?" : String(ms))).join(",")}] `
     + `spentToday=$${spentTodayUsd.toFixed(2)}`,
   );
   return minFill > 0 ? "fired" : "skipped";

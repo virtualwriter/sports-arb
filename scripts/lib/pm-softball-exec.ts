@@ -17,6 +17,7 @@ import {
   HARD_DISABLED,
   MAX_DAILY_USD,
   MAX_PACKAGE_USD,
+  MIN_MARKETABLE_BUY_USD,
   postFakBuyBatch,
   precisionSafeBuyShares,
 } from "../polymarket-real-monotonic-executor.js";
@@ -35,6 +36,32 @@ const LIVE = /^(1|true|yes)$/i.test(
 );
 const COOLDOWN_MS = Math.max(0, Number(process.env.WEATHER_SOFTBALL_COOLDOWN_MS ?? 120_000));
 const MIN_ORDER_SHARES = Number(process.env.WEATHER_SOFTBALL_MIN_ORDER_SHARES ?? 5);
+const EPSILON = 1e-9;
+
+/**
+ * CLOB rejects marketable BUY orders below $1 notional per leg.
+ * Shares needed at `price` so shares × price ≥ minUsd (centi-share ceil).
+ */
+export function minSharesForMarketableBuyUsd(
+  price: number,
+  minUsd: number = MIN_MARKETABLE_BUY_USD,
+): number {
+  if (!(price > 0) || !(minUsd > 0)) return Number.POSITIVE_INFINITY;
+  return Math.ceil((minUsd / price) * 100) / 100;
+}
+
+/** Floor share size so every leg clears the marketable-buy notional floor. */
+export function minPackageSharesForMarketableBuys(
+  legs: Array<{ price: number }>,
+  minOrderShares: number = MIN_ORDER_SHARES,
+  minUsd: number = MIN_MARKETABLE_BUY_USD,
+): number {
+  if (legs.length === 0) return minOrderShares;
+  return Math.max(
+    minOrderShares,
+    ...legs.map((leg) => minSharesForMarketableBuyUsd(leg.price, minUsd)),
+  );
+}
 
 export type PmSoftballRow = {
   packageId: string;
@@ -189,6 +216,19 @@ export async function executePmSoftball(row: PmSoftballRow): Promise<"fired" | "
     return "skipped";
   }
 
+  // Each FAK BUY must clear CLOB's $1 marketable-buy floor independently.
+  // Cheap legs dominate: e.g. 8¢ needs ≥12.5 shares (10×$0.08=$0.80 fails).
+  const minMarketableShares = minPackageSharesForMarketableBuys(legs);
+  if (shares + EPSILON < minMarketableShares) {
+    const cheapest = Math.min(...legs.map((l) => l.price));
+    log(
+      `skip live: touch size ${shares.toFixed(2)} < ${minMarketableShares.toFixed(2)} needed `
+      + `for $${MIN_MARKETABLE_BUY_USD} min notional (cheapestAsk=${(cheapest * 100).toFixed(1)}c) `
+      + `id=${row.packageId}`,
+    );
+    return "skipped";
+  }
+
   const dk = dayKey();
   if (dk !== spentDayKey) {
     spentDayKey = dk;
@@ -202,23 +242,15 @@ export async function executePmSoftball(row: PmSoftballRow): Promise<"fired" | "
     return "skipped";
   }
 
-  lastFire.set(row.packageId, now);
-  const observedAt = new Date().toISOString();
-  log(
-    `!!! LIVE FIRE ${row.packageKind} shares≈${shares.toFixed(2)} cost=${row.packageCost.toFixed(3)} `
-    + `net=${(row.netLockedEdge * 100).toFixed(2)}c notional≈$${notional.toFixed(2)} `
-    + `id=${row.packageId}`,
-  );
-
   let sized: number | null = null;
   for (
     let trial = Math.floor(shares * 100) / 100;
-    trial + 1e-9 >= MIN_ORDER_SHARES;
+    trial + EPSILON >= minMarketableShares;
     trial = Math.round((trial - 0.01) * 100) / 100
   ) {
     const ok = legs.every((leg) => {
-      const safe = precisionSafeBuyShares(leg.price, MIN_ORDER_SHARES, trial);
-      return !!safe && safe > 0;
+      const safe = precisionSafeBuyShares(leg.price, minMarketableShares, trial);
+      return !!safe && safe > 0 && safe * leg.price + EPSILON >= MIN_MARKETABLE_BUY_USD;
     });
     if (ok) {
       sized = trial;
@@ -226,13 +258,16 @@ export async function executePmSoftball(row: PmSoftballRow): Promise<"fired" | "
     }
   }
   if (sized == null) {
-    log(`skip live: no precision-safe share size in [${MIN_ORDER_SHARES}, ${shares}]`);
+    log(
+      `skip live: no precision-safe share size in [${minMarketableShares}, ${shares}] `
+      + `clearing $${MIN_MARKETABLE_BUY_USD}/leg id=${row.packageId}`,
+    );
     return "skipped";
   }
 
   const batch: Array<{ tokenId: string; price: number; shares: number }> = [];
   for (const leg of legs) {
-    const safe = precisionSafeBuyShares(leg.price, MIN_ORDER_SHARES, sized);
+    const safe = precisionSafeBuyShares(leg.price, minMarketableShares, sized);
     if (!(safe && safe > 0)) {
       log(`skip live: precision-safe shares unavailable @ ask=${leg.price}`);
       return "skipped";
@@ -241,6 +276,26 @@ export async function executePmSoftball(row: PmSoftballRow): Promise<"fired" | "
   }
   const matchedShares = Math.min(...batch.map((l) => l.shares));
   for (const leg of batch) leg.shares = matchedShares;
+
+  for (const leg of batch) {
+    const legNotional = leg.shares * leg.price;
+    if (legNotional + EPSILON < MIN_MARKETABLE_BUY_USD) {
+      log(
+        `skip live: leg notional $${legNotional.toFixed(4)} < $${MIN_MARKETABLE_BUY_USD} `
+        + `@ ask=${leg.price} x${leg.shares} id=${row.packageId}`,
+      );
+      return "skipped";
+    }
+  }
+
+  lastFire.set(row.packageId, now);
+  const observedAt = new Date().toISOString();
+  const liveNotionalPreview = matchedShares * row.packageCost;
+  log(
+    `!!! LIVE FIRE ${row.packageKind} shares≈${matchedShares.toFixed(2)} cost=${row.packageCost.toFixed(3)} `
+    + `net=${(row.netLockedEdge * 100).toFixed(2)}c notional≈$${liveNotionalPreview.toFixed(2)} `
+    + `minMarketableShares=${minMarketableShares.toFixed(2)} id=${row.packageId}`,
+  );
 
   try {
     const { client } = await clobClient();
