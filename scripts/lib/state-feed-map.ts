@@ -196,7 +196,26 @@ export async function ensureBinding(
   title: string,
 ): Promise<FeedBinding | null> {
   const existing = map.bindings[slug];
-  if (existing?.feedId) return existing;
+  if (existing?.feedId) {
+    if (asset !== "MLB") return existing;
+    // Doubleheader guard: both games of a split DH share one slug, so a cached
+    // binding can point at game 1 after it went Final (CLE@CIN 2026-07-28 fed
+    // game-1's Final 6-5 to the game-2 recorder all night). If the cached game
+    // is Final, re-resolve — the resolver prefers the live game.
+    try {
+      const snap = await pollMlbFeed(existing.feedId);
+      const isFinal = !snap.live && /final|game over|completed/i.test(snap.status ?? "");
+      if (!isFinal) return existing;
+      const fresh = await resolveMlbFeedId(slug, title);
+      if (fresh && fresh.feedId !== existing.feedId) {
+        map.bindings[slug] = fresh;
+        return fresh;
+      }
+    } catch {
+      // Verification is best-effort; fall back to the cached binding.
+    }
+    return existing;
+  }
   try {
     const binding = asset === "MLB"
       ? await resolveMlbFeedId(slug, title)

@@ -188,6 +188,57 @@ describe("mlb middle arb paper", () => {
     expect(window.watched[0].timeCostPlus3cMs).toBeTypeOf("number");
   });
 
+  it("drops pm_score jumps > 4 runs (cross-game feed, CLE@CIN 2026-07-28)", () => {
+    const rows: Record<string, unknown>[] = [];
+    const paper = new MlbMiddleArbPaperSidecar({
+      eventSlug: "mlb-cle-cin-2026-07-28",
+      eventTitle: "Guardians vs. Reds",
+      emit: (r) => rows.push(r),
+    });
+    const cache = buildMlbMiddleArbEventCache({
+      eventSlug: "mlb-cle-cin-2026-07-28",
+      eventTitle: "Guardians vs. Reds",
+      candidates: [totalCandidate(7.5, 8.5)],
+      shapes: new Map(),
+      feed: null,
+    });
+    paper.hydrateForTests(cache, { away: 6, home: 5 });
+
+    // pm following the other DH game reports 0-1 → jump 10, must be dropped.
+    paper.onPmScore("0-1", "Bot 2nd", Date.now());
+    expect(rows.find((r) => r.kind === "mlb_paper_score")).toBeUndefined();
+    expect(paper.getScoreState()).toMatchObject({ away: 6, home: 5 });
+
+    // A plausible one-event move still passes.
+    paper.onPmScore("6-6", "Bottom 9", Date.now());
+    expect(paper.getScoreState()).toMatchObject({ away: 6, home: 6 });
+  });
+
+  it("freezes score events once the game is Final", () => {
+    const rows: Record<string, unknown>[] = [];
+    const paper = new MlbMiddleArbPaperSidecar({
+      eventSlug: "mlb-cle-cin-2026-07-28",
+      eventTitle: "Guardians vs. Reds",
+      emit: (r) => rows.push(r),
+    });
+    const cache = buildMlbMiddleArbEventCache({
+      eventSlug: "mlb-cle-cin-2026-07-28",
+      eventTitle: "Guardians vs. Reds",
+      candidates: [totalCandidate(7.5, 8.5)],
+      shapes: new Map(),
+      feed: null,
+    });
+    paper.hydrateForTests(cache, { away: 6, home: 5 });
+    (paper as any).gameFinal = true;
+
+    // Non-statsapi feeds are dropped outright — even small moves.
+    paper.onPmScore("6-6", "Bottom 9", Date.now());
+    const ignored = rows.find((r) => r.kind === "mlb_paper_score_ignored") as any;
+    expect(ignored).toMatchObject({ source: "pm_score", reason: "game_final" });
+    expect(paper.getScoreState()).toMatchObject({ away: 6, home: 5 });
+    expect(rows.find((r) => r.kind === "mlb_paper_score_event")).toBeUndefined();
+  });
+
   it("treats an emptied ask side as a missing quote, not zero cost", () => {
     const paper = new MlbMiddleArbPaperSidecar({
       eventSlug: "mlb-sea-tb-2026-07-16",

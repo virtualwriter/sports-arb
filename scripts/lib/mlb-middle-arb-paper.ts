@@ -72,7 +72,7 @@ import {
   paChainTable,
 } from "./mlb-pa-chain.js";
 
-export const MLB_MIDDLE_ARB_PAPER_VERSION = "2026-07-28.1";
+export const MLB_MIDDLE_ARB_PAPER_VERSION = "2026-07-29.1";
 
 export type PaperEmit = (row: Record<string, unknown>) => void;
 export type PaperLog = (msg: string) => void;
@@ -256,6 +256,10 @@ export class MlbMiddleArbPaperSidecar {
   /** True only once StatsAPI itself has reported a score (bwin can't count —
    *  a bwin 0:0 must not unlock the bwin gate, see OAK@ARI 2026-07-21). */
   private statsapiSeen = false;
+  /** Once StatsAPI reports the game Final, freeze: no more scoring events.
+   *  A split-doubleheader recorder bound to the finished game otherwise loops
+   *  fake N-run "events" as other feeds perturb the state (CLE@CIN 2026-07-28). */
+  private gameFinal = false;
   private eventMap: EventMapFile | null = null;
   private feedId: string | null = null;
   private latestFeed: FeedSnapshot | null = null;
@@ -305,6 +309,7 @@ export class MlbMiddleArbPaperSidecar {
     this.scoreAway = score.away;
     this.scoreHome = score.home;
     this.seenScore = true;
+    this.statsapiSeen = true;
     this.latestFeed = cache.feed;
     this.paPriors = loadPaRbiPriors(process.env.PLR_MLB_PA_RBI_PRIOR_PATH ?? PATHS.mlbPaRbiPriors);
   }
@@ -404,6 +409,7 @@ export class MlbMiddleArbPaperSidecar {
       try {
         this.latestFeed = await pollMlbFeed(binding.feedId);
         this.statsapiPolls += 1;
+        this.noteGameFinal(this.latestFeed);
         if (this.latestFeed.scoreAway != null && this.latestFeed.scoreHome != null) {
           this.scoreAway = this.latestFeed.scoreAway;
           this.scoreHome = this.latestFeed.scoreHome;
@@ -562,7 +568,23 @@ export class MlbMiddleArbPaperSidecar {
     const parsed = parseScorePair(score);
     if (!parsed) return;
     // PM sports score is away-home for mlb slugs.
-    this.noteScore("pm_score", parsed.a, parsed.b, t, { period: period ?? null });
+    const away = parsed.a;
+    const home = parsed.b;
+    // Same sanity gate as bwin: statsapi polls every ~2s, so a genuine lead is
+    // at most one scoring event (≤4 runs). A bigger jump means pm is following
+    // a different game (split-DH game 2 after game 1's binding, CLE@CIN
+    // 2026-07-28) — drop it rather than poison the score state.
+    if (this.statsapiSeen) {
+      const jump = Math.abs(away - this.scoreAway) + Math.abs(home - this.scoreHome);
+      if (jump > 4) {
+        this.opts.log?.(
+          `pm_score ${away}-${home} ignored (jump ${jump} vs known `
+          + `${this.scoreAway}-${this.scoreHome} — game mismatch?)`,
+        );
+        return;
+      }
+    }
+    this.noteScore("pm_score", away, home, t, { period: period ?? null });
   }
 
   /** Stadium / phone tap — races against pm_score / bwin_score / statsapi on the same clock. */
@@ -721,12 +743,24 @@ export class MlbMiddleArbPaperSidecar {
     });
   }
 
+  /** Latch the Final flag from a StatsAPI snapshot (never un-latches). */
+  private noteGameFinal(feed: FeedSnapshot): void {
+    if (this.gameFinal) return;
+    if (!feed.live && /final|game over|completed/i.test(feed.status ?? "")) {
+      this.gameFinal = true;
+      this.opts.log?.(
+        `mlb-paper: game FINAL ${this.scoreAway}-${this.scoreHome} — score events frozen`,
+      );
+    }
+  }
+
   private async pollStatsApi(reason: string): Promise<void> {
     if (!this.feedId) return;
     try {
       const feed = await pollMlbFeed(this.feedId);
       this.statsapiPolls += 1;
       this.latestFeed = feed;
+      this.noteGameFinal(feed);
       if (this.cache) {
         this.cache = refreshMlbMiddleArbCacheState(this.cache, feed);
         this.emitRbiMenu("statsapi_poll");
@@ -868,6 +902,44 @@ export class MlbMiddleArbPaperSidecar {
     t: number,
     meta: Record<string, unknown> = {},
   ): void {
+    // Game over: only StatsAPI may still correct the recorded final score, and
+    // nothing generates scoring events anymore. Other feeds (pm/bwin/phone) are
+    // dropped outright — after a split-DH game 1 ends, pm_score follows game 2
+    // and would otherwise ping-pong the state into fake N-run events.
+    if (this.gameFinal) {
+      if (source !== "statsapi") {
+        this.opts.emit({
+          kind: "mlb_paper_score_ignored",
+          source,
+          reason: "game_final",
+          ignoredAway: away,
+          ignoredHome: home,
+          scoreAway: this.scoreAway,
+          scoreHome: this.scoreHome,
+        });
+        return;
+      }
+      if (away !== this.scoreAway || home !== this.scoreHome) {
+        const prevAway = this.scoreAway;
+        const prevHome = this.scoreHome;
+        this.scoreAway = away;
+        this.scoreHome = home;
+        this.seenScore = true;
+        this.opts.emit({
+          kind: "mlb_paper_score",
+          source,
+          prevAway,
+          prevHome,
+          scoreAway: away,
+          scoreHome: home,
+          runsDelta: away + home - prevAway - prevHome,
+          gameFinal: true,
+          ...meta,
+        });
+      }
+      return;
+    }
+
     // Phone is authoritative during the post-tap window: lagging feeds that still
     // show the old score must not rewind fair / kill the stale-book edge calc.
     const lock = this.phoneScoreLock;
