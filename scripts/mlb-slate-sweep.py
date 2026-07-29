@@ -20,7 +20,7 @@ import sys
 import time
 import urllib.request
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -152,6 +152,27 @@ def recorder_running(slug: str):
         return None
 
 
+def recorder_started_at(slug: str, handle):
+    """UTC datetime the running recorder started, or None if unknown."""
+    if SYSTEMD:
+        r = subprocess.run(
+            ["systemctl", "show", unit_name(slug),
+             "-p", "ActiveEnterTimestampMonotonic", "--value"],
+            capture_output=True, text=True,
+        )
+        try:
+            mono_us = int(r.stdout.strip())
+            age_s = time.clock_gettime(time.CLOCK_MONOTONIC) - mono_us / 1e6
+            return datetime.now(timezone.utc) - timedelta(seconds=age_s)
+        except (ValueError, OSError):
+            return None
+    pid_file = PID_DIR / f"{slug}.pid"
+    try:
+        return datetime.fromtimestamp(pid_file.stat().st_mtime, tz=timezone.utc)
+    except OSError:
+        return None
+
+
 def stop_recorder(slug: str, handle) -> None:
     if SYSTEMD:
         subprocess.run(["systemctl", "stop", unit_name(slug)])
@@ -253,6 +274,21 @@ def main() -> None:
                 log(f"reaping {slug} ({handle}, all games final)")
                 stop_recorder(slug, handle)
             continue
+
+        # Split-DH crossover: when game 1 of a shared-slug pair goes Final while
+        # its recorder is still up, that recorder is bound to the finished game
+        # (StatsAPI feed + Kalshi ticker). Restart it so it rebinds to game 2
+        # (CLE@CIN 2026-07-28 recorded game 1's Final 6-5 all through game 2).
+        if handle and len(group) > 1 and any(g["state"] == "Final" for g in group):
+            pending = [g for g in group if g["state"] != "Final"]
+            next_start = min(g["start"] for g in pending)
+            started = recorder_started_at(slug, handle)
+            # A recorder for the next game would have started within LEAD_MIN of
+            # its first pitch; anything older is the finished game's recorder.
+            if started is not None and started < next_start - timedelta(minutes=LEAD_MIN):
+                log(f"restarting {slug}: earlier game final, rebinding for next game")
+                stop_recorder(slug, handle)
+                handle = None
 
         if handle:
             continue  # already recording
