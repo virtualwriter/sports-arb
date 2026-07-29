@@ -30,7 +30,8 @@
  *      PLR_KALSHI=1 (MLB only: stream Kalshi total rungs via WS; needs API creds),
  *      PLR_KALSHI_EVENT (optional Kalshi totals event ticker; else discover from PLR_SLUG),
  *      PLR_SCORE_PING_PORT (MLB: HTTP phone tap UI + POST /ping → phone_ping race source),
- *      PLR_SCORE_PING_TOKEN / PLR_SCORE_PING_BIND (optional auth token / bind host)
+ *      PLR_SCORE_PING_TOKEN / PLR_SCORE_PING_BIND (optional auth token / bind host),
+ *      PLR_AWAY_LABEL / PLR_HOME_LABEL (optional stadium button labels; default slug codes)
  */
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -273,24 +274,31 @@ async function record(): Promise<void> {
     const slugBits = SLUG.split("-");
     const awayCode = (slugBits[1] ?? "away").toUpperCase();
     const homeCode = (slugBits[2] ?? "home").toUpperCase();
+    const awayLabel = (process.env.PLR_AWAY_LABEL ?? awayCode).trim() || awayCode;
+    const homeLabel = (process.env.PLR_HOME_LABEL ?? homeCode).trim() || homeCode;
     scorePing = startPhoneScorePingServer(paper, {
       port: PLR_SCORE_PING_PORT,
       bind: PLR_SCORE_PING_BIND,
       token: process.env.PLR_SCORE_PING_TOKEN,
-      awayLabel: awayCode,
-      homeLabel: homeCode,
+      awayLabel,
+      homeLabel,
       slug: SLUG,
       log,
       onEmit: (row) => emit(row),
     });
+    const localUrl = `http://127.0.0.1:${PLR_SCORE_PING_PORT}/?token=${scorePing.token}`;
     writeJson(join(DATA_DIR, "phone-score-ping-latest.json"), {
       slug: SLUG,
+      title: ev.title,
+      awayLabel,
+      homeLabel,
       port: PLR_SCORE_PING_PORT,
       bind: PLR_SCORE_PING_BIND,
       token: scorePing.token,
-      url: `http://127.0.0.1:${PLR_SCORE_PING_PORT}/?token=${scorePing.token}`,
-      title: ev.title,
+      url: localUrl,
+      startedAt: new Date().toISOString(),
     });
+    log(`phone-score-ping READY ${awayLabel} @ ${homeLabel} → ${localUrl}`);
   } else if (PLR_SCORE_PING_PORT > 0) {
     log(`phone-score-ping: port set but MLB paper sidecar unavailable — skipping`);
   }

@@ -27,6 +27,7 @@
     "sports:daemon": "bash scripts/govern-sports-middle-daemon.sh",
     "daemon": "tsx scripts/polymarket-arb-daemon.ts",
     "kalshi:mlb-screener": "tsx scripts/kalshi-mlb-screener.ts",
+    "phone:mets-dodgers": "bash scripts/run-phone-tracker-mets-dodgers.sh",
     "state-feed:shadow": "tsx scripts/state-feed-shadow-logger.ts",
     "strat1:score": "PYTHONPATH=scripts python3 scripts/score_strat1_lag.py",
     "strat2:score": "PYTHONPATH=scripts python3 scripts/score_strat2_state.py",
