@@ -72,7 +72,7 @@ import {
   paChainTable,
 } from "./mlb-pa-chain.js";
 
-export const MLB_MIDDLE_ARB_PAPER_VERSION = "2026-07-18.1";
+export const MLB_MIDDLE_ARB_PAPER_VERSION = "2026-07-28.1";
 
 export type PaperEmit = (row: Record<string, unknown>) => void;
 export type PaperLog = (msg: string) => void;
@@ -113,6 +113,17 @@ type PackageSnapshot = {
   terminal: boolean;
   screenOk: boolean;
   screenReason: MlbMiddleArbFilterReason;
+  /**
+   * Delta-anchored parallel track (paper A/B vs control `screenOk`):
+   *   p_book_pre = cost - 1  (ask-implied level at freeze)
+   *   p_cal = p_book_pre + (p_model_post - p_model_pre)
+   *   fair_cal = 1 + p_cal  →  edge_cal = p_model_post - p_model_pre (= edgeGain)
+   * Same Strat2 leg/cost/terminal/edge gates; only the fair source changes.
+   */
+  deltaFair: number | null;
+  deltaEdge: number | null;
+  deltaScreenOk: boolean;
+  deltaScreenReason: MlbMiddleArbFilterReason;
   maxLiveCost: number;
 };
 
@@ -208,6 +219,26 @@ function summarizeWatch(w: WatchedPackage) {
   };
 }
 
+function summarizeDeltaFire(s: PackageSnapshot) {
+  return {
+    track: "delta_anchored" as const,
+    venue: s.venue,
+    lineFamily: s.lineFamily,
+    marketType: s.marketType,
+    cost0: s.cost,
+    preP: s.preP,
+    pMiddle: s.pMiddle,
+    /** Ask-implied book p at freeze (= cost - 1). */
+    bookPPre: s.cost - 1,
+    deltaFair: s.deltaFair,
+    deltaEdge: s.deltaEdge,
+    edgeGain: s.edgeGain,
+    postEdge: s.postEdge,
+    screenOk: s.deltaScreenOk,
+    screenReason: s.deltaScreenReason,
+  };
+}
+
 export class MlbMiddleArbPaperSidecar {
   readonly opts: {
     eventSlug: string;
@@ -235,6 +266,8 @@ export class MlbMiddleArbPaperSidecar {
 
   private scoreEvents = 0;
   private wouldFire = 0;
+  /** Parallel delta-anchored track fires (does not affect `wouldFire` control). */
+  private wouldFireDelta = 0;
   private statsapiPolls = 0;
   private lastMenuKey = "";
   private paPriors: PaRbiPriors | null = null;
@@ -256,6 +289,7 @@ export class MlbMiddleArbPaperSidecar {
     return {
       scoreEvents: this.scoreEvents,
       wouldFire: this.wouldFire,
+      wouldFireDelta: this.wouldFireDelta,
       packages: this.cache?.packages.length ?? 0,
       statsapiPolls: this.statsapiPolls,
       feedId: this.feedId,
@@ -402,6 +436,8 @@ export class MlbMiddleArbPaperSidecar {
       allShapes,
       shapes: [...new Set(this.cache.packages.map((p) => p.shapeKey))],
       fairModel: chain ? "pa_chain" : "poisson",
+      /** Dual paper tracks: control = pa_chain absolute; delta_anchored = book level + model shock. */
+      paperTracks: ["control", "delta_anchored"],
       paChain: chain
         ? {
             path: chain.path,
@@ -1034,6 +1070,9 @@ export class MlbMiddleArbPaperSidecar {
     for (const w of watched) {
       if (w.screenOk) this.wouldFire += 1;
     }
+    // Delta track screens the full snapshot universe (not just control watch list).
+    const deltaFires = snapshots.filter((s) => s.deltaScreenOk);
+    this.wouldFireDelta += deltaFires.length;
     this.scoreEvents += 1;
 
     this.track = {
@@ -1095,6 +1134,8 @@ export class MlbMiddleArbPaperSidecar {
       topEdgeGains: snapshots.slice(0, 8).map(summarizeSnap),
       topStaleBookEdges: staleBookEdges.slice(0, 16),
       wouldFire: watched.filter((w) => w.screenOk).map(summarizeWatch),
+      /** Parallel paper track: book level + model score delta only (see PackageSnapshot). */
+      wouldFireDelta: deltaFires.map(summarizeDeltaFire),
       allPositiveGain: snapshots.filter((s) => (phoneLead ? s.postEdge > 0 : s.edgeGain > 0)).map(summarizeSnap),
     });
 
@@ -1124,6 +1165,7 @@ export class MlbMiddleArbPaperSidecar {
       + (phoneLead ? `PHONE_AUTH staleBooks ` : `hunt=${hunt.slice(0, 3).map((h) => h.lineFamily).join(",") || "n/a"} `)
       + `top=${topLabel} `
       + `wouldFire=${watched.filter((w) => w.screenOk).length}`
+      + ` wouldFireDelta=${deltaFires.length}`
       + (typeof paCalibration?.pWeightRealized === "number"
         ? ` pWeight=${(paCalibration.pWeightRealized * 100).toFixed(0)}%`
         : ""),
@@ -1252,6 +1294,26 @@ export class MlbMiddleArbPaperSidecar {
           screenReason = edgeScreen.reason;
         }
 
+        // Delta-anchored A/B: book sets level (ask-implied), model only the shock.
+        // edge_cal = (p_post - p_pre) = edgeGain when preP is available.
+        let deltaFair: number | null = null;
+        let deltaEdge: number | null = null;
+        let deltaScreenOk = false;
+        let deltaScreenReason: MlbMiddleArbFilterReason = "no_state";
+        if (pre && Number.isFinite(pre.pMiddle) && Number.isFinite(post.pMiddle)) {
+          deltaEdge = post.pMiddle - pre.pMiddle;
+          deltaFair = cost + deltaEdge; // = 1 + (cost - 1) + (p_post - p_pre)
+          if (!legs.ok) {
+            deltaScreenReason = legs.reason;
+          } else if (pkg.terminal) {
+            deltaScreenReason = "terminal_state";
+          } else {
+            const deltaScreen = screenMlbMiddleArbEdge(deltaFair, cost);
+            deltaScreenOk = deltaScreen.ok;
+            deltaScreenReason = deltaScreen.reason;
+          }
+        }
+
         out.push({
           packageId: pkg.packageId,
           venue,
@@ -1271,6 +1333,10 @@ export class MlbMiddleArbPaperSidecar {
           terminal: pkg.terminal,
           screenOk,
           screenReason,
+          deltaFair,
+          deltaEdge,
+          deltaScreenOk,
+          deltaScreenReason,
           maxLiveCost: pkg.costBands.maxLiveCost,
         });
       }

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Nightly collector: append the day's wouldFire opportunities to the backtest repo.
 
-For every real (non-phone) wouldFire package in the MLB paper logs for DATE:
+For every real (non-phone) wouldFire package in the MLB paper logs for DATE
+(control = pa_chain absolute fair; delta_anchored = book level + model shock):
   - replay the matching ladder recording to the fire timestamp
   - capture TOB ask price+size for both legs (YES lo / NO hi); fillable = min
   - settle vs StatsAPI final: middle pays $2 inside the band, $1 outside
@@ -133,8 +134,13 @@ def recordings_for(day: str):
 
 
 def extract_fires(paper_files, day):
-    """Every real wouldFire occurrence, deduped per (slug, score, package),
-    enriched with ms timing from the matching mlb_paper_score_window."""
+    """Every real wouldFire occurrence, deduped per (slug, score, package, track),
+    enriched with ms timing from the matching mlb_paper_score_window.
+
+    Tracks:
+      control         — pa_chain absolute fair (existing wouldFire)
+      delta_anchored  — book ask-implied level + model score delta only
+    """
     fires, seen = [], set()
     windows = {}  # (slug, eventId) -> score_window record
     for path, slug, feed_id in paper_files:
@@ -149,30 +155,40 @@ def extract_fires(paper_files, day):
                         continue
                     if o.get("source") == "phone_ping" or o.get("booksFrozenAtTap"):
                         continue  # synthetic phone tests
-                    wf = o.get("wouldFire") or [
-                        g for g in (o.get("topEdgeGains") or []) if g.get("screenOk")
+                    tracks = [
+                        ("control", o.get("wouldFire") or [
+                            g for g in (o.get("topEdgeGains") or []) if g.get("screenOk")
+                        ]),
+                        ("delta_anchored", o.get("wouldFireDelta") or []),
                     ]
-                    for g in wf:
-                        key = (slug, o.get("scoreAway"), o.get("scoreHome"),
-                               g.get("venue"), g.get("lineFamily"), g.get("marketType"))
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        fires.append({
-                            "day": day, "slug": slug, "feedId": feed_id,
-                            "t": o.get("t"),
-                            "eventId": o.get("eventId"),
-                            "scoreT0": o.get("t0"),
-                            "fireDtMs": (o.get("t") - o.get("t0"))
-                            if o.get("t") and o.get("t0") else None,
-                            "scoreAway": o.get("scoreAway"), "scoreHome": o.get("scoreHome"),
-                            "source": o.get("source"),
-                            "venue": g.get("venue"),
-                            "marketType": g.get("marketType"),
-                            "lineFamily": g.get("lineFamily"),
-                            "cost0": g.get("cost0") or g.get("cost"),
-                            "postEdge": g.get("postEdge"),
-                        })
+                    for track, wf in tracks:
+                        for g in wf:
+                            if track == "delta_anchored" and not g.get("screenOk", True):
+                                continue
+                            key = (slug, o.get("scoreAway"), o.get("scoreHome"),
+                                   g.get("venue"), g.get("lineFamily"), g.get("marketType"),
+                                   track)
+                            if key in seen:
+                                continue
+                            seen.add(key)
+                            fires.append({
+                                "day": day, "slug": slug, "feedId": feed_id,
+                                "track": track,
+                                "t": o.get("t"),
+                                "eventId": o.get("eventId"),
+                                "scoreT0": o.get("t0"),
+                                "fireDtMs": (o.get("t") - o.get("t0"))
+                                if o.get("t") and o.get("t0") else None,
+                                "scoreAway": o.get("scoreAway"), "scoreHome": o.get("scoreHome"),
+                                "source": o.get("source"),
+                                "venue": g.get("venue"),
+                                "marketType": g.get("marketType"),
+                                "lineFamily": g.get("lineFamily"),
+                                "cost0": g.get("cost0") or g.get("cost"),
+                                "postEdge": g.get("postEdge"),
+                                "deltaEdge": g.get("deltaEdge"),
+                                "edgeGain": g.get("edgeGain"),
+                            })
                 elif '"mlb_paper_score_window"' in line:
                     try:
                         o = json.loads(line)
@@ -329,7 +345,12 @@ def attach_edge_life(fires, recs):
 
         for f in fl:
             yes_k, no_k = package_leg_keys(f)
-            cost0, edge = f["costFill"], f.get("postEdge") or 0
+            cost0 = f["costFill"]
+            # Delta track's claimed edge is the model shock; control uses absolute postEdge.
+            if (f.get("track") or "control") == "delta_anchored":
+                edge = f.get("deltaEdge") if f.get("deltaEdge") is not None else (f.get("edgeGain") or 0)
+            else:
+                edge = f.get("postEdge") or 0
             asks = {}
             res = {"move3cMs": None, "halfGoneMs": None, "goneMs": None,
                    "pulled": False}
@@ -447,7 +468,8 @@ def repo_keys():
                     continue
                 keys.add((o.get("slug"), o.get("t"), o.get("venue"),
                           o.get("marketType"), o.get("lineFamily"),
-                          o.get("scoreAway"), o.get("scoreHome")))
+                          o.get("scoreAway"), o.get("scoreHome"),
+                          o.get("track") or "control"))
     return keys
 
 
@@ -469,10 +491,11 @@ def main():
     settle(fires, fetch_finals(day))
     attach_edge_life(fires, recs)
 
-    # first-fire flag per unique package (the fill-once backtest view)
+    # first-fire flag per unique package×track (the fill-once backtest view)
     first_seen = set()
     for f in sorted(fires, key=lambda f: f["t"] or 0):
-        key = (f["slug"], f["venue"], f["marketType"], f["lineFamily"], f.get("team", ""))
+        key = (f["slug"], f["venue"], f["marketType"], f["lineFamily"],
+               f.get("team", ""), f.get("track") or "control")
         f["firstFire"] = key not in first_seen
         first_seen.add(key)
 
@@ -484,7 +507,7 @@ def main():
                 pending += 1  # game still live — pick it up on the next run
                 continue
             key = (f["slug"], f["t"], f["venue"], f["marketType"], f["lineFamily"],
-                   f["scoreAway"], f["scoreHome"])
+                   f["scoreAway"], f["scoreHome"], f.get("track") or "control")
             if key in existing:
                 continue
             f["collectedAt"] = datetime.now().isoformat(timespec="seconds")
@@ -493,6 +516,16 @@ def main():
 
     settled = [f for f in fires if "pnlTob" in f]
     uniq = [f for f in settled if f["firstFire"]]
+    by_track = {}
+    for track in ("control", "delta_anchored"):
+        ts = [f for f in settled if (f.get("track") or "control") == track]
+        tu = [f for f in ts if f["firstFire"]]
+        by_track[track] = {
+            "fires": len(ts),
+            "uniquePackages": len(tu),
+            "pnlTobAllFires": round(sum(f["pnlTob"] for f in ts), 2),
+            "pnlTobFirstFire": round(sum(f["pnlTob"] for f in tu), 2),
+        }
     summary = {
         "day": day,
         "collectedAt": datetime.now().isoformat(timespec="seconds"),
@@ -503,11 +536,16 @@ def main():
         "pendingNoFinal": pending,
         "skipped": len(fires) - len(settled) - pending,
         "uniquePackages": len(uniq),
-        "causes": {c: sum(1 for f in settled if f.get("cause") == c)
+        "byTrack": by_track,
+        "causes": {c: sum(1 for f in settled if f.get("cause") == c
+                          and (f.get("track") or "control") == "control")
                    for c in ("lag", "model", "quote")},
-        "pnlTobAllFires": round(sum(f["pnlTob"] for f in settled), 2),
-        "pnlTobFirstFire": round(sum(f["pnlTob"] for f in uniq), 2),
-        "notionalFirstFire": round(sum(f["costFill"] * f["size"] for f in uniq), 2),
+        # Headline numbers stay control-only so day-over-day series is comparable.
+        "pnlTobAllFires": by_track["control"]["pnlTobAllFires"],
+        "pnlTobFirstFire": by_track["control"]["pnlTobFirstFire"],
+        "notionalFirstFire": round(
+            sum(f["costFill"] * f["size"] for f in uniq
+                if (f.get("track") or "control") == "control"), 2),
     }
     day_logged = False
     if DAYS.exists():

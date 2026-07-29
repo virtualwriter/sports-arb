@@ -172,6 +172,13 @@ describe("mlb middle arb paper", () => {
       postEdge: expect.any(Number),
       edgeGain: expect.any(Number),
     });
+    // Parallel delta-anchored track is always logged (may be empty if no shock ≥ 8¢).
+    expect(Array.isArray(scoreEvent.wouldFireDelta)).toBe(true);
+    for (const d of scoreEvent.wouldFireDelta) {
+      expect(d.track).toBe("delta_anchored");
+      expect(d.deltaEdge).toBeCloseTo(d.edgeGain, 5);
+      expect(d.screenOk).toBe(true);
+    }
 
     const window = rows.find((r) => r.kind === "mlb_paper_score_window") as any;
     expect(window).toBeTruthy();
