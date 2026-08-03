@@ -71,13 +71,19 @@ import {
   computeMlbSpreadBandState,
   paChainTable,
 } from "./mlb-pa-chain.js";
+import {
+  kalshiYesTobFromPaperMap,
+  parseMlbInning,
+  selectEarlyOverSoftball,
+} from "./mlb-over-softball.js";
+import { enqueueMlbOverSoftball } from "./mlb-over-softball-exec.js";
 
 export const MLB_MIDDLE_ARB_PAPER_VERSION = "2026-07-29.1";
 
 export type PaperEmit = (row: Record<string, unknown>) => void;
 export type PaperLog = (msg: string) => void;
 
-type TobSide = { ask: number; askSize: number; t: number };
+type TobSide = { ask: number; askSize: number; t: number; ticker?: string };
 type Venue = "pm" | "kalshi";
 
 type ScoreSignals = {
@@ -265,6 +271,8 @@ export class MlbMiddleArbPaperSidecar {
   private latestFeed: FeedSnapshot | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private track: ActiveScoreTrack | null = null;
+  /** Latest balls/strikes from the bwin scoreboard push (display only). */
+  private lastCount: { balls: number; strikes: number; t: number } | null = null;
   private trackTimer: ReturnType<typeof setTimeout> | null = null;
   private scoringLock: Promise<void> = Promise.resolve();
 
@@ -536,6 +544,7 @@ export class MlbMiddleArbPaperSidecar {
     side: string;
     bestAsk?: number | null;
     bestAskSize?: number | null;
+    ticker?: string | null;
     t?: number;
   }): void {
     const t = row.t ?? Date.now();
@@ -546,7 +555,13 @@ export class MlbMiddleArbPaperSidecar {
     }
     const prev = this.kalshiTob.get(key);
     const ask = Number(row.bestAsk);
-    this.kalshiTob.set(key, { ask, askSize: Number(row.bestAskSize), t });
+    const ticker = row.ticker ? String(row.ticker) : prev?.ticker;
+    this.kalshiTob.set(key, {
+      ask,
+      askSize: Number(row.bestAskSize),
+      t,
+      ...(ticker ? { ticker } : {}),
+    });
 
     if (!this.track || t < this.track.t0) return;
 
@@ -647,6 +662,7 @@ export class MlbMiddleArbPaperSidecar {
     away: number;
     home: number;
     seen: boolean;
+    count: null | { balls: number; strikes: number; ageMs: number };
     phoneLock: null | { away: number; home: number; remainingMs: number };
     track: null | {
       t0: number;
@@ -664,6 +680,13 @@ export class MlbMiddleArbPaperSidecar {
       away: this.scoreAway,
       home: this.scoreHome,
       seen: this.seenScore,
+      count: this.lastCount
+        ? {
+            balls: this.lastCount.balls,
+            strikes: this.lastCount.strikes,
+            ageMs: Date.now() - this.lastCount.t,
+          }
+        : null,
       phoneLock: lock
         ? {
             away: lock.away,
@@ -695,6 +718,9 @@ export class MlbMiddleArbPaperSidecar {
       }
     }
     const sb = payload?.scoreboard ?? payload;
+    if (typeof sb?.balls === "number" && typeof sb?.strikes === "number") {
+      this.lastCount = { balls: sb.balls, strikes: sb.strikes, t };
+    }
     const parsed = parseScorePair(String(sb?.score ?? ""));
     if (!parsed) return;
     // bwin is usually home:away — pick orientation closest to current/StatsAPI.
@@ -895,6 +921,47 @@ export class MlbMiddleArbPaperSidecar {
     });
   }
 
+  /** Early Kalshi next-line over softballs (shadow/LIVE via exec module). */
+  private maybeFireEarlyOverSoftball(
+    source: string,
+    prevAway: number,
+    prevHome: number,
+    away: number,
+    home: number,
+    t: number,
+    meta: Record<string, unknown>,
+  ): void {
+    const runsDelta = away + home - prevAway - prevHome;
+    if (!(runsDelta > 0)) return;
+    const period =
+      (typeof meta.period === "string" ? meta.period : null)
+      ?? this.latestFeed?.period
+      ?? this.cache?.feed?.period
+      ?? null;
+    const inning = parseMlbInning(period);
+    const curTotal = away + home;
+    const candidate = selectEarlyOverSoftball({
+      inning,
+      runsDelta,
+      curTotal,
+      kalshiYesTob: kalshiYesTobFromPaperMap(this.kalshiTob),
+    });
+    if (!candidate) return;
+    this.opts.log?.(
+      `mlb-over-softball: ${this.opts.eventSlug} inn${candidate.inning} `
+      + `${candidate.runsDelta}R → over${candidate.line} @${candidate.ask.toFixed(2)} `
+      + `cats=${candidate.cats.join(",")}`,
+    );
+    enqueueMlbOverSoftball({
+      slug: this.opts.eventSlug,
+      t0: t,
+      scoreAway: away,
+      scoreHome: home,
+      source,
+      candidate,
+    });
+  }
+
   private noteScore(
     source: string,
     away: number,
@@ -1028,6 +1095,12 @@ export class MlbMiddleArbPaperSidecar {
     t: number,
     meta: Record<string, unknown>,
   ): Promise<void> {
+    // Early next-line over softballs: fire on bwin_score ASAP (before StatsAPI
+    // poll) using live Kalshi TOB — matches bwin-t0 resting-ask backtest.
+    if (source === "bwin_score") {
+      this.maybeFireEarlyOverSoftball(source, prevAway, prevHome, away, home, t, meta);
+    }
+
     if (!this.cache) return;
     this.finishTrack("superseded");
 

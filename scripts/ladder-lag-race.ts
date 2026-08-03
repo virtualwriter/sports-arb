@@ -18,7 +18,7 @@
  *   Soccer — T+1 shock cache + filters → data/soccer-middle-arb-paper-*.jsonl
  *   MLB    — Strat2 score-trigger + PA-weighted RBI menu shadow → data/mlb-middle-arb-paper-*.jsonl
  *            Confirm/hunt still Strat2 on realized RBI; PA priors weight pre-confirm branches.
- *   (no orders)
+ *            Early next-line over softballs: shadow always; LIVE via MLB_OVER_SOFTBALL_LIVE=1.
  *
  * Env: PLR_SLUG (required), PLR_MODE (mlb|soccer, default mlb),
  *      PLR_DURATION_MS (4h cap), PLR_BWIN_SPORT (auto by mode), PLR_BWIN_FIXTURE (override),
@@ -30,7 +30,9 @@
  *      PLR_KALSHI=1 (MLB only: stream Kalshi total rungs via WS; needs API creds),
  *      PLR_KALSHI_EVENT (optional Kalshi totals event ticker; else discover from PLR_SLUG),
  *      PLR_SCORE_PING_PORT (MLB: HTTP phone tap UI + POST /ping → phone_ping race source),
- *      PLR_SCORE_PING_TOKEN / PLR_SCORE_PING_BIND (optional auth token / bind host)
+ *      PLR_SCORE_PING_TOKEN / PLR_SCORE_PING_BIND (optional auth token / bind host),
+ *      MLB_OVER_SOFTBALL_LIVE (default 0; FOK buy early next-line Kalshi overs on bwin_score),
+ *      MLB_OVER_SOFTBALL_MAX_CONTRACTS / _MAX_USD / _MAX_DAILY_USD / _MAX_ASK
  */
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -57,6 +59,12 @@ import {
   type KalshiMlbLadderRow,
 } from "./lib/kalshi-mlb-ws-feed.js";
 import { startPhoneScorePingServer } from "./lib/phone-score-ping-server.js";
+import { KalshiClient } from "./lib/kalshi-client.js";
+import {
+  configureMlbOverSoftballExec,
+  mlbOverSoftballExecLabel,
+  MLB_OVER_SOFTBALL_LIVE,
+} from "./lib/mlb-over-softball-exec.js";
 
 type PaperSidecar = SoccerMiddleArbPaperSidecar | MlbMiddleArbPaperSidecar;
 
@@ -240,10 +248,26 @@ async function record(): Promise<void> {
       if (
         kind.includes("paper_middle")
         || kind.includes("mlb_paper")
+        || kind.includes("mlb_over_softball")
       ) {
         emit(row);
       }
     };
+    if (wantMlbPaper && PLR_KALSHI) {
+      try {
+        const kalshiClient = new KalshiClient();
+        configureMlbOverSoftballExec({ client: kalshiClient, emit: paperEmit });
+        log(`mlb-over-softball: ${mlbOverSoftballExecLabel()}`);
+        if (MLB_OVER_SOFTBALL_LIVE) {
+          log("mlb-over-softball: LIVE orders enabled");
+        }
+      } catch (e) {
+        configureMlbOverSoftballExec({ client: null, emit: paperEmit });
+        log(
+          `mlb-over-softball: KalshiClient unavailable (${String(e).slice(0, 80)}) — shadow only`,
+        );
+      }
+    }
     try {
       if (wantMlbPaper) {
         paper = new MlbMiddleArbPaperSidecar({
