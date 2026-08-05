@@ -21,9 +21,9 @@ const ORDERS_PATH = join(DATA_DIR, "mlb-over-softball-orders.jsonl");
 export const MLB_OVER_SOFTBALL_LIVE = /^(1|true|yes)$/i.test(
   process.env.MLB_OVER_SOFTBALL_LIVE ?? "",
 );
-const MAX_CONTRACTS = Math.max(1, Number(process.env.MLB_OVER_SOFTBALL_MAX_CONTRACTS ?? 5));
-const MAX_USD = Math.max(1, Number(process.env.MLB_OVER_SOFTBALL_MAX_USD ?? 10));
-const MAX_DAILY_USD = Math.max(1, Number(process.env.MLB_OVER_SOFTBALL_MAX_DAILY_USD ?? 100));
+const MAX_CONTRACTS = Math.max(1, Number(process.env.MLB_OVER_SOFTBALL_MAX_CONTRACTS ?? 25));
+const MAX_USD = Math.max(1, Number(process.env.MLB_OVER_SOFTBALL_MAX_USD ?? 25));
+const MAX_DAILY_USD = Math.max(1, Number(process.env.MLB_OVER_SOFTBALL_MAX_DAILY_USD ?? 200));
 const MAX_ASK = Math.min(0.99, Math.max(0.05, Number(process.env.MLB_OVER_SOFTBALL_MAX_ASK ?? 0.94)));
 const TIF = (process.env.MLB_OVER_SOFTBALL_TIF ?? "fill_or_kill") as
   | "fill_or_kill"
