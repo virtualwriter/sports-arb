@@ -20,6 +20,8 @@ export type KalshiYesTobEntry = {
   askSize: number;
   ticker: string;
   t?: number;
+  /** YES ask ladder from depthNo: [yesAskPrice, size], best→worse. */
+  askLevels?: Array<[number, number]>;
 };
 
 export type MlbOverSoftballCandidate = {
@@ -31,7 +33,125 @@ export type MlbOverSoftballCandidate = {
   curTotal: number;
   inning: number;
   runsDelta: number;
+  askLevels?: Array<[number, number]>;
 };
+
+/** Plan a walk of the YES ask ladder up to ≥ tobMult × TOB size within maxAsk. */
+export type AskWalkPlan = {
+  tobAsk: number;
+  tobSize: number;
+  targetSize: number;
+  count: number;
+  limitPrice: number;
+  vwap: number;
+  levelsTaken: Array<[number, number]>;
+};
+
+/**
+ * Convert Kalshi NO-bid depth levels `[noBid, size]` → YES ask levels `[1-noBid, size]`.
+ */
+export function yesAskLevelsFromNoBids(
+  depthNo: Array<[number, number]> | null | undefined,
+  tobAsk: number,
+  tobSize: number,
+): Array<[number, number]> {
+  const levels: Array<[number, number]> = [];
+  if (depthNo?.length) {
+    for (const lvl of depthNo) {
+      if (!lvl || lvl.length < 2) continue;
+      const noBid = Number(lvl[0]);
+      const sz = Number(lvl[1]);
+      if (!(noBid >= 0 && noBid < 1) || !(sz > 0)) continue;
+      levels.push([Number((1 - noBid).toFixed(4)), sz]);
+    }
+  }
+  if (levels.length === 0 && tobAsk > 0 && tobSize > 0) {
+    levels.push([tobAsk, tobSize]);
+  }
+  levels.sort((a, b) => a[0] - b[0]);
+  // Deduplicate prices (sum sizes)
+  const merged = new Map<number, number>();
+  for (const [p, s] of levels) {
+    merged.set(p, (merged.get(p) ?? 0) + s);
+  }
+  return [...merged.entries()].sort((a, b) => a[0] - b[0]);
+}
+
+/**
+ * Walk YES asks from best until we reach targetSize (= max(tobSize, floor(tobMult*tobSize)))
+ * or hit maxAsk / maxContracts / maxUsd. Limit price = worst level included.
+ */
+export function planAskWalk(input: {
+  tobAsk: number;
+  tobSize: number;
+  askLevels?: Array<[number, number]> | null;
+  maxAsk: number;
+  maxContracts: number;
+  maxUsd: number;
+  tobMult?: number;
+}): AskWalkPlan {
+  const tobMult = Math.max(1, input.tobMult ?? 2);
+  const tobAsk = input.tobAsk;
+  const tobSize = Math.max(0, input.tobSize);
+  const levels =
+    input.askLevels && input.askLevels.length > 0
+      ? [...input.askLevels].sort((a, b) => a[0] - b[0])
+      : ([[tobAsk, tobSize]] as Array<[number, number]>);
+
+  const targetSize = Math.min(
+    input.maxContracts,
+    Math.max(Math.floor(tobSize), Math.floor(tobSize * tobMult)),
+  );
+
+  let count = 0;
+  let notional = 0;
+  let limitPrice = tobAsk;
+  const levelsTaken: Array<[number, number]> = [];
+
+  for (const [ask, sz] of levels) {
+    if (!(ask > 0) || ask > input.maxAsk + 1e-9) break;
+    if (count >= targetSize) break;
+    const roomContracts = targetSize - count;
+    const roomUsd = input.maxUsd - notional;
+    if (roomUsd <= 0) break;
+    const maxByUsd = Math.floor(roomUsd / ask + 1e-9);
+    const take = Math.min(Math.floor(sz), roomContracts, maxByUsd);
+    if (take <= 0) {
+      if (maxByUsd <= 0) break;
+      continue;
+    }
+    levelsTaken.push([ask, take]);
+    count += take;
+    notional += take * ask;
+    limitPrice = ask;
+  }
+
+  // If depth missing/thin, still try at least TOB size at tob ask (capped).
+  if (count <= 0 && tobAsk <= input.maxAsk && tobSize > 0) {
+    const take = Math.min(
+      Math.floor(tobSize),
+      input.maxContracts,
+      Math.floor(input.maxUsd / tobAsk),
+    );
+    if (take > 0) {
+      levelsTaken.push([tobAsk, take]);
+      count = take;
+      notional = take * tobAsk;
+      limitPrice = tobAsk;
+    }
+  }
+
+  const vwap = count > 0 ? notional / count : tobAsk;
+  return {
+    tobAsk,
+    tobSize,
+    targetSize,
+    count,
+    limitPrice: Number(limitPrice.toFixed(4)),
+    vwap: Number(vwap.toFixed(4)),
+    levelsTaken,
+  };
+}
 
 /** Parse "Top 5th" / "5th Inning" / "Bot 8" → inning number. */
 export function parseMlbInning(period: string | null | undefined): number | null {
@@ -73,14 +193,26 @@ export function selectEarlyOverSoftball(input: {
       ? input.kalshiYesTob.entries()
       : input.kalshiYesTob;
 
-  let best: { line: number; ask: number; askSize: number; ticker: string } | null = null;
+  let best: {
+    line: number;
+    ask: number;
+    askSize: number;
+    ticker: string;
+    askLevels?: Array<[number, number]>;
+  } | null = null;
   for (const [line, q] of entries) {
     const dist = line - curTotal;
     if (!(dist > 0 && dist <= 1)) continue;
     if (!(q.ask > 0.05 && q.ask < 0.95)) continue;
     if (!q.ticker || !(q.askSize > 0)) continue;
     if (best == null || q.ask < best.ask) {
-      best = { line, ask: q.ask, askSize: q.askSize, ticker: q.ticker };
+      best = {
+        line,
+        ask: q.ask,
+        askSize: q.askSize,
+        ticker: q.ticker,
+        askLevels: q.askLevels,
+      };
     }
   }
   if (!best) return null;
@@ -97,12 +229,19 @@ export function selectEarlyOverSoftball(input: {
     curTotal,
     inning,
     runsDelta,
+    ...(best.askLevels ? { askLevels: best.askLevels } : {}),
   };
 }
 
 /** Build line → YES TOB map from paper keys like `total_7.5:yes`. */
 export function kalshiYesTobFromPaperMap(
-  kalshiTob: ReadonlyMap<string, { ask: number; askSize: number; t: number; ticker?: string }>,
+  kalshiTob: ReadonlyMap<string, {
+    ask: number;
+    askSize: number;
+    t: number;
+    ticker?: string;
+    askLevels?: Array<[number, number]>;
+  }>,
 ): Map<number, KalshiYesTobEntry> {
   const out = new Map<number, KalshiYesTobEntry>();
   for (const [key, q] of kalshiTob) {
@@ -115,6 +254,7 @@ export function kalshiYesTobFromPaperMap(
       askSize: q.askSize,
       ticker: q.ticker,
       t: q.t,
+      ...(q.askLevels ? { askLevels: q.askLevels } : {}),
     });
   }
   return out;

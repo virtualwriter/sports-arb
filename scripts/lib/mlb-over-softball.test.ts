@@ -3,7 +3,9 @@ import {
   earlyOverCategories,
   kalshiYesTobFromPaperMap,
   parseMlbInning,
+  planAskWalk,
   selectEarlyOverSoftball,
+  yesAskLevelsFromNoBids,
 } from "./mlb-over-softball.js";
 
 describe("parseMlbInning", () => {
@@ -102,5 +104,43 @@ describe("kalshiYesTobFromPaperMap", () => {
     expect([...m.entries()]).toEqual([
       [7.5, { ask: 0.7, askSize: 5, ticker: "KXMLB-7.5", t: 1 }],
     ]);
+  });
+});
+
+describe("planAskWalk", () => {
+  it("walks to 2x TOB size within maxAsk", () => {
+    const levels = yesAskLevelsFromNoBids(
+      [[0.16, 10], [0.15, 50], [0.14, 16], [0.13, 21], [0.11, 34]],
+      0.84,
+      10,
+    );
+    // yes asks: 0.84, 0.85, 0.86, 0.87, 0.89
+    const walk = planAskWalk({
+      tobAsk: 0.84,
+      tobSize: 10,
+      askLevels: levels,
+      maxAsk: 0.94,
+      maxContracts: 25,
+      maxUsd: 25,
+      tobMult: 2,
+    });
+    expect(walk.targetSize).toBe(20);
+    expect(walk.count).toBe(20);
+    expect(walk.limitPrice).toBeLessThanOrEqual(0.86);
+    expect(walk.vwap).toBeLessThan(0.86);
+  });
+
+  it("stops at maxAsk even if 2x TOB not reached", () => {
+    const walk = planAskWalk({
+      tobAsk: 0.92,
+      tobSize: 3,
+      askLevels: [[0.92, 3], [0.93, 3], [0.94, 8], [0.95, 31]],
+      maxAsk: 0.94,
+      maxContracts: 25,
+      maxUsd: 25,
+      tobMult: 2,
+    });
+    expect(walk.count).toBe(6); // 2x tob = 6
+    expect(walk.limitPrice).toBe(0.93);
   });
 });

@@ -31,8 +31,9 @@
  *      PLR_KALSHI_EVENT (optional Kalshi totals event ticker; else discover from PLR_SLUG),
  *      PLR_SCORE_PING_PORT (MLB: HTTP phone tap UI + POST /ping → phone_ping race source),
  *      PLR_SCORE_PING_TOKEN / PLR_SCORE_PING_BIND (optional auth token / bind host),
- *      MLB_OVER_SOFTBALL_LIVE (default 0; FOK buy early next-line Kalshi overs on bwin_score),
- *      MLB_OVER_SOFTBALL_MAX_CONTRACTS / _MAX_USD / _MAX_DAILY_USD / _MAX_ASK
+ *      MLB_OVER_SOFTBALL_LIVE (default 0; buy early next-line Kalshi overs on bwin_score),
+ *      MLB_OVER_SOFTBALL_MAX_CONTRACTS / _MAX_USD / _MAX_DAILY_USD / _MAX_ASK,
+ *      MLB_OVER_SOFTBALL_TOB_SIZE_MULT (default 2; walk ask to ≥ mult × TOB size)
  */
 import { readdirSync } from "node:fs";
 import { join } from "node:path";

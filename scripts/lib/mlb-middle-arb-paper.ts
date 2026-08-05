@@ -75,6 +75,7 @@ import {
   kalshiYesTobFromPaperMap,
   parseMlbInning,
   selectEarlyOverSoftball,
+  yesAskLevelsFromNoBids,
 } from "./mlb-over-softball.js";
 import { enqueueMlbOverSoftball } from "./mlb-over-softball-exec.js";
 
@@ -83,7 +84,13 @@ export const MLB_MIDDLE_ARB_PAPER_VERSION = "2026-07-29.1";
 export type PaperEmit = (row: Record<string, unknown>) => void;
 export type PaperLog = (msg: string) => void;
 
-type TobSide = { ask: number; askSize: number; t: number; ticker?: string };
+type TobSide = {
+  ask: number;
+  askSize: number;
+  t: number;
+  ticker?: string;
+  askLevels?: Array<[number, number]>;
+};
 type Venue = "pm" | "kalshi";
 
 type ScoreSignals = {
@@ -545,6 +552,7 @@ export class MlbMiddleArbPaperSidecar {
     bestAsk?: number | null;
     bestAskSize?: number | null;
     ticker?: string | null;
+    depthNo?: Array<[number, number]> | null;
     t?: number;
   }): void {
     const t = row.t ?? Date.now();
@@ -555,12 +563,17 @@ export class MlbMiddleArbPaperSidecar {
     }
     const prev = this.kalshiTob.get(key);
     const ask = Number(row.bestAsk);
+    const askSize = Number(row.bestAskSize);
     const ticker = row.ticker ? String(row.ticker) : prev?.ticker;
+    const askLevels = row.side === "yes"
+      ? yesAskLevelsFromNoBids(row.depthNo ?? null, ask, askSize)
+      : prev?.askLevels;
     this.kalshiTob.set(key, {
       ask,
-      askSize: Number(row.bestAskSize),
+      askSize,
       t,
       ...(ticker ? { ticker } : {}),
+      ...(askLevels?.length ? { askLevels } : {}),
     });
 
     if (!this.track || t < this.track.t0) return;
@@ -947,9 +960,13 @@ export class MlbMiddleArbPaperSidecar {
       kalshiYesTob: kalshiYesTobFromPaperMap(this.kalshiTob),
     });
     if (!candidate) return;
+    const depthHint = candidate.askLevels?.length
+      ? ` depth=${candidate.askLevels.length}lv`
+      : "";
     this.opts.log?.(
       `mlb-over-softball: ${this.opts.eventSlug} inn${candidate.inning} `
-      + `${candidate.runsDelta}R → over${candidate.line} @${candidate.ask.toFixed(2)} `
+      + `${candidate.runsDelta}R → over${candidate.line} @${candidate.ask.toFixed(2)}`
+      + `x${Math.floor(candidate.askSize)}${depthHint} `
       + `cats=${candidate.cats.join(",")}`,
     );
     enqueueMlbOverSoftball({
