@@ -23,6 +23,18 @@
 | `reference/legacy/trading-engine.ts` | Broad parent trader file containing older MONOTONIC_ARB shadow and settlement logic; reference only. |
 | `docs/reference/*` | Parent repo deployment/cleanup references that mention Japan/monotonic paths and guardrails. |
 | `cursor-rules/sports-arb-event-lifecycle.mdc` | Cursor rule for sports arb event lifecycle behavior. |
+| `cursor-rules/hft-market-making-systems.mdc` | Brett Harrison HFT MM five-component design lens. |
+| `cursor-rules/weather-hourly-mm.mdc` | CHI/LA hourly weather MM rules (:51 anchor, Synoptic gate, last-10m widen/pull). |
+| `docs/reference/hft-market-making-systems.md` | Short HFT MM reference + sports-arb mapping. |
+| `docs/reference/weather-hourly-mm.md` | Weather hourly MM strategy, Synoptic lead test, commands. |
+| `scripts/lib/weather-cities.ts` | CHI/LA/NYC Kalshi hourly city config + ET event helpers. |
+| `scripts/lib/weather-fair-value.ts` | Gaussian hourly temp fair value + mid-hour corrections. |
+| `scripts/lib/weather-mm-quotes.ts` | Two-sided weather MM quotes with widen/pull schedule. |
+| `scripts/lib/weather-obs.ts` | METAR/SPECI, Synoptic, NWS, TWC observation feeds. |
+| `scripts/weather-synoptic-lead-test.ts` | Synoptic leading-indicator harness for hourly cities. |
+| `scripts/weather-hourly-mm-paper.ts` | Paper (optional post_only live) weather MM for CHI/LA. |
+| `scripts/weather-city-tracker.ts` | Multi-city weather book + obs recorder. |
+| `deploy/weather-hourly-mm-paper.service` | Systemd unit for paper weather MM. |
 | `reference/helpers/polymarket-clob-book.ts` | CLOB depth utility noted as needed for monotonic arb depth checks. |
 | `reference/helpers/reporting-position.ts` | Reporting parser that recognizes monotonic arb package labels. |
 | `reference/legacy/market-scanner.ts` | Broad market scanner reference with spot-column dependency for monotonic settlement. |

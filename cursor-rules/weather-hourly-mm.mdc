@@ -1,0 +1,30 @@
+---
+description: Kalshi hourly weather MM (CHI/LA) — :51 anchor, Synoptic lead gate, last-10m widen/pull
+globs: scripts/weather-*.ts,scripts/lib/weather-*.ts,docs/reference/weather-hourly-mm.md
+alwaysApply: false
+---
+
+# Weather hourly MM rules
+
+Source strategy lens: Brett Harrison HFT MM systems (`hft-market-making-systems.mdc`).
+Ops doc: `docs/reference/weather-hourly-mm.md`.
+
+## Fair value
+
+1. Start each hour from the **last decisive :51 METAR** (`μ = print + bias`).
+2. Correct `μ` only on trusted mid-hour reading changes:
+   - Synoptic **only if** lead test says it leads (token required).
+   - Else SPECI / NWS.
+3. Do **not** drive `μ` from sticky mid-hour TWC (log only).
+4. Default model: Gaussian `σ≈0.7°F`, half-up integer settle, `pYes = P(round(T) > floor)`.
+
+## Placement
+
+1. Quote two-sided around fair; inventory skew is first-class.
+2. **Last 10 minutes** before close: widen spreads.
+3. **Last ~3 minutes**: pull liquidity (no resting quotes).
+4. Paper by default; live only via explicit `WEATHER_MM_LIVE=1` + `post_only`.
+
+## Data plane
+
+Related instruments for fair value (Synoptic/NWS/METAR/TWC + full strike ladder) are required market data, not optional enrichment.

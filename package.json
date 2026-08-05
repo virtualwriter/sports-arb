@@ -38,7 +38,10 @@
     "test": "vitest run",
     "build": "tsc --noEmit",
     "crypto:kalshi-ws": "tsx scripts/crypto-kalshi-ws-scanner.ts",
-    "weather:softball": "tsx scripts/weather-softball-daemon.ts"
+    "weather:softball": "tsx scripts/weather-softball-daemon.ts",
+    "weather:synoptic-lead": "tsx scripts/weather-synoptic-lead-test.ts",
+    "weather:mm-paper": "tsx scripts/weather-hourly-mm-paper.ts",
+    "weather:city-tracker": "tsx scripts/weather-city-tracker.ts"
   },
   "dependencies": {
     "@polymarket/clob-client-v2": "^1.0.8",

@@ -1,0 +1,22 @@
+[Unit]
+Description=Kalshi hourly weather MM paper quoter (CHI/LA)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sports-arb
+Group=sports-arb
+WorkingDirectory=/opt/sports-arb
+EnvironmentFile=-/etc/sports-arb.env
+EnvironmentFile=-/etc/kalshi.env
+Environment=WEATHER_MM_LIVE=0
+Environment=WEATHER_MM_CITIES=CHI,LAX
+ExecStart=/usr/bin/npm run weather:mm-paper
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
