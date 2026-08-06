@@ -17,12 +17,14 @@ User-reported hourly P&L. Do not invent fills.
 | 5pm | | 85 | | |
 | 6pm | | 85 | | |
 | 7pm | 84.98 | 86 | −1.02 | −$8.60 |
+| 8pm | 84.7 | 85 | −0.30 | +$40 |
 
-**Day P&L:** +$48.00
+**Day P&L:** +$88.00
 
 Notes:
-- Δ column = probe − METAR (session envelope ~−1.30…+0.62; 7pm print Δ −1.02).
+- Δ column = probe − METAR (session envelope ~−1.30…+0.62; 7pm −1.02, 8pm −0.30).
 - Rain hour tracked (3pm Δ −0.91).
 - NWS 6hr max backdrop: 31.1C / 87.98F → 88; daily book 88–89.
 - 5pm/6pm settle from METAR; P&L not reported yet.
-- 7pm: normal print 84.98 / P1 85.2 / P2 83.5 → METAR 86.00 settle 86.
+- 7pm: normal 84.98 / P1 85.2 / P2 83.5 → settle 86.
+- 8pm: normal 84.7 / P1 84.6 → METAR 84.92 settle 85.
