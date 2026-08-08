@@ -588,7 +588,9 @@ class Monitor:
 
     def emit_prediction(self, pred: dict, *, force: bool = False) -> None:
         aware_bin, aware_notes = self.book_aware.update(
-            pred.get("bin"), pred.get("daily_implied") or {}
+            pred.get("bin"),
+            pred.get("daily_implied") or {},
+            floor_f=pred.get("floor_f"),
         )
         pred = {
             **pred,
