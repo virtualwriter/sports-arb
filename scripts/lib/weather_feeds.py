@@ -44,13 +44,29 @@ def get_json(url: str, headers: dict | None = None, timeout: float = 15, retries
     raise last_exc
 
 
-def fetch_synoptic_token() -> str:
-    env = os.environ.get("SYNOPTIC_TOKEN")
+def fetch_synoptic_token(*, required: bool = False) -> str:
+    """Return Synoptic API token.
+
+    Prefers SYNOPTIC_TOKEN env. Else fetches the public demo token with retries.
+    On failure returns "" unless required=True (then raises).
+    """
+    env = (os.environ.get("SYNOPTIC_TOKEN") or "").strip()
     if env:
         return env
-    req = urllib.request.Request(DEMO_TOKEN_URL, headers=UA)
-    with urllib.request.urlopen(req, timeout=15) as r:
-        return r.read().decode().strip()
+    last_exc: Exception | None = None
+    for attempt in range(4):
+        try:
+            req = urllib.request.Request(DEMO_TOKEN_URL, headers=UA)
+            with urllib.request.urlopen(req, timeout=15) as r:
+                tok = r.read().decode().strip()
+                if tok:
+                    return tok
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last_exc = exc
+            time.sleep(0.5 * (attempt + 1))
+    if required and last_exc is not None:
+        raise last_exc
+    return ""
 
 
 def c_to_f(c: float) -> int:
@@ -72,6 +88,8 @@ def settle_from_ob(ob: dict) -> tuple[int | None, float | None]:
 
 def synoptic_day_max(city: WeatherCity, token: str, day_local: datetime | None = None) -> dict | None:
     """Max air_temp for the local calendar day (1-min if available, else station)."""
+    if not token:
+        return None
     stid = city.synoptic_1m_stid or city.synoptic_stid
     tz = ZoneInfo(city.local_tz)
     local = day_local.astimezone(tz) if day_local else datetime.now(tz)
@@ -200,6 +218,8 @@ def poll_nws(city: WeatherCity) -> dict | None:
 
 
 def poll_synoptic_1m(city: WeatherCity, token: str) -> dict | None:
+    if not token:
+        return None
     stid = city.synoptic_1m_stid
     if not stid:
         # Fall back to station air_temp (e.g. KNYC) so NYC still has a live series.
@@ -229,6 +249,8 @@ def poll_synoptic_1m(city: WeatherCity, token: str) -> dict | None:
 
 
 def poll_synoptic_metar(city: WeatherCity, token: str) -> dict | None:
+    if not token:
+        return None
     qs = urllib.parse.urlencode(
         {"stid": city.synoptic_stid, "vars": "metar", "units": "temp|C", "token": token, "session": "1"}
     )

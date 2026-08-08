@@ -78,7 +78,14 @@ class Monitor:
         self.out_path = out_path
         self.hard_stop = hard_stop
         self.out = open(out_path, "a", buffering=1)
-        self.token = fetch_synoptic_token()
+        # Demo-token fetch can flake (connection refused); never crash the monitor.
+        try:
+            self.token = fetch_synoptic_token(required=False) or ""
+        except Exception as exc:
+            self.token = ""
+            print(f"WARN synoptic token unavailable at start: {exc}", flush=True)
+        if not self.token:
+            print("WARN starting without Synoptic token; METAR/NWS/TWC still run", flush=True)
         self.feed_pollers = make_feed_pollers(city)
 
         self.hourly_events = [f"{city.hourly_series}-{day}{h:02d}" for h in hours]
@@ -417,12 +424,18 @@ class Monitor:
                 if name.startswith("synoptic"):
                     self._synoptic_fail_streak += 1
                     if self._synoptic_fail_streak >= 3:
-                        try:
-                            self.token = fetch_synoptic_token()
+                        tok = fetch_synoptic_token(required=False)
+                        if tok:
+                            self.token = tok
                             self.milestone("SYNOPTIC_TOKEN_REFRESH", streak=self._synoptic_fail_streak)
                             self._synoptic_fail_streak = 0
-                        except Exception as exc2:
-                            self.log({"type": "error", "tag": "synoptic_token", "err": str(exc2)[:120]})
+                        else:
+                            self.log({
+                                "type": "error",
+                                "tag": "synoptic_token",
+                                "err": "refresh failed; continuing without Synoptic",
+                            })
+                            self._synoptic_fail_streak = 0
                 continue
             if not ob:
                 continue
