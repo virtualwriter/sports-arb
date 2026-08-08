@@ -45,10 +45,12 @@ class DailyHighPredictor:
         local_tz: str = "America/Chicago",
         lat: float = 41.786,
         lon: float = -87.752,
+        city_key: str | None = None,
     ) -> None:
         self.local_tz = local_tz
         self.lat = lat
         self.lon = lon
+        self.city_key = (city_key or "").strip().lower() or None
         self.tz = ZoneInfo(local_tz)
 
         # Primary series kept for back-compat (NWS when available, else Open-Meteo).
@@ -400,16 +402,7 @@ class DailyHighPredictor:
 
         base = peak_f if peak_f is not None else floor
 
-        if peak_hour is None:
-            phase = "peak_hour"
-        elif now_local.hour < peak_hour:
-            phase = "pre_peak"
-        elif abs(now_local.hour - peak_hour) <= 1:
-            phase = "peak_hour"
-        elif now_local.hour > peak_hour + 1 and (slope is None or slope <= 0):
-            phase = "post_peak"
-        else:
-            phase = "peak_hour"
+        phase = self._phase_for_hour(now_local.hour, peak_hour, slope)
 
         predicted: int | None = None
         rationale_parts: list[str] = []
@@ -432,6 +425,7 @@ class DailyHighPredictor:
             if not rationale_parts:
                 rationale_parts.append("pre-peak forecast")
         elif phase == "peak_hour":
+            # Peak window uses Kalshi hourly ≥ strikes (market mode), not NWP peak.
             market_mode = self._market_mode()
             predicted = max(floor or -999, market_mode if market_mode is not None else (base or -999))
             touch = self._recent_synoptic_touch(now, floor)
@@ -572,6 +566,43 @@ class DailyHighPredictor:
         if b is None or a is None:
             return None
         return (b + a) / 2
+
+    def _phase_for_hour(
+        self,
+        local_hour: int,
+        peak_hour: int | None,
+        slope: float | None,
+    ) -> str:
+        """Map local hour → pre_peak / peak_hour / post_peak.
+
+        NYC only: model peak is the hour leading up to forecast_peak_hour and
+        the hour after it (and the peak hour itself). During that window the
+        predictor uses Kalshi hourly market mode, not the NWP peak alone.
+
+        Other cities: peak_hour phase starts at forecast_peak_hour (the hour
+        before remains pre_peak); hour after peak is still peak_hour via ±1.
+        """
+        if peak_hour is None:
+            return "peak_hour"
+
+        if self.city_key == "nyc":
+            # [peak-1, peak+1]: lead hour + peak hour + hour after → hourly data.
+            if (peak_hour - 1) <= local_hour <= (peak_hour + 1):
+                return "peak_hour"
+            if local_hour < peak_hour - 1:
+                return "pre_peak"
+            if local_hour > peak_hour + 1 and (slope is None or slope <= 0):
+                return "post_peak"
+            return "peak_hour"
+
+        # Default (non-NYC): hour before peak stays on forecast (pre_peak).
+        if local_hour < peak_hour:
+            return "pre_peak"
+        if abs(local_hour - peak_hour) <= 1:
+            return "peak_hour"
+        if local_hour > peak_hour + 1 and (slope is None or slope <= 0):
+            return "post_peak"
+        return "peak_hour"
 
     def _market_mode(self) -> int | None:
         mode: int | None = None

@@ -14,6 +14,11 @@ NYC only — optional human KNYC sensor:
   (file: .tmp/nyc-human-knyc-readings.jsonl, source=human_knyc). They are
   trusted floor updates like other obs. If no human readings are provided,
   NYC continues on automated feeds alone — human data is never required.
+
+NYC only — peak window:
+  Model peak is the hour leading up to forecast_peak_hour and the hour after
+  it (inclusive of the peak hour). In that window the predictor uses Kalshi
+  hourly ≥-strike data (market mode), not the NWP peak alone.
 """
 
 from __future__ import annotations
@@ -119,6 +124,7 @@ class Monitor:
             local_tz=city.local_tz,
             lat=city.lat,
             lon=city.lon,
+            city_key=city.key,
         )
         self.last_prediction: dict | None = None
         self.last_emitted_prediction: dict | None = None
@@ -695,12 +701,26 @@ class Monitor:
                     self.poll_book(tk)
                     all_new_trades.extend(self.poll_trades(tk))
 
-            # Prefer forecast-peak hourly strikes while still open; else live ET hour.
+            # Hourly ≥-strike book used by peak_hour phase (market mode).
+            # Default: prefer forecast-peak hour while still open; else live hour.
+            # NYC peak window (lead + peak + after): prefer the live hour's book
+            # so those flanking hours drive on that hour's data; fall back to peak.
             implied_before = dict(self.predictor.hourly_implied)
-            if peak_slim and peak_ev:
-                self.predictor.on_hourly_summary(peak_ev, peak_slim)
-            if self.predictor.hourly_implied == implied_before and active_slim and active:
-                self.predictor.on_hourly_summary(active, active_slim)
+            nyc_peak_window = False
+            if self.city.key == "nyc" and self.predictor.forecast_peak_hour is not None:
+                now_local_h = datetime.now(ZoneInfo(self.city.local_tz)).hour
+                ph = int(self.predictor.forecast_peak_hour)
+                nyc_peak_window = (ph - 1) <= now_local_h <= (ph + 1)
+            if nyc_peak_window:
+                if active_slim and active:
+                    self.predictor.on_hourly_summary(active, active_slim)
+                if self.predictor.hourly_implied == implied_before and peak_slim and peak_ev:
+                    self.predictor.on_hourly_summary(peak_ev, peak_slim)
+            else:
+                if peak_slim and peak_ev:
+                    self.predictor.on_hourly_summary(peak_ev, peak_slim)
+                if self.predictor.hourly_implied == implied_before and active_slim and active:
+                    self.predictor.on_hourly_summary(active, active_slim)
 
             if t0 - self.last_feed_poll >= feed_iv:
                 self.poll_feeds()
