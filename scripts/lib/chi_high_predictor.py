@@ -32,6 +32,7 @@ FLOOR_TRUSTED_SOURCES = frozenset({
     "awc_metar_backfill",
     "noaa_tgftp",
     "synoptic_metar",
+    "human_knyc",  # optional on-site NYC handheld; NYC monitor only
 })
 
 # Refresh more often so HRRR hourly cycles can move the blended peak.

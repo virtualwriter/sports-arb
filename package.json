@@ -40,6 +40,7 @@
     "weather:kalshi-chi": "tsx scripts/kalshi-chi-weather-tracker.ts",
     "weather:chi-monitor": "bash scripts/launch-city-weather-monitor.sh --city chicago",
     "weather:nyc-monitor": "bash scripts/launch-city-weather-monitor.sh --city nyc",
+    "weather:nyc-human": "PYTHONPATH=scripts python3 scripts/nyc_human_reading.py",
     "weather:miami-monitor": "bash scripts/launch-city-weather-monitor.sh --city miami",
     "weather:austin-monitor": "bash scripts/launch-city-weather-monitor.sh --city austin",
     "weather:la-monitor": "bash scripts/launch-city-weather-monitor.sh --city la",

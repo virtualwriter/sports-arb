@@ -43,6 +43,8 @@ sync_once() {
     (
       ls -1 .tmp/*-weather-${day_glob}-monitor.jsonl 2>/dev/null || true
       ls -1 .tmp/chi-weather-${day_glob}-monitor.jsonl 2>/dev/null || true
+      # Optional NYC on-site human KNYC readings (same ingest path as live monitor).
+      ls -1 .tmp/nyc-human-knyc-readings.jsonl 2>/dev/null || true
     ) | sort -u
   )"
 

@@ -8,6 +8,12 @@ Usage:
   PYTHONUNBUFFERED=1 python3 scripts/monitor_city_weather_day.py --city nyc --day 26AUG05
 
 Env: SYNOPTIC_TOKEN (optional, demo token fetched if unset)
+
+NYC only — optional human KNYC sensor:
+  On-site handheld readings may be appended via scripts/nyc_human_reading.py
+  (file: .tmp/nyc-human-knyc-readings.jsonl, source=human_knyc). They are
+  trusted floor updates like other obs. If no human readings are provided,
+  NYC continues on automated feeds alone — human data is never required.
 """
 
 from __future__ import annotations
@@ -37,6 +43,7 @@ from lib.weather_feeds import (
     synoptic_day_max,
 )
 from lib.weather_hourly_hedge_filter import BookAwareBinTracker
+from lib.nyc_human_sensor import NycHumanSensorCursor
 
 KALSHI = "https://api.elections.kalshi.com/trade-api/v2"
 UA = {"User-Agent": "city-weather-day-monitor/1.0"}
@@ -121,6 +128,10 @@ class Monitor:
         self.accuracy = AccuracyLedger(ledger_path_for_city(city.key))
         # Dual stream: raw predictor bin + thrash/fat-book aware bin.
         self.book_aware = BookAwareBinTracker()
+        # NYC-only optional on-site human KNYC sensor (no-op if file absent).
+        self.nyc_human: NycHumanSensorCursor | None = (
+            NycHumanSensorCursor() if city.key == "nyc" else None
+        )
 
     def log(self, rec: dict) -> None:
         rec["recv"] = recv_ts()
@@ -411,9 +422,36 @@ class Monitor:
         self.backfill_synoptic_day_high()
         self.backfill_metar_day_high()
 
+    def poll_nyc_human(self) -> None:
+        """Ingest optional on-site KNYC readings (NYC only; no-op otherwise)."""
+        if self.nyc_human is None:
+            return
+        try:
+            new = self.nyc_human.poll_new()
+        except Exception as exc:
+            self.log({"type": "error", "tag": "human_knyc", "err": str(exc)[:120]})
+            return
+        if not new:
+            return
+        active = self.active_hourly_event()
+        for ob in new:
+            self.log({"type": "temp", **ob})
+            self.note_day_high(ob)
+            if active:
+                self.note_hour_max(active, ob)
+            self.milestone(
+                "HUMAN_KNYC",
+                temp_f=ob.get("temp_f"),
+                tenths_f=ob.get("tenths_f"),
+                obs_ts=ob.get("obs_ts"),
+                note=ob.get("note") or "",
+            )
+            self.cycle_milestone = True
+
     def poll_feeds(self) -> None:
         recv = recv_ts()
         active = self.active_hourly_event()
+        self.poll_nyc_human()
         for name, fn in self.feed_pollers:
             try:
                 ob = fn(self.token)

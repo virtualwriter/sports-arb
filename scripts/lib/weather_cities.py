@@ -42,6 +42,9 @@ CITIES: dict[str, WeatherCity] = {
         synoptic_stid="KMDW",
         cli_issuedby="MDW",
     ),
+    # NYC also accepts optional on-site human KNYC readings (human_knyc) via
+    # scripts/nyc_human_reading.py → .tmp/nyc-human-knyc-readings.jsonl.
+    # If none are provided, the monitor runs on automated feeds alone.
     "nyc": WeatherCity(
         key="nyc",
         name="NYC",

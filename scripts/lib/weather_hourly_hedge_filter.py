@@ -40,6 +40,7 @@ FLOOR_TRUSTED = frozenset({
     "awc_metar_backfill",
     "noaa_tgftp",
     "synoptic_metar",
+    "human_knyc",
 })
 
 BIN_RANGE_RE = re.compile(r"(\d+)\s*-\s*(\d+)")
