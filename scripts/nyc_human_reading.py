@@ -2,13 +2,22 @@
 """Append an on-site KNYC human temperature reading for the NYC monitor.
 
 NYC-only. Optional. If you never run this, the NYC monitor keeps working on
-Synoptic/METAR/NWS/TWC alone. When you do append readings, they are treated as
-trusted floor updates (source=human_knyc), same as other obs feeds.
+Synoptic/METAR/NWS/TWC alone.
+
+Each reading:
+  - raises the trusted day-high floor when hotter than prior trusted obs
+  - updates the human high-water mark used as a predictor *ceiling* during
+    NYC peak/post-peak while readings stay fresh (~25 min)
+
+Courtside through peak: append every ~10–15 min. Hotter prints lift the floor;
+repeated “still 87” prints keep the ceiling on so the model does not chase
+89–90 without a real sensor print.
 
 Usage:
+  npm run weather:nyc-human -- 87.2 --note "at ASOS"
+  npm run weather:nyc-human -- 87.2 --note "peak check; never hit 89"
+  npm run weather:nyc-human -- 87.2 --kind ceiling_check --note "still only 87"
   PYTHONPATH=scripts python3 scripts/nyc_human_reading.py 87.2
-  PYTHONPATH=scripts python3 scripts/nyc_human_reading.py 87.2 --note "handheld at ASOS"
-  npm run weather:nyc-human -- 87.2 --note "spot check"
 
 Writes to .tmp/nyc-human-knyc-readings.jsonl (or NYC_HUMAN_SENSOR_PATH).
 """
@@ -28,7 +37,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("temp_f", type=float, help="Observed temperature °F (e.g. 87.2)")
     ap.add_argument("--tenths", type=float, default=None, help="Override precise °F")
-    ap.add_argument("--note", default="", help="Free-text context")
+    ap.add_argument("--note", default="", help="Free-text context (tape + ops)")
+    ap.add_argument(
+        "--kind",
+        default=None,
+        help="Optional analytics tag (e.g. ceiling_check); max temp drives the model",
+    )
     ap.add_argument("--obs-ts", default=None, help="Observation timestamp ISO")
     ap.add_argument("--path", default=None, help="Override readings jsonl path")
     args = ap.parse_args()
@@ -39,6 +53,7 @@ def main() -> None:
         tenths_f=args.tenths,
         note=args.note,
         obs_ts=args.obs_ts,
+        kind=args.kind,
         path=path,
     )
     print(json.dumps({"ok": True, "path": str(path or readings_path()), "row": row}, indent=2))

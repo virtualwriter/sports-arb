@@ -35,6 +35,9 @@ FLOOR_TRUSTED_SOURCES = frozenset({
     "human_knyc",  # optional on-site NYC handheld; NYC monitor only
 })
 
+# NYC courtside ceiling: only apply while peak/post_peak and human print is fresh.
+HUMAN_CEILING_MAX_AGE = timedelta(minutes=25)
+
 # Refresh more often so HRRR hourly cycles can move the blended peak.
 FORECAST_REFRESH_S = 3600
 
@@ -45,10 +48,12 @@ class DailyHighPredictor:
         local_tz: str = "America/Chicago",
         lat: float = 41.786,
         lon: float = -87.752,
+        city_key: str | None = None,
     ) -> None:
         self.local_tz = local_tz
         self.lat = lat
         self.lon = lon
+        self.city_key = (city_key or "").strip().lower() or None
         self.tz = ZoneInfo(local_tz)
 
         # Primary series kept for back-compat (NWS when available, else Open-Meteo).
@@ -66,6 +71,12 @@ class DailyHighPredictor:
         self.twc_high_f: int | None = None
         self.twc_high_hits: int = 0
         self.twc_confirmed: bool = False
+
+        # NYC-only optional human high-water (courtside ceiling). Monotonic max of
+        # human_knyc prints; never required. Other cities leave these None.
+        self.human_high_f: int | None = None
+        self.human_high_tenths: float | None = None
+        self.human_last_obs_ts: datetime | None = None
 
         self._synoptic: deque[tuple[datetime, float]] = deque(maxlen=120)
         self.slope_f_per_hr: float | None = None
@@ -126,6 +137,9 @@ class DailyHighPredictor:
             elif source in FLOOR_TRUSTED_SOURCES:
                 self.on_obs_high(rounded, precise)
 
+            if source == "human_knyc":
+                self._on_human_knyc(rounded, precise, row.get("obs_ts") or row.get("recv"))
+
             if source in ("synoptic_1m", "synoptic_station"):
                 obs_ts = row.get("obs_ts")
                 if obs_ts:
@@ -141,6 +155,48 @@ class DailyHighPredictor:
                 self._update_slope(dt)
         except Exception:
             pass
+
+    def _parse_obs_ts(self, obs_ts: Any) -> datetime:
+        if obs_ts:
+            try:
+                if isinstance(obs_ts, (int, float)):
+                    # Unix seconds (rare) or ms.
+                    ts = float(obs_ts)
+                    if ts > 1e12:
+                        ts /= 1000.0
+                    return datetime.fromtimestamp(ts, tz=timezone.utc)
+                dt = datetime.fromisoformat(str(obs_ts).replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.astimezone(timezone.utc)
+            except (TypeError, ValueError, OSError):
+                pass
+        return datetime.now(timezone.utc)
+
+    def _on_human_knyc(self, temp_f: int, tenths_f: float, obs_ts: Any = None) -> None:
+        """Track human-only high-water + last observation time (NYC courtside)."""
+        dt = self._parse_obs_ts(obs_ts)
+        if self.human_last_obs_ts is None or dt >= self.human_last_obs_ts:
+            self.human_last_obs_ts = dt
+        if self.human_high_f is None or temp_f > self.human_high_f:
+            self.human_high_f = int(temp_f)
+            self.human_high_tenths = float(tenths_f)
+        elif temp_f == self.human_high_f:
+            cur = self.human_high_tenths if self.human_high_tenths is not None else float(temp_f)
+            if tenths_f > cur:
+                self.human_high_tenths = float(tenths_f)
+
+    def human_ceiling_eligible(self, now_utc: datetime, phase: str) -> bool:
+        """True when NYC peak/post_peak and last human reading is fresh enough to cap."""
+        if self.city_key != "nyc":
+            return False
+        if phase not in ("peak_hour", "post_peak"):
+            return False
+        if self.human_high_f is None or self.human_last_obs_ts is None:
+            return False
+        now = now_utc if now_utc.tzinfo else now_utc.replace(tzinfo=timezone.utc)
+        age = now.astimezone(timezone.utc) - self.human_last_obs_ts.astimezone(timezone.utc)
+        return age <= HUMAN_CEILING_MAX_AGE
 
     def on_hourly_summary(self, event: str, slim: list[dict]) -> None:
         try:
@@ -374,6 +430,14 @@ class DailyHighPredictor:
                 "is_edge": False,
                 "rationale": "prediction error",
                 "forecast_error": self.forecast_error,
+                "human_high_f": self.human_high_f,
+                "human_high_tenths": self.human_high_tenths,
+                "human_last_obs_ts": (
+                    self.human_last_obs_ts.isoformat(timespec="seconds")
+                    if self.human_last_obs_ts is not None
+                    else None
+                ),
+                "human_ceiling_active": False,
             }
 
     def _predict_impl(self, now_utc: datetime | None) -> dict:
@@ -400,16 +464,7 @@ class DailyHighPredictor:
 
         base = peak_f if peak_f is not None else floor
 
-        if peak_hour is None:
-            phase = "peak_hour"
-        elif now_local.hour < peak_hour:
-            phase = "pre_peak"
-        elif abs(now_local.hour - peak_hour) <= 1:
-            phase = "peak_hour"
-        elif now_local.hour > peak_hour + 1 and (slope is None or slope <= 0):
-            phase = "post_peak"
-        else:
-            phase = "peak_hour"
+        phase = self._phase_for_hour(now_local.hour, peak_hour, slope)
 
         predicted: int | None = None
         rationale_parts: list[str] = []
@@ -432,6 +487,7 @@ class DailyHighPredictor:
             if not rationale_parts:
                 rationale_parts.append("pre-peak forecast")
         elif phase == "peak_hour":
+            # Peak window uses Kalshi hourly ≥ strikes (market mode), not NWP peak.
             market_mode = self._market_mode()
             predicted = max(floor or -999, market_mode if market_mode is not None else (base or -999))
             touch = self._recent_synoptic_touch(now, floor)
@@ -460,6 +516,15 @@ class DailyHighPredictor:
             )
 
         predicted = int(predicted)
+
+        # NYC courtside ceiling: after peak/hourly logic, before floor lock.
+        # Fresh human high-water caps upside so NWP/hourly can't chase bins the
+        # on-site sensor never reached. Pre-peak never hard-caps (morning checks).
+        human_ceiling_active = self.human_ceiling_eligible(now, phase)
+        if human_ceiling_active and self.human_high_f is not None and predicted > self.human_high_f:
+            predicted = int(self.human_high_f)
+            rationale_parts.append(f"human ceiling {self.human_high_f}°")
+
         # Observed day high is monotonic: prediction cannot sit below floor.
         if floor is not None and predicted < floor:
             predicted = int(floor)
@@ -483,6 +548,7 @@ class DailyHighPredictor:
             divergence=divergence,
             is_edge=is_edge,
             rationale=rationale,
+            human_ceiling_active=human_ceiling_active,
         )
 
     def _record(
@@ -497,6 +563,7 @@ class DailyHighPredictor:
         divergence: dict | None = None,
         is_edge: bool = False,
         rationale: str = "",
+        human_ceiling_active: bool = False,
     ) -> dict:
         twc_unconfirmed = None
         if (
@@ -523,6 +590,14 @@ class DailyHighPredictor:
             "twc_high_f": self.twc_high_f,
             "twc_high_hits": self.twc_high_hits,
             "twc_unconfirmed_high_f": twc_unconfirmed,
+            "human_high_f": self.human_high_f,
+            "human_high_tenths": self.human_high_tenths,
+            "human_last_obs_ts": (
+                self.human_last_obs_ts.isoformat(timespec="seconds")
+                if self.human_last_obs_ts is not None
+                else None
+            ),
+            "human_ceiling_active": bool(human_ceiling_active),
             "divergence": divergence,
             "is_edge": is_edge,
             "rationale": rationale,
@@ -572,6 +647,43 @@ class DailyHighPredictor:
         if b is None or a is None:
             return None
         return (b + a) / 2
+
+    def _phase_for_hour(
+        self,
+        local_hour: int,
+        peak_hour: int | None,
+        slope: float | None,
+    ) -> str:
+        """Map local hour → pre_peak / peak_hour / post_peak.
+
+        NYC only: model peak is the hour leading up to forecast_peak_hour and
+        the hour after it (and the peak hour itself). During that window the
+        predictor uses Kalshi hourly market mode, not the NWP peak alone.
+
+        Other cities: peak_hour phase starts at forecast_peak_hour (the hour
+        before remains pre_peak); hour after peak is still peak_hour via ±1.
+        """
+        if peak_hour is None:
+            return "peak_hour"
+
+        if self.city_key == "nyc":
+            # [peak-1, peak+1]: lead hour + peak hour + hour after → hourly data.
+            if (peak_hour - 1) <= local_hour <= (peak_hour + 1):
+                return "peak_hour"
+            if local_hour < peak_hour - 1:
+                return "pre_peak"
+            if local_hour > peak_hour + 1 and (slope is None or slope <= 0):
+                return "post_peak"
+            return "peak_hour"
+
+        # Default (non-NYC): hour before peak stays on forecast (pre_peak).
+        if local_hour < peak_hour:
+            return "pre_peak"
+        if abs(local_hour - peak_hour) <= 1:
+            return "peak_hour"
+        if local_hour > peak_hour + 1 and (slope is None or slope <= 0):
+            return "post_peak"
+        return "peak_hour"
 
     def _market_mode(self) -> int | None:
         mode: int | None = None

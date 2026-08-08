@@ -5,18 +5,25 @@ Contract
 - NYC-only. Other cities ignore this module.
 - Readings are **optional extra data points**. If none are provided, the NYC
   monitor continues unchanged on Synoptic/METAR/NWS/TWC.
-- When present, each reading is ingested like any other trusted obs: it can
-  move the day-high floor and recalibrate the predictor.
+- When present, each reading does two things in the predictor:
+  1. **Floor** — trusted obs (`human_knyc` ∈ FLOOR_TRUSTED_SOURCES); a hotter
+     print raises the day-high floor like Synoptic/METAR.
+  2. **Ceiling** — human-only high-water mark. During NYC `peak_hour` /
+     `post_peak`, if the latest human reading is fresh (~25 min), the
+     predictor caps at `human_high_f` so NWP/hourly books cannot stay on
+     89–90 when courtside never printed above e.g. 87. Pre-peak does not
+     hard-cap (morning spot checks must not kill an afternoon ramp).
 - Absence of the file, or an empty file, is a no-op (not an error).
 
 Append format (one JSON object per line), written by
 `scripts/nyc_human_reading.py` or any producer:
 
   {
-    "temp_f": 87,                 # required (int or float; used for floor)
+    "temp_f": 87,                 # required (int or float; used for floor/ceiling)
     "tenths_f": 87.2,             # optional precise °F
     "obs_ts": "2026-08-08T16:05:00-04:00",  # optional; default = now UTC
-    "note": "handheld at Central Park ASOS",
+    "note": "peak check; never hit 89",
+    "kind": "ceiling_check",      # optional analytics tag
     "source": "human_knyc"        # optional; forced to human_knyc on ingest
   }
 
@@ -63,7 +70,7 @@ def normalize_reading(row: dict[str, Any]) -> dict[str, Any] | None:
     obs_ts = row.get("obs_ts") or row.get("recv") or datetime.now(timezone.utc).isoformat(
         timespec="seconds"
     )
-    return {
+    out = {
         "source": SOURCE,
         "obs_ts": obs_ts,
         "temp_f": rounded,
@@ -73,6 +80,10 @@ def normalize_reading(row: dict[str, Any]) -> dict[str, Any] | None:
         "tgroup": {"temp_f_round": rounded, "temp_f": tenths},
         "human": True,
     }
+    kind = row.get("kind")
+    if kind:
+        out["kind"] = str(kind)
+    return out
 
 
 class NycHumanSensorCursor:
@@ -139,12 +150,13 @@ def append_reading(
     tenths_f: float | None = None,
     note: str = "",
     obs_ts: str | None = None,
+    kind: str | None = None,
     path: Path | None = None,
 ) -> dict[str, Any]:
     """Append one human reading to the NYC sensor file. Returns the written row."""
     p = path or readings_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    row = {
+    row: dict[str, Any] = {
         "recv": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
         "obs_ts": obs_ts or datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "temp_f": float(temp_f),
@@ -152,6 +164,8 @@ def append_reading(
         "note": note,
         "source": SOURCE,
     }
+    if kind:
+        row["kind"] = str(kind)
     with p.open("a") as f:
         f.write(json.dumps(row, separators=(",", ":")) + "\n")
     return row
