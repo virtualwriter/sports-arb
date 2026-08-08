@@ -9,6 +9,7 @@ Roll strategy (research — not live order routing):
 Dual streams (live monitor + report):
   - raw: predictor bin
   - book_aware / bin_book_aware: anti_thrash + sticky book_lead over the raw path
+    (never book_lead / anti_thrash-hold a bin the trusted floor has ruled out)
 """
 
 from __future__ import annotations
@@ -126,6 +127,21 @@ def bin_contains(label: str, temp_f: float) -> bool:
     return lo <= t <= hi
 
 
+def bin_reachable_given_floor(label: str | None, floor_f: float | None) -> bool:
+    """False when trusted floor already exceeds the bin's upper bound.
+
+    Observed day-high is monotonic: once floor is 99, 97-98 / ≤98 cannot settle.
+    Used to block book_lead (and anti_thrash hold) into physically dead bins.
+    """
+    if label is None or floor_f is None:
+        return True
+    hi = bin_hi(label)
+    if hi is None:
+        return True
+    # Floor is a real obs (°F); compare in tenths-friendly float space.
+    return float(floor_f) <= float(hi)
+
+
 @dataclass
 class LegResult:
     name: str
@@ -217,8 +233,9 @@ class BookAwareBinTracker:
 
     - book_lead: on fav flip, if fav mid ≥ BOOK_LEAD_MIN_MID and leads held by
       ≥ BOOK_LEAD_EDGE on *this row*, publish fav and stick until fav moves on.
+      Never lead into a bin the trusted floor has already ruled out.
     - anti_thrash: while published bin is still fav @ ≥ ANTI_THRASH_MIN_MID on
-      this row, ignore raw model leaves.
+      this row, ignore raw model leaves — unless the held bin is floor-dead.
     """
 
     held: str | None = None
@@ -233,10 +250,12 @@ class BookAwareBinTracker:
         self,
         raw_bin: str | None,
         daily_implied: dict[str, Any] | None,
+        floor_f: float | None = None,
     ) -> tuple[str | None, list[str]]:
         notes: list[str] = []
         di = daily_implied or {}
         fav, fav_px = market_fav(di)
+        floor = _f(floor_f)
 
         if self.held is None:
             self.held = raw_bin
@@ -254,7 +273,15 @@ class BookAwareBinTracker:
                 and fav != self.held
                 and (held_px is None or fav_px >= held_px + self.book_lead_edge)
             )
-            if decisive:
+            if decisive and not bin_reachable_given_floor(fav, floor):
+                notes.append(
+                    f"book_lead blocked: {fav} @{fav_px:.0%} vs floor {floor:g}"
+                )
+                # Keep sticky on a still-reachable held bin; ignore impossible fav.
+                if self.sticky_fav and not bin_reachable_given_floor(self.held, floor):
+                    self.sticky_fav = False
+                    notes.append(f"book_lead unstick (held {self.held} floor-dead)")
+            elif decisive:
                 self.held = fav
                 self.sticky_fav = True
                 notes.append(f"book_lead → {fav} @{fav_px:.0%}")
@@ -264,12 +291,15 @@ class BookAwareBinTracker:
             self.prev_fav = fav
 
         if raw_bin and raw_bin != self.prev_raw:
-            if self.sticky_fav:
+            held_dead = not bin_reachable_given_floor(self.held, floor)
+            raw_ok = bin_reachable_given_floor(raw_bin, floor)
+            if self.sticky_fav and not held_dead:
                 notes.append(f"book_lead sticky: ignore raw → {raw_bin}")
             else:
                 held_px = _same_row_mid(di, self.held)
                 if (
-                    fav == self.held
+                    not held_dead
+                    and fav == self.held
                     and held_px is not None
                     and held_px >= self.anti_thrash_min_mid
                     and raw_bin != self.held
@@ -278,9 +308,27 @@ class BookAwareBinTracker:
                         f"anti_thrash: ignore raw → {raw_bin} "
                         f"(held {self.held} still fav @{held_px:.0%})"
                     )
+                elif raw_ok or held_dead:
+                    # Prefer raw when held is floor-dead even if raw looks soft;
+                    # never follow raw into a newly floor-dead bin while held is OK.
+                    if not raw_ok and held_dead:
+                        notes.append(
+                            f"floor lock: skip raw → {raw_bin} "
+                            f"(floor {floor:g}; held {self.held} also dead)"
+                        )
+                    elif not raw_ok:
+                        notes.append(
+                            f"floor lock: ignore raw → {raw_bin} (floor {floor:g})"
+                        )
+                    else:
+                        self.held = raw_bin
+                        self.sticky_fav = False
+                        why = "follow raw" if not held_dead else "follow raw (floor escape)"
+                        notes.append(f"{why} → {raw_bin}")
                 else:
-                    self.held = raw_bin
-                    notes.append(f"follow raw → {raw_bin}")
+                    notes.append(
+                        f"floor lock: ignore raw → {raw_bin} (floor {floor:g})"
+                    )
             self.prev_raw = raw_bin
 
         return self.held, notes
@@ -289,14 +337,18 @@ class BookAwareBinTracker:
 def apply_book_aware_bins(preds: list[dict]) -> list[dict]:
     """Return prediction copies with bin_book_aware from BookAwareBinTracker.
 
-    Always recomputed from raw bin + daily_implied so historical tapes (pre-dual
-    stream) and live tapes score the same way.
+    Always recomputed from raw bin + daily_implied (+ floor) so historical tapes
+    (pre-dual stream) and live tapes score the same way.
     """
     tracker = BookAwareBinTracker()
     out: list[dict] = []
     for r in preds:
         row = dict(r)
-        aware, notes = tracker.update(row.get("bin"), row.get("daily_implied") or {})
+        aware, notes = tracker.update(
+            row.get("bin"),
+            row.get("daily_implied") or {},
+            floor_f=row.get("floor_f"),
+        )
         row["bin_book_aware"] = aware
         if notes:
             row["book_aware_notes"] = notes
@@ -407,6 +459,8 @@ def simulate_roll_policy(
         b = r.get("bin")
         recv = r.get("recv") or ""
         fav, fav_px = market_fav(di)
+        floor = _f(r.get("floor_f"))
+        held_dead = held is not None and not bin_reachable_given_floor(held, floor)
 
         if i == 0:
             if b:
@@ -424,7 +478,14 @@ def simulate_roll_policy(
                 and fav != held
                 and (held_px is None or fav_px >= held_px + book_lead_edge)
             )
-            if decisive:
+            if decisive and not bin_reachable_given_floor(fav, floor):
+                notes.append(
+                    f"book_lead: blocked {fav} @{fav_px:.0%} vs floor {floor:g}"
+                )
+                if sticky_fav and held_dead:
+                    sticky_fav = False
+                    notes.append(f"book_lead: unstick (held {held} floor-dead)")
+            elif decisive:
                 if try_switch(fav, di, recv, "book_lead"):
                     sticky_fav = True
             elif sticky_fav and fav != held:
@@ -434,11 +495,13 @@ def simulate_roll_policy(
 
         # --- model bin change ---
         if b and b != prev_model:
-            if sticky_fav and use_lead:
+            raw_ok = bin_reachable_given_floor(b, floor)
+            if sticky_fav and use_lead and not held_dead:
                 notes.append(f"book_lead sticky: ignore model → {b}")
             elif (
                 use_anti
                 and held is not None
+                and not held_dead
                 and fav == held
             ):
                 held_px = _same_row_mid(di, held)
@@ -446,13 +509,17 @@ def simulate_roll_policy(
                     notes.append(
                         f"anti_thrash: ignore model → {b} (held {held} still fav @{held_px:.0%})"
                     )
-                else:
+                elif raw_ok:
                     try_switch(b, di, recv, "model")
                     sticky_fav = False
-            else:
+                else:
+                    notes.append(f"floor lock: ignore model → {b} (floor {floor:g})")
+            elif raw_ok:
                 try_switch(b, di, recv, "model")
                 if use_lead:
                     sticky_fav = False
+            else:
+                notes.append(f"floor lock: ignore model → {b} (floor {floor:g})")
             prev_model = b
 
     if held is None or settle_f is None:
