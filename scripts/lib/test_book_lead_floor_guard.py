@@ -66,6 +66,36 @@ def test_anti_thrash_cannot_hold_floor_dead_bin():
     assert not any(n.startswith("anti_thrash:") for n in notes)
 
 
+def test_reflip_blocked_in_the_50s_snaps_to_raw():
+    """After a band change, book_lead into the 50s is blocked; snap back to raw."""
+    t = BookAwareBinTracker()
+    t.update("78-79", {"78-79": 0.50, "80-81": 0.46}, floor_f=70)
+    held, _ = t.update("78-79", {"80-81": 0.52, "78-79": 0.40}, floor_f=72)
+    assert held == "80-81"
+    held, notes = t.update("78-79", {"78-79": 0.52, "80-81": 0.40}, floor_f=75)
+    assert held == "78-79"
+    assert any("reflip" in n for n in notes)
+    assert any("snap raw" in n for n in notes)
+    # Further 50s book_lead away from raw stays blocked.
+    held, notes = t.update("78-79", {"80-81": 0.58, "78-79": 0.40}, floor_f=77)
+    assert held == "78-79"
+    assert any("reflip" in n for n in notes)
+
+
+def test_strong_reflip_still_allowed():
+    t = BookAwareBinTracker()
+    t.update("86-87", {"86-87": 0.40, "85-86": 0.35}, floor_f=79)
+    t.update("85-86", {"85-86": 0.44, "83-84": 0.30}, floor_f=79)  # follow raw
+    assert t.held_changed
+    held, notes = t.update(
+        "85-86",
+        {"83-84": 0.60, "85-86": 0.35},
+        floor_f=84,
+    )
+    assert held == "83-84"
+    assert any("book_lead → 83-84" in n for n in notes)
+
+
 def test_austin_style_tape_path():
     preds = [
         {
@@ -112,5 +142,7 @@ if __name__ == "__main__":
     test_book_lead_blocked_when_fav_below_floor()
     test_book_lead_still_works_when_floor_allows()
     test_anti_thrash_cannot_hold_floor_dead_bin()
+    test_reflip_blocked_in_the_50s_snaps_to_raw()
+    test_strong_reflip_still_allowed()
     test_austin_style_tape_path()
     print("ok")

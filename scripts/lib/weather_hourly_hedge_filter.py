@@ -9,7 +9,8 @@ Roll strategy (research — not live order routing):
 Dual streams (live monitor + report):
   - raw: predictor bin
   - book_aware / bin_book_aware: anti_thrash + sticky book_lead over the raw path
-    (never book_lead / anti_thrash-hold a bin the trusted floor has ruled out)
+    (never book_lead / anti_thrash-hold a bin the trusted floor has ruled out;
+     after a held-band change, no book_lead reflip while fav mid is still in the 50s)
 """
 
 from __future__ import annotations
@@ -27,6 +28,9 @@ MIN_BUY_MID = 0.05  # ignore dust bins; sub-nickel mids invent fake leverage
 ANTI_THRASH_MIN_MID = 0.55
 BOOK_LEAD_MIN_MID = 0.50
 BOOK_LEAD_EDGE = 0.10
+# After the held band has already changed once, refuse book_lead into the 50s.
+# (daily_implied is mid; on these books mid ≈ ask — "ask in the 50s".)
+BOOK_LEAD_REFLIP_MIN_MID = 0.60
 
 RollMode = Literal["model", "anti_thrash", "book_lead", "book_aware"]
 
@@ -234,6 +238,8 @@ class BookAwareBinTracker:
     - book_lead: on fav flip, if fav mid ≥ BOOK_LEAD_MIN_MID and leads held by
       ≥ BOOK_LEAD_EDGE on *this row*, publish fav and stick until fav moves on.
       Never lead into a bin the trusted floor has already ruled out.
+      After the held band has already changed once, require fav mid
+      ≥ BOOK_LEAD_REFLIP_MIN_MID (no reflip while price is still in the 50s).
     - anti_thrash: while published bin is still fav @ ≥ ANTI_THRASH_MIN_MID on
       this row, ignore raw model leaves — unless the held bin is floor-dead.
     """
@@ -242,9 +248,16 @@ class BookAwareBinTracker:
     sticky_fav: bool = False
     prev_raw: str | None = None
     prev_fav: str | None = None
+    held_changed: bool = False  # True after any leave from the open band
     anti_thrash_min_mid: float = ANTI_THRASH_MIN_MID
     book_lead_min_mid: float = BOOK_LEAD_MIN_MID
     book_lead_edge: float = BOOK_LEAD_EDGE
+    book_lead_reflip_min_mid: float = BOOK_LEAD_REFLIP_MIN_MID
+
+    def _set_held(self, new_bin: str | None) -> None:
+        if new_bin is not None and self.held is not None and new_bin != self.held:
+            self.held_changed = True
+        self.held = new_bin
 
     def update(
         self,
@@ -281,8 +294,29 @@ class BookAwareBinTracker:
                 if self.sticky_fav and not bin_reachable_given_floor(self.held, floor):
                     self.sticky_fav = False
                     notes.append(f"book_lead unstick (held {self.held} floor-dead)")
+            elif (
+                decisive
+                and self.held_changed
+                and fav_px is not None
+                and fav_px < self.book_lead_reflip_min_mid
+            ):
+                # Limit turnover: after a band change, do not ping-pong on 50¢ books.
+                notes.append(
+                    f"book_lead blocked: {fav} @{fav_px:.0%} reflip "
+                    f"(need ≥{self.book_lead_reflip_min_mid:.0%} after band change)"
+                )
+                if self.sticky_fav:
+                    self.sticky_fav = False
+                    notes.append("book_lead unstick (weak reflip)")
+                # If book and raw agree again, release the weak chase without
+                # treating it as a fresh book_lead into the 50s.
+                if raw_bin == fav and raw_bin != self.held and bin_reachable_given_floor(
+                    raw_bin, floor
+                ):
+                    self._set_held(raw_bin)
+                    notes.append(f"snap raw → {raw_bin} (undo weak book_lead)")
             elif decisive:
-                self.held = fav
+                self._set_held(fav)
                 self.sticky_fav = True
                 notes.append(f"book_lead → {fav} @{fav_px:.0%}")
             elif self.sticky_fav and fav != self.held:
@@ -321,7 +355,7 @@ class BookAwareBinTracker:
                             f"floor lock: ignore raw → {raw_bin} (floor {floor:g})"
                         )
                     else:
-                        self.held = raw_bin
+                        self._set_held(raw_bin)
                         self.sticky_fav = False
                         why = "follow raw" if not held_dead else "follow raw (floor escape)"
                         notes.append(f"{why} → {raw_bin}")
@@ -394,6 +428,7 @@ def simulate_roll_policy(
     anti_thrash_min_mid: float = ANTI_THRASH_MIN_MID,
     book_lead_min_mid: float = BOOK_LEAD_MIN_MID,
     book_lead_edge: float = BOOK_LEAD_EDGE,
+    book_lead_reflip_min_mid: float = BOOK_LEAD_REFLIP_MIN_MID,
     min_buy_mid: float = MIN_BUY_MID,
 ) -> PolicyRoll:
     """Simulate model roll and optional book-aware overlays.
@@ -406,6 +441,8 @@ def simulate_roll_policy(
     book_aware: anti_thrash + book_lead
 
     Buys require a *same-row* mid ≥ min_buy_mid (no stale walk-back).
+    After any leave from the open band, book_lead also needs
+    fav mid ≥ book_lead_reflip_min_mid (no 50¢ ping-pong).
     """
     notes: list[str] = []
     if not preds:
@@ -485,6 +522,26 @@ def simulate_roll_policy(
                 if sticky_fav and held_dead:
                     sticky_fav = False
                     notes.append(f"book_lead: unstick (held {held} floor-dead)")
+            elif (
+                decisive
+                and switches >= 1
+                and fav_px is not None
+                and fav_px < book_lead_reflip_min_mid
+            ):
+                notes.append(
+                    f"book_lead: blocked {fav} @{fav_px:.0%} reflip "
+                    f"(need ≥{book_lead_reflip_min_mid:.0%} after band change)"
+                )
+                if sticky_fav:
+                    sticky_fav = False
+                    notes.append("book_lead: unstick (weak reflip)")
+                if (
+                    b == fav
+                    and b != held
+                    and bin_reachable_given_floor(b, floor)
+                ):
+                    try_switch(b, di, recv, "snap_raw")
+                    sticky_fav = False
             elif decisive:
                 if try_switch(fav, di, recv, "book_lead"):
                     sticky_fav = True
