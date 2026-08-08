@@ -12,8 +12,9 @@ Env: SYNOPTIC_TOKEN (optional, demo token fetched if unset)
 NYC only — optional human KNYC sensor:
   On-site handheld readings may be appended via scripts/nyc_human_reading.py
   (file: .tmp/nyc-human-knyc-readings.jsonl, source=human_knyc). They are
-  trusted floor updates like other obs. If no human readings are provided,
-  NYC continues on automated feeds alone — human data is never required.
+  trusted floor updates like other obs, and in peak/post-peak a fresh human
+  high-water also caps predictor upside (human ceiling). If no human readings
+  are provided, NYC continues on automated feeds alone.
 
 NYC only — peak window:
   Model peak is the hour leading up to forecast_peak_hour and the hour after
@@ -443,6 +444,9 @@ class Monitor:
         for ob in new:
             self.log({"type": "temp", **ob})
             self.note_day_high(ob)
+            # Always feed predictor so human high-water + last_obs_ts refresh
+            # even when the print does not raise the day-high floor.
+            self.predictor.on_temp(ob)
             if active:
                 self.note_hour_max(active, ob)
             self.milestone(
@@ -451,6 +455,14 @@ class Monitor:
                 tenths_f=ob.get("tenths_f"),
                 obs_ts=ob.get("obs_ts"),
                 note=ob.get("note") or "",
+                kind=ob.get("kind") or "",
+                human_high_f=self.predictor.human_high_f,
+                human_high_tenths=self.predictor.human_high_tenths,
+                human_last_obs_ts=(
+                    self.predictor.human_last_obs_ts.isoformat(timespec="seconds")
+                    if self.predictor.human_last_obs_ts is not None
+                    else None
+                ),
             )
             self.cycle_milestone = True
 
@@ -613,6 +625,9 @@ class Monitor:
                 is_edge=pred["is_edge"],
                 floor_f=pred.get("floor_f"),
                 forecast_peak_f=pred.get("forecast_peak_f"),
+                human_high_f=pred.get("human_high_f"),
+                human_ceiling_active=pred.get("human_ceiling_active"),
+                human_last_obs_ts=pred.get("human_last_obs_ts"),
             )
             if pred["is_edge"] and (
                 self.last_emitted_prediction is None or not self.last_emitted_prediction.get("is_edge")
