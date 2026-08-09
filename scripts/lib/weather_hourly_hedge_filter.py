@@ -4,6 +4,7 @@ Roll strategy (research — not live order routing):
   - Put $DAILY_STAKE into open.bin @ *same-row* mid (≥ MIN_BUY_MID).
   - On each model bin change: sell @ mid (same-row or last-known), buy @ same-row mid.
   - Never walk back for buys (stale mids invented fake dust fills).
+  - Optional de-luck: RESEARCH_MIN_BUY_MID + SIZING_FLOOR_MID (size as if mid ≥ floor).
   - Settle final held bin vs official/provisional high.
 
 Dual streams (live monitor + report):
