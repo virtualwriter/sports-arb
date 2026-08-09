@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Offline shadow replay: GOT diurnal vs live predictor peak on monitor tapes.
 
-Does not change live routing — scores how the parallel stream would have
-called the day's high vs the existing model, using Synoptic prints + the
-tape's forecast_peak_* as NWP seeds.
+Scores two things separately:
+  1) Peak skill — final °F error, path MAE, bin hit vs settle
+  2) Research roll P&L — "lucky" (5¢ min buy, no sizing floor) vs
+     "deluck" (25¢ min buy + 40¢ sizing floor)
+
+Does not change live routing.
 
 Usage:
   PYTHONPATH=scripts python3 scripts/diurnal_got_tape_report.py --day 26AUG08
@@ -13,7 +16,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -22,17 +24,44 @@ from zoneinfo import ZoneInfo
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib.diurnal_got import DiurnalGotTracker
 from lib.weather_cities import get_city, list_cities
-from lib.weather_hourly_hedge_filter import default_tape_path, _settle_temp_f, _parse_tape
+from lib.weather_hourly_hedge_filter import (
+    MIN_BUY_MID,
+    RESEARCH_MIN_BUY_MID,
+    SIZING_FLOOR_MID,
+    _parse_tape,
+    _settle_temp_f,
+    bin_contains,
+    bin_for_temp,
+    default_tape_path,
+    simulate_roll_policy,
+)
+
+
+def _tape_path(city_key: str, day: str) -> Path | None:
+    city = get_city(city_key)
+    path = default_tape_path(city_key, day)
+    if path.exists():
+        return path
+    alt = Path(f".tmp/{city.key}-weather-{day.lower()}-monitor.jsonl")
+    return alt if alt.exists() else None
+
+
+def _path_mae(path_f: list[int], settle_i: int | None) -> float | None:
+    if settle_i is None or not path_f:
+        return None
+    return sum(abs(x - settle_i) for x in path_f) / len(path_f)
+
+
+def _path_flips_f(path_f: list[int]) -> int:
+    if len(path_f) < 2:
+        return 0
+    return sum(1 for a, b in zip(path_f, path_f[1:]) if a != b)
 
 
 def replay_city(city_key: str, day: str) -> dict | None:
     city = get_city(city_key)
-    path = default_tape_path(city_key, day)
-    if not path.exists():
-        # monitor filenames use city.key (austin/miami/la) or chi
-        alt = Path(f".tmp/{city.key}-weather-{day.lower()}-monitor.jsonl")
-        path = alt if alt.exists() else path
-    if not path.exists():
+    path = _tape_path(city_key, day)
+    if path is None:
         return None
 
     tape = _parse_tape(path)
@@ -44,14 +73,14 @@ def replay_city(city_key: str, day: str) -> dict | None:
     tz = ZoneInfo(city.local_tz)
     got = DiurnalGotTracker(lat=city.lat, lon=city.lon, local_tz=city.local_tz)
 
-    # Seed from first prediction row that has NWP peak.
     seeded = False
     live_final = None
     diurnal_final = None
     path_live: list[int] = []
     path_got: list[int] = []
+    live_bin_stream: list[dict] = []
+    got_bin_stream: list[dict] = []
 
-    # Merge synoptic temps + prediction timestamps chronologically.
     events: list[tuple[str, dict]] = []
     for r in temps:
         if r.get("source") not in ("synoptic_1m", "synoptic_station"):
@@ -80,7 +109,6 @@ def replay_city(city_key: str, day: str) -> dict | None:
             got.on_obs(dt, float(tenths))
             continue
 
-        # prediction row
         if not seeded and ev.get("forecast_peak_f") is not None:
             recv = ev.get("recv")
             try:
@@ -104,6 +132,14 @@ def replay_city(city_key: str, day: str) -> dict | None:
                 path_live.append(live_i)
             live_final = live_i
 
+        di = ev.get("daily_implied") or {}
+        labels = list(di.keys())
+        live_bin = ev.get("bin")
+        if live_bin:
+            live_bin_stream.append(
+                {"recv": ev.get("recv"), "bin": live_bin, "daily_implied": di}
+            )
+
         if seeded:
             recv = ev.get("recv")
             try:
@@ -113,9 +149,15 @@ def replay_city(city_key: str, day: str) -> dict | None:
             snap = got.snapshot(now, floor_f=ev.get("floor_f"))
             g = snap.get("predicted_high_f")
             if g is not None:
-                if not path_got or path_got[-1] != g:
-                    path_got.append(int(g))
-                diurnal_final = int(g)
+                g_i = int(g)
+                if not path_got or path_got[-1] != g_i:
+                    path_got.append(g_i)
+                diurnal_final = g_i
+                g_bin = bin_for_temp(g_i, labels)
+                if g_bin:
+                    got_bin_stream.append(
+                        {"recv": recv, "bin": g_bin, "daily_implied": di}
+                    )
 
     settle = _settle_temp_f(tape, preds)
     settle_i = int(round(settle)) if settle is not None else None
@@ -125,6 +167,33 @@ def replay_city(city_key: str, day: str) -> dict | None:
             return None
         return abs(pred - settle_i)
 
+    def bin_hit(final_f: int | None, stream: list[dict]) -> bool | None:
+        if settle_i is None or not stream:
+            return None
+        held = stream[-1].get("bin")
+        if not held:
+            return None
+        return bin_contains(held, settle_i)
+
+    lucky_kwargs = {"min_buy_mid": MIN_BUY_MID, "sizing_floor_mid": 0.0}
+    deluck_kwargs = {
+        "min_buy_mid": RESEARCH_MIN_BUY_MID,
+        "sizing_floor_mid": SIZING_FLOOR_MID,
+    }
+
+    live_lucky = simulate_roll_policy(
+        live_bin_stream, settle, mode="model", **lucky_kwargs
+    )
+    live_deluck = simulate_roll_policy(
+        live_bin_stream, settle, mode="model", **deluck_kwargs
+    )
+    got_lucky = simulate_roll_policy(
+        got_bin_stream, settle, mode="model", **lucky_kwargs
+    )
+    got_deluck = simulate_roll_policy(
+        got_bin_stream, settle, mode="model", **deluck_kwargs
+    )
+
     return {
         "city": city.key,
         "day": day,
@@ -133,8 +202,22 @@ def replay_city(city_key: str, day: str) -> dict | None:
         "diurnal_final": diurnal_final,
         "live_err": err(live_final),
         "diurnal_err": err(diurnal_final),
+        "live_path_mae": _path_mae(path_live, settle_i),
+        "diurnal_path_mae": _path_mae(path_got, settle_i),
+        "live_flips": _path_flips_f(path_live),
+        "diurnal_flips": _path_flips_f(path_got),
+        "live_bin_hit": bin_hit(live_final, live_bin_stream),
+        "diurnal_bin_hit": bin_hit(diurnal_final, got_bin_stream),
         "live_path": path_live,
         "diurnal_path": path_got,
+        "live_bin_path": live_lucky.path,
+        "diurnal_bin_path": got_lucky.path,
+        "live_pnl_lucky": live_lucky.pnl,
+        "live_pnl_deluck": live_deluck.pnl,
+        "diurnal_pnl_lucky": got_lucky.pnl,
+        "diurnal_pnl_deluck": got_deluck.pnl,
+        "live_won_deluck": live_deluck.won,
+        "diurnal_won_deluck": got_deluck.won,
         "seeded": seeded,
     }
 
@@ -145,22 +228,84 @@ def main() -> None:
     ap.add_argument("--city", action="append", dest="cities")
     args = ap.parse_args()
     cities = args.cities or list_cities()
-    print(f"Diurnal GOT shadow replay @ {args.day}")
-    print(f"{'City':<8} {'Settle':>7} {'Live':>6} {'GOT':>6} {'|L|':>5} {'|G|':>5}  paths")
-    print("-" * 72)
+
+    print(f"Diurnal GOT shadow @ {args.day}")
+    print(
+        f"Skill (°F / bin)     deluck roll = min_buy≥{RESEARCH_MIN_BUY_MID:.0%} "
+        f"+ size≥{SIZING_FLOOR_MID:.0%}   lucky = min_buy≥{MIN_BUY_MID:.0%} uncapped"
+    )
+    print(
+        f"{'City':<8} {'Set':>4} {'Live':>5} {'GOT':>5} "
+        f"{'|L|':>3} {'|G|':>3} {'Lmae':>5} {'Gmae':>5} "
+        f"{'Lhit':>4} {'Ghit':>4}  "
+        f"{'L$luck':>7} {'G$luck':>7} {'L$dlk':>7} {'G$dlk':>7}"
+    )
+    print("-" * 96)
+
+    tot = {
+        "live_err": 0,
+        "got_err": 0,
+        "live_hit": 0,
+        "got_hit": 0,
+        "n": 0,
+        "live_lucky": 0.0,
+        "got_lucky": 0.0,
+        "live_deluck": 0.0,
+        "got_deluck": 0.0,
+    }
+
     for key in cities:
         r = replay_city(key, args.day)
         if not r:
             print(f"{key:<8} (no tape)")
             continue
-        settle = f"{r['settle_f']:.0f}°" if r["settle_f"] is not None else "—"
+        settle = f"{r['settle_f']:.0f}" if r["settle_f"] is not None else "—"
+        lmae = f"{r['live_path_mae']:.1f}" if r["live_path_mae"] is not None else "—"
+        gmae = f"{r['diurnal_path_mae']:.1f}" if r["diurnal_path_mae"] is not None else "—"
+        lhit = (
+            "Y"
+            if r["live_bin_hit"] is True
+            else ("N" if r["live_bin_hit"] is False else "—")
+        )
+        ghit = (
+            "Y"
+            if r["diurnal_bin_hit"] is True
+            else ("N" if r["diurnal_bin_hit"] is False else "—")
+        )
         print(
-            f"{r['city']:<8} {settle:>7} "
-            f"{str(r['live_final'] or '—'):>6} {str(r['diurnal_final'] or '—'):>6} "
-            f"{str(r['live_err'] if r['live_err'] is not None else '—'):>5} "
-            f"{str(r['diurnal_err'] if r['diurnal_err'] is not None else '—'):>5}  "
-            f"L:{'→'.join(map(str, r['live_path'][-6:]))}  "
+            f"{r['city']:<8} {settle:>4} "
+            f"{str(r['live_final'] or '—'):>5} {str(r['diurnal_final'] or '—'):>5} "
+            f"{str(r['live_err'] if r['live_err'] is not None else '—'):>3} "
+            f"{str(r['diurnal_err'] if r['diurnal_err'] is not None else '—'):>3} "
+            f"{lmae:>5} {gmae:>5} {lhit:>4} {ghit:>4}  "
+            f"{r['live_pnl_lucky']:>+7.0f} {r['diurnal_pnl_lucky']:>+7.0f} "
+            f"{r['live_pnl_deluck']:>+7.0f} {r['diurnal_pnl_deluck']:>+7.0f}"
+        )
+        print(
+            f"         bins L:{'→'.join(r['live_bin_path'][-5:]) or '—'}  "
+            f"G:{'→'.join(r['diurnal_bin_path'][-5:]) or '—'}  "
+            f"°F L:{'→'.join(map(str, r['live_path'][-6:]))}  "
             f"G:{'→'.join(map(str, r['diurnal_path'][-6:]))}"
+        )
+        if r["live_err"] is not None and r["diurnal_err"] is not None:
+            tot["n"] += 1
+            tot["live_err"] += r["live_err"]
+            tot["got_err"] += r["diurnal_err"]
+            tot["live_hit"] += 1 if r["live_bin_hit"] else 0
+            tot["got_hit"] += 1 if r["diurnal_bin_hit"] else 0
+            tot["live_lucky"] += r["live_pnl_lucky"]
+            tot["got_lucky"] += r["diurnal_pnl_lucky"]
+            tot["live_deluck"] += r["live_pnl_deluck"]
+            tot["got_deluck"] += r["diurnal_pnl_deluck"]
+
+    if tot["n"]:
+        print("-" * 96)
+        print(
+            f"{'TOTAL':<8} n={tot['n']}  "
+            f"MAE L={tot['live_err']/tot['n']:.2f} G={tot['got_err']/tot['n']:.2f}  "
+            f"hits L={tot['live_hit']}/{tot['n']} G={tot['got_hit']}/{tot['n']}  "
+            f"Σ$ luck L={tot['live_lucky']:+.0f} G={tot['got_lucky']:+.0f}  "
+            f"deluck L={tot['live_deluck']:+.0f} G={tot['got_deluck']:+.0f}"
         )
 
 
