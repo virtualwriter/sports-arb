@@ -13,8 +13,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from lib.diurnal_got import DiurnalGotTracker
-
 UA = {"User-Agent": "chi-high-predictor/1.0 (research@example.edu)"}
 HOURLY_STRIKE_RE = re.compile(r"(\d+)°\s+or above")
 DAILY_RANGE_RE = re.compile(r"(\d+)°\s+to\s+(\d+)°")
@@ -76,9 +74,6 @@ class DailyHighPredictor:
         # Daily bins parsed from subtitles: {"lo", "hi", "label", "bid", "ask", "mid"}.
         # lo/hi are inclusive whole °F; tails use -999 / 999.
         self.daily_bins: list[dict] = []
-
-        # Shadow GOT diurnal stream (Synoptic-honed). Does not drive live bins.
-        self.diurnal = DiurnalGotTracker(lat=lat, lon=lon, local_tz=local_tz)
 
     def on_obs_high(self, temp_f: int, tenths_f: float | None = None) -> None:
         """Raise the observed day-high floor (Synoptic / NWS / METAR / hourly settle)."""
@@ -144,10 +139,6 @@ class DailyHighPredictor:
                     dt = dt.replace(tzinfo=timezone.utc)
                 self._synoptic.append((dt, precise))
                 self._update_slope(dt)
-                try:
-                    self.diurnal.on_obs(dt, precise)
-                except Exception:
-                    pass
         except Exception:
             pass
 
@@ -252,7 +243,6 @@ class DailyHighPredictor:
         if sources:
             self._blend_forecast_peaks()
             self.forecast_error = "; ".join(errors) if errors else None
-            self._seed_diurnal_from_forecast(now)
         else:
             self.forecast_peak_f = None
             self.forecast_peak_hour = None
@@ -364,36 +354,6 @@ class DailyHighPredictor:
             hour = int(round(statistics.median(hours))) if hours else None
         self.forecast_peak_hour = hour
 
-    def _tmin_from_forecast(self, now_utc: datetime) -> float | None:
-        """Today's overnight/morning min from the blended forecast series."""
-        if not self.forecast:
-            return None
-        today = now_utc.astimezone(self.tz).date()
-        todays = [
-            t
-            for dt, t in self.forecast
-            if dt.astimezone(self.tz).date() == today
-        ]
-        if not todays:
-            return None
-        return float(min(todays))
-
-    def _seed_diurnal_from_forecast(self, now_utc: datetime) -> None:
-        try:
-            local = now_utc.astimezone(self.tz)
-            self.diurnal.init_from_nwp(
-                now_local=local,
-                tmax_f=float(self.forecast_peak_f)
-                if self.forecast_peak_f is not None
-                else None,
-                tmin_f=self._tmin_from_forecast(now_utc),
-                tm_hour=float(self.forecast_peak_hour)
-                if self.forecast_peak_hour is not None
-                else None,
-            )
-        except Exception:
-            pass
-
     def predict(self, now_utc: datetime | None = None) -> dict:
         try:
             return self._predict_impl(now_utc)
@@ -414,7 +374,6 @@ class DailyHighPredictor:
                 "is_edge": False,
                 "rationale": "prediction error",
                 "forecast_error": self.forecast_error,
-                "diurnal": None,
             }
 
     def _predict_impl(self, now_utc: datetime | None) -> dict:
@@ -550,11 +509,6 @@ class DailyHighPredictor:
             and (floor is None or self.twc_high_f > floor)
         ):
             twc_unconfirmed = self.twc_high_f
-        try:
-            local = now_local or datetime.now(timezone.utc).astimezone(self.tz)
-            diurnal_snap = self.diurnal.snapshot(local, floor_f=floor)
-        except Exception:
-            diurnal_snap = None
         return {
             "predicted_high_f": predicted,
             "bin": bin_label,
@@ -577,7 +531,6 @@ class DailyHighPredictor:
             "is_edge": is_edge,
             "rationale": rationale,
             "forecast_error": self.forecast_error,
-            "diurnal": diurnal_snap,
         }
 
     def _update_slope(self, now_utc: datetime) -> None:
@@ -736,11 +689,6 @@ def significant_change(prev: dict | None, cur: dict) -> bool:
     if prev.get("bin_book_aware") != cur.get("bin_book_aware"):
         return True
     if prev.get("is_edge") != cur.get("is_edge"):
-        return True
-    # Shadow diurnal stream: emit when its peak call moves by ≥1°F.
-    prev_d = (prev.get("diurnal") or {}).get("predicted_high_f")
-    cur_d = (cur.get("diurnal") or {}).get("predicted_high_f")
-    if prev_d != cur_d:
         return True
     prev_c = prev.get("candidates") or {}
     cur_c = cur.get("candidates") or {}

@@ -598,7 +598,6 @@ class Monitor:
         should_emit = force or self.cycle_milestone or significant_change(self.last_emitted_prediction, pred)
         if should_emit:
             self.log({"type": "prediction", **pred})
-            diurnal = pred.get("diurnal") or {}
             self.milestone(
                 "PREDICTION",
                 predicted_high_f=pred["predicted_high_f"],
@@ -608,8 +607,6 @@ class Monitor:
                 is_edge=pred["is_edge"],
                 floor_f=pred.get("floor_f"),
                 forecast_peak_f=pred.get("forecast_peak_f"),
-                diurnal_predicted_high_f=diurnal.get("predicted_high_f"),
-                diurnal_peak_hour=diurnal.get("predicted_peak_hour"),
             )
             if pred["is_edge"] and (
                 self.last_emitted_prediction is None or not self.last_emitted_prediction.get("is_edge")

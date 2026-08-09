@@ -1,4 +1,4 @@
-"""GOT-style piecewise diurnal temperature model (shadow / parallel stream).
+"""GOT-style piecewise diurnal temperature model (separate process / tape).
 
 Göttsche & Olesen family:
   Daytime:  T(t) = T0 + Ta * cos(π/ω * (t - tm))
@@ -8,7 +8,10 @@ Göttsche & Olesen family:
 
 Smoothing: Stage B refits (T0, Ta, tm) by least squares to recent Synoptic
 points — not an arbitrary EMA on peak height. Peak = T0 + Ta from that fit.
-NWP only seeds the morning prior. Shadow-only — does not drive live bins.
+NWP only seeds the morning prior.
+
+Runs via scripts/monitor_city_diurnal_got.py (own tape). Does not live inside
+the active DailyHighPredictor and does not drive live bins / book_aware.
 """
 
 from __future__ import annotations
