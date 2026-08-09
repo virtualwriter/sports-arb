@@ -66,6 +66,7 @@ def _pred_snapshot(pred: dict) -> dict[str, Any]:
         "twc_unconfirmed_high_f",
         "rationale",
         "is_edge",
+        "diurnal",
     )
     out = {k: pred.get(k) for k in keys if k in pred or k in (
         "predicted_high_f", "bin", "bin_book_aware", "floor_f", "phase",
@@ -77,6 +78,7 @@ def _pred_snapshot(pred: dict) -> dict[str, Any]:
 
 
 def _path_key(snap: dict) -> tuple:
+    d = snap.get("diurnal") or {}
     return (
         snap.get("bin"),
         snap.get("bin_book_aware"),
@@ -84,6 +86,8 @@ def _path_key(snap: dict) -> tuple:
         snap.get("floor_f"),
         snap.get("phase"),
         snap.get("forecast_peak_f"),
+        d.get("predicted_high_f"),
+        d.get("predicted_peak_hour"),
     )
 
 
