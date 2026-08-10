@@ -10,7 +10,12 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from lib.diurnal_got import DiurnalGotTracker, day_length_hours, fit_daytime_cosine
+from lib.diurnal_got import (
+    DiurnalGotTracker,
+    day_length_hours,
+    fit_daytime_cosine,
+    sticky_bin_for_peak,
+)
 from lib.chi_high_predictor import DailyHighPredictor, significant_change
 from monitor_city_diurnal_got import GotFollower, default_got_tape_path
 
@@ -94,6 +99,110 @@ def test_nwp_refresh_does_not_restore_fitted_peak():
     assert peak_after is not None
     assert peak_after < 80
     assert abs(peak_after - peak_before) < 1.5
+
+
+def test_sticky_bin_hold_band_blocks_adjacent_chatter():
+    labels = ["94-95", "96-97", "98-99", "100-101"]
+    # Open on 96-97 at peak 97.2
+    held, raw = sticky_bin_for_peak(97.2, labels, None)
+    assert held == "96-97" and raw == "96-97"
+    # Wobble toward 98-99 but still inside hi(97)+1.0 → stay
+    held2, raw2 = sticky_bin_for_peak(98.0, labels, held)
+    assert held2 == "96-97" and raw2 == "98-99"
+    # Clear the band → flip
+    held3, raw3 = sticky_bin_for_peak(98.1, labels, held2)
+    assert held3 == "98-99" and raw3 == "98-99"
+    # Symmetric down: held 98-99, peak 97.0 still inside lo(98)-1 → stay
+    held4, raw4 = sticky_bin_for_peak(97.0, labels, held3)
+    assert held4 == "98-99" and raw4 == "96-97"
+    held5, raw5 = sticky_bin_for_peak(96.9, labels, held4)
+    assert held5 == "96-97" and raw5 == "96-97"
+
+
+def test_sticky_bin_open_ended_and_missing_held():
+    labels = ["<=88", "89-90", "91-92"]
+    held, _ = sticky_bin_for_peak(87.0, labels, None)
+    assert held == "<=88"
+    # Need peak > 88+1 to leave
+    stay, raw = sticky_bin_for_peak(89.0, labels, held)
+    assert stay == "<=88" and raw == "89-90"
+    leave, raw2 = sticky_bin_for_peak(89.1, labels, held)
+    assert leave == "89-90" and raw2 == "89-90"
+    # Held disappeared from strip → accept raw
+    flipped, _ = sticky_bin_for_peak(91.0, ["91-92", "93-94"], "<=88")
+    assert flipped == "91-92"
+
+
+def test_got_follower_bin_sticky_across_wobble():
+    """Follower keeps bin through sub-band peak chatter; exposes bin_raw."""
+    import json
+    from pathlib import Path
+    from unittest.mock import patch
+
+    root = Path(".tmp/test-got-bin-sticky")
+    root.mkdir(parents=True, exist_ok=True)
+    src = root / "austin-weather-26aug10-monitor.jsonl"
+    out = root / "austin-diurnal-got-26aug10-monitor.jsonl"
+    if out.exists():
+        out.unlink()
+    t0 = datetime(2026, 8, 10, 18, 0, tzinfo=timezone.utc)
+    labels = {"96-97": 0.3, "98-99": 0.5, "100-101": 0.15}
+    # Seed + force successive peaks that would thrash without hold-band.
+    rows = [
+        {
+            "type": "prediction",
+            "recv": t0.isoformat(),
+            "predicted_high_f": 98,
+            "bin": "98-99",
+            "floor_f": 96,
+            "forecast_peak_f": 98,
+            "forecast_peak_hour": 15,
+            "daily_implied": labels,
+        }
+    ]
+    src.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    follower = GotFollower(
+        "austin",
+        "26AUG10",
+        source_path=src,
+        out_path=out,
+        once=False,
+    )
+    follower.catch_up()
+    # Isolate hold-band behavior from the NWP seed bin.
+    follower._held_bin = None
+    follower._last_emit = None
+    # Inject snapshots with wobbling continuous peaks near the 97/98 fence.
+    peaks = [97.2, 98.0, 97.4, 98.0, 98.2, 99.0]
+    bins_out = []
+    raws_out = []
+    for i, pk in enumerate(peaks):
+        local = datetime(2026, 8, 10, 13, i, tzinfo=ZoneInfo("America/Chicago"))
+        with patch.object(
+            follower.got,
+            "snapshot",
+            return_value={
+                "stream": "diurnal_got",
+                "predicted_high_f": int(round(pk)),
+                "predicted_peak_f": pk,
+                "peak_method": "ls_fit",
+                "phase": "peak_window",
+            },
+        ):
+            follower._seeded = True
+            follower._last_daily_implied = labels
+            follower._emit(local, force=True)
+        last = follower._last_emit
+        assert last is not None
+        bins_out.append(last.get("bin"))
+        raws_out.append(last.get("bin_raw"))
+    # First peak 97.2 → 96-97; 98.0 raw wants 98-99 but hold keeps 96-97;
+    # 98.2 clears band → 98-99 and stays.
+    assert bins_out[0] == "96-97"
+    assert bins_out[1] == "96-97" and raws_out[1] == "98-99"
+    assert bins_out[2] == "96-97"
+    assert bins_out[4] == "98-99"
+    assert bins_out[5] == "98-99"
 
 
 def test_active_predictor_has_no_embedded_diurnal():
@@ -251,6 +360,9 @@ if __name__ == "__main__":
     test_peak_at_tm()
     test_ls_fit_smooths_below_nwp_on_soft_rise()
     test_nwp_refresh_does_not_restore_fitted_peak()
+    test_sticky_bin_hold_band_blocks_adjacent_chatter()
+    test_sticky_bin_open_ended_and_missing_held()
+    test_got_follower_bin_sticky_across_wobble()
     test_active_predictor_has_no_embedded_diurnal()
     test_significant_change_ignores_diurnal_field()
     test_got_follower_resets_on_source_truncate()

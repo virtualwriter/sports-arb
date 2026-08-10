@@ -23,9 +23,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from lib.diurnal_got import DiurnalGotTracker
+from lib.diurnal_got import DiurnalGotTracker, sticky_bin_for_peak
 from lib.weather_cities import get_city, list_cities
-from lib.weather_hourly_hedge_filter import bin_for_temp, default_tape_path
+from lib.weather_hourly_hedge_filter import default_tape_path
 
 
 def recv_ts() -> str:
@@ -81,6 +81,7 @@ class GotFollower:
         self._prefix_n = 128
         self._seeded = False
         self._last_emit: dict | None = None
+        self._held_bin: str | None = None
         self._last_daily_implied: dict = {}
         self._last_floor: float | None = None
         self._last_local: datetime | None = None
@@ -99,6 +100,7 @@ class GotFollower:
         self._src_prefix = None
         self._seeded = False
         self._last_emit = None
+        self._held_bin = None
         self._last_daily_implied = {}
         self._last_floor = None
         self._last_local = None
@@ -128,17 +130,28 @@ class GotFollower:
         if not self._seeded and self.got.params is None:
             return
         snap = self.got.snapshot(now_local, floor_f=self._last_floor)
-        peak = snap.get("predicted_high_f")
+        # Prefer continuous peak for the hold-band; fall back to rounded °F.
+        peak_f = snap.get("predicted_peak_f")
+        if peak_f is None:
+            peak_f = snap.get("predicted_high_f")
+        peak_i = snap.get("predicted_high_f")
         labels = list(self._last_daily_implied.keys())
-        bin_label = bin_for_temp(peak, labels) if peak is not None else None
+        bin_label, bin_raw = sticky_bin_for_peak(
+            float(peak_f) if peak_f is not None else None,
+            labels,
+            self._held_bin,
+        )
+        if bin_label is not None:
+            self._held_bin = bin_label
         row = {
             "type": "prediction",
             "stream": "diurnal_got",
             "city": self.city.key,
             "day": self.day,
             "recv": recv_ts(),
-            "predicted_high_f": peak,
+            "predicted_high_f": peak_i,
             "bin": bin_label,
+            "bin_raw": bin_raw,
             "floor_f": self._last_floor,
             "daily_implied": dict(self._last_daily_implied),
             "diurnal": snap,
