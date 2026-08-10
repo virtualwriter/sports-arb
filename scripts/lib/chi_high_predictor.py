@@ -396,6 +396,7 @@ class DailyHighPredictor:
                 floor=floor,
                 slope=slope,
                 rationale="no data",
+                now_local=now_local,
             )
 
         base = peak_f if peak_f is not None else floor
@@ -457,6 +458,7 @@ class DailyHighPredictor:
                 floor=floor,
                 slope=slope,
                 rationale="no data",
+                now_local=now_local,
             )
 
         predicted = int(predicted)
@@ -483,6 +485,7 @@ class DailyHighPredictor:
             divergence=divergence,
             is_edge=is_edge,
             rationale=rationale,
+            now_local=now_local,
         )
 
     def _record(
@@ -497,6 +500,7 @@ class DailyHighPredictor:
         divergence: dict | None = None,
         is_edge: bool = False,
         rationale: str = "",
+        now_local: datetime | None = None,
     ) -> dict:
         twc_unconfirmed = None
         if (
