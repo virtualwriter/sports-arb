@@ -8,9 +8,7 @@ Göttsche & Olesen family:
 
 Smoothing: Stage B refits (T0, Ta, tm) by least squares to recent Synoptic
 points — not an arbitrary EMA on peak height. Peak = T0 + Ta from that fit.
-NWP only seeds the morning prior. Emitted market bins apply a 1°F edge
-hold-band (sticky_bin_for_peak) so sub-degree LS wobble does not thrash
-adjacent Kalshi buckets.
+NWP only seeds the morning prior.
 
 Runs via scripts/monitor_city_diurnal_got.py (own tape). Does not live inside
 the active DailyHighPredictor and does not drive live bins / book_aware.
@@ -33,61 +31,6 @@ TM_GRID_STEP_HR = 0.25
 TM_PRIOR_WEIGHT = 0.15  # mild pull of tm toward NWP/current prior (hours² in SSE)
 # After this many Synoptic updates, ignore NWP peak re-seeds for height.
 NWP_PEAK_LOCKOUT_UPDATES = 3
-# Discrete Kalshi bins are ~2°F wide; LS peak wobble of <1°F near an edge
-# should not thrash the emitted bin (research rolls / path). Peak °F itself
-# stays unsmoothed — only the bin mapping is sticky.
-BIN_HOLD_F = 1.0
-
-
-def sticky_bin_for_peak(
-    peak_f: float | None,
-    labels: list[str] | tuple[str, ...] | None,
-    held_bin: str | None,
-    *,
-    hold_f: float = BIN_HOLD_F,
-) -> tuple[str | None, str | None]:
-    """Map peak → bin with an edge deadband so adjacent-bin chatter is filtered.
-
-    Returns ``(sticky_bin, raw_bin)``. Stays on ``held_bin`` until continuous
-    peak clears the held interval by ``hold_f`` °F (default 1°F). Floor/obs
-    ratchets that push peak clearly into the next bucket still flip.
-    """
-    # Local import avoids a hard cycle at module load with hedge helpers.
-    from lib.weather_hourly_hedge_filter import bin_for_temp, bin_hi, bin_lo
-
-    if peak_f is None:
-        return held_bin, None
-    raw = bin_for_temp(float(peak_f), labels)
-    if held_bin is None:
-        return raw, raw
-    if raw is None:
-        return held_bin, None
-    if raw == held_bin:
-        return held_bin, raw
-    # Held bin gone from strip (market reshaped) → accept raw.
-    if labels and held_bin not in labels:
-        return raw, raw
-
-    lo, hi = bin_lo(held_bin), bin_hi(held_bin)
-    if lo is None or hi is None:
-        return raw, raw
-
-    peak = float(peak_f)
-    band = max(0.0, float(hold_f))
-    # Open-ended low (e.g. <=88): only leave upward past hi + band.
-    if lo == -999:
-        if peak > hi + band:
-            return raw, raw
-        return held_bin, raw
-    # Open-ended high (>=N / N+): only leave downward past lo - band.
-    if held_bin.startswith(">=") or held_bin.endswith("+"):
-        if peak < lo - band:
-            return raw, raw
-        return held_bin, raw
-    # Closed 2° bucket: leave only when peak clears either edge by band.
-    if peak > hi + band or peak < lo - band:
-        return raw, raw
-    return held_bin, raw
 
 
 def day_length_hours(lat_deg: float, on: date) -> float:

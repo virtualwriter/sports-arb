@@ -4,7 +4,6 @@ Roll strategy (research — not live order routing):
   - Put $DAILY_STAKE into open.bin @ *same-row* mid (≥ MIN_BUY_MID).
   - On each model bin change: sell @ mid (same-row or last-known), buy @ same-row mid.
   - Never walk back for buys (stale mids invented fake dust fills).
-  - Optional de-luck: RESEARCH_MIN_BUY_MID + SIZING_FLOOR_MID (size as if mid ≥ floor).
   - Settle final held bin vs official/provisional high.
 
 Dual streams (live monitor + report):
@@ -24,11 +23,6 @@ from lib.weather_cities import get_city
 
 DAILY_STAKE = 1000.0
 MIN_BUY_MID = 0.05  # ignore dust bins; sub-nickel mids invent fake leverage
-# Research de-luck knobs (opt-in via simulate_roll_policy kwargs / report):
-# - RESEARCH_MIN_BUY_MID: refuse buys cheaper than this (no nickel lottery tickets)
-# - SIZING_FLOOR_MID: size contracts as if mid ≥ floor (caps leverage on cheap fills)
-RESEARCH_MIN_BUY_MID = 0.25
-SIZING_FLOOR_MID = 0.40
 ANTI_THRASH_MIN_MID = 0.55
 BOOK_LEAD_MIN_MID = 0.50
 BOOK_LEAD_EDGE = 0.10
@@ -362,7 +356,6 @@ def simulate_roll_policy(
     book_lead_min_mid: float = BOOK_LEAD_MIN_MID,
     book_lead_edge: float = BOOK_LEAD_EDGE,
     min_buy_mid: float = MIN_BUY_MID,
-    sizing_floor_mid: float = 0.0,
 ) -> PolicyRoll:
     """Simulate model roll and optional book-aware overlays.
 
@@ -374,8 +367,7 @@ def simulate_roll_policy(
     book_aware: anti_thrash + book_lead
 
     Buys require a *same-row* mid ≥ min_buy_mid (no stale walk-back).
-    When sizing_floor_mid > 0, contract count uses max(buy_mid, sizing_floor_mid)
-    so cheap fills cannot mint lottery leverage (sell still uses actual mid).
+    Contract count uses the actual buy mid (stake / buy_px).
     """
     notes: list[str] = []
     if not preds:
@@ -392,10 +384,6 @@ def simulate_roll_policy(
     sticky_fav = False
     prev_model: str | None = None
     prev_fav: str | None = None
-    size_floor = max(0.0, float(sizing_floor_mid or 0.0))
-
-    def _size_px(buy_px: float) -> float:
-        return max(buy_px, size_floor) if size_floor > 0 else buy_px
 
     def try_switch(new_bin: str, di: dict[str, Any], recv: str, why: str) -> bool:
         nonlocal held, contracts, switches, open_entry, sticky_fav
@@ -410,29 +398,22 @@ def simulate_roll_policy(
                 f"{f' @{buy_px:.0%}' if buy_px is not None else ''})"
             )
             return False
-        size_px = _size_px(buy_px)
         if held is None:
-            contracts = stake / size_px
+            contracts = stake / buy_px
             held = new_bin
             open_entry = buy_px
             path.append(new_bin)
-            note = f"{why}: open {new_bin} @{buy_px:.0%}"
-            if size_px > buy_px + 1e-9:
-                note += f" (sized@{size_px:.0%})"
-            notes.append(note)
+            notes.append(f"{why}: open {new_bin} @{buy_px:.0%}")
             return True
         sell_px = _sell_mid(preds, held, recv, di)
         if sell_px is None or sell_px <= 0:
             notes.append(f"{why}: skip → {new_bin} (no sell px for {held})")
             return False
-        contracts = (contracts * sell_px) / size_px
+        contracts = (contracts * sell_px) / buy_px
         held = new_bin
         path.append(new_bin)
         switches += 1
-        note = f"{why}: → {new_bin} buy@{buy_px:.0%} sell@{sell_px:.0%}"
-        if size_px > buy_px + 1e-9:
-            note += f" (sized@{size_px:.0%})"
-        notes.append(note)
+        notes.append(f"{why}: → {new_bin} buy@{buy_px:.0%} sell@{sell_px:.0%}")
         return True
 
     for i, r in enumerate(preds):
