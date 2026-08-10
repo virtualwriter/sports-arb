@@ -76,6 +76,9 @@ class GotFollower:
             lat=self.city.lat, lon=self.city.lon, local_tz=self.city.local_tz
         )
         self._offset = 0
+        self._src_inode: int | None = None
+        self._src_prefix: bytes | None = None
+        self._prefix_n = 128
         self._seeded = False
         self._last_emit: dict | None = None
         self._last_daily_implied: dict = {}
@@ -86,6 +89,30 @@ class GotFollower:
     def log(self, row: dict) -> None:
         with self.out_path.open("a") as f:
             f.write(json.dumps(row, default=str) + "\n")
+
+    def _reset_tracker(self, *, why: str) -> None:
+        """Full resync after source tape replace/truncate (rsync inode churn)."""
+        self.got = DiurnalGotTracker(
+            lat=self.city.lat, lon=self.city.lon, local_tz=self.city.local_tz
+        )
+        self._offset = 0
+        self._src_prefix = None
+        self._seeded = False
+        self._last_emit = None
+        self._last_daily_implied = {}
+        self._last_floor = None
+        self._last_local = None
+        self.log(
+            {
+                "type": "source_rotated",
+                "stream": "diurnal_got",
+                "city": self.city.key,
+                "day": self.day,
+                "recv": recv_ts(),
+                "why": why,
+                "source_tape": str(self.source_path),
+            }
+        )
 
     def _should_emit(self, snap: dict) -> bool:
         if self._last_emit is None:
@@ -178,6 +205,28 @@ class GotFollower:
     def catch_up(self) -> None:
         if not self.source_path.exists():
             return
+        st = self.source_path.stat()
+        inode = int(getattr(st, "st_ino", 0) or 0)
+        size = int(st.st_size)
+        with self.source_path.open("rb") as bf:
+            prefix = bf.read(min(self._prefix_n, size))
+        rotated = False
+        why = ""
+        if self._src_inode is not None and inode != self._src_inode:
+            rotated = True
+            why = f"inode {self._src_inode}->{inode}"
+        elif size < self._offset:
+            rotated = True
+            why = f"truncate size={size} offset={self._offset}"
+        elif self._src_prefix is not None and prefix != self._src_prefix:
+            # In-place rewrite (rsync/write) keeps inode but changes the head.
+            rotated = True
+            why = "prefix_changed"
+        if rotated:
+            self._reset_tracker(why=why)
+        self._src_inode = inode
+        if self._src_prefix is None:
+            self._src_prefix = prefix
         with self.source_path.open() as f:
             f.seek(self._offset)
             while True:

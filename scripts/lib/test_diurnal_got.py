@@ -110,6 +110,78 @@ def test_significant_change_ignores_diurnal_field():
     assert significant_change(a, b) is False
 
 
+def test_got_follower_resets_on_source_truncate():
+    """Rsync/replace can shrink the active tape; follower must not stall past EOF."""
+    import json
+    from pathlib import Path
+
+    root = Path(".tmp/test-got-follower-rotate")
+    root.mkdir(parents=True, exist_ok=True)
+    src = root / "miami-weather-26aug10-monitor.jsonl"
+    out = root / "miami-diurnal-got-26aug10-monitor.jsonl"
+    if out.exists():
+        out.unlink()
+    t0 = datetime(2026, 8, 10, 14, 0, tzinfo=timezone.utc)
+    src.write_text(
+        json.dumps(
+            {
+                "type": "prediction",
+                "recv": t0.isoformat(),
+                "predicted_high_f": 92,
+                "bin": "91-92",
+                "floor_f": 88,
+                "forecast_peak_f": 92,
+                "forecast_peak_hour": 14,
+                "daily_implied": {"91-92": 0.7, "93-94": 0.2},
+            }
+        )
+        + "\n"
+    )
+    follower = GotFollower(
+        "miami",
+        "26AUG10",
+        source_path=src,
+        out_path=out,
+        once=False,
+    )
+    follower.catch_up()
+    assert follower._offset > 0
+    n_before = sum(1 for line in out.read_text().splitlines() if '"prediction"' in line)
+    # Simulate rsync replace: truncate then rewrite longer content.
+    src.write_text(
+        json.dumps(
+            {
+                "type": "prediction",
+                "recv": (t0 + timedelta(hours=1)).isoformat(),
+                "predicted_high_f": 93,
+                "bin": "92-93",
+                "floor_f": 91,
+                "forecast_peak_f": 93,
+                "forecast_peak_hour": 14,
+                "daily_implied": {"91-92": 0.2, "92-93": 0.7},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "temp",
+                "source": "synoptic_1m",
+                "temp_f": 91,
+                "tenths_f": 91.2,
+                "obs_ts": (t0 + timedelta(hours=1, minutes=5)).isoformat(),
+                "recv": (t0 + timedelta(hours=1, minutes=5)).isoformat(),
+            }
+        )
+        + "\n"
+    )
+    follower.catch_up()
+    rows = [json.loads(line) for line in out.read_text().splitlines() if line.strip()]
+    assert any(r.get("type") == "source_rotated" for r in rows)
+    preds = [r for r in rows if r.get("type") == "prediction"]
+    assert len(preds) > n_before
+    assert preds[-1].get("predicted_high_f") is not None
+
+
 def test_got_follower_writes_separate_tape():
     import json
     from pathlib import Path
@@ -181,5 +253,6 @@ if __name__ == "__main__":
     test_nwp_refresh_does_not_restore_fitted_peak()
     test_active_predictor_has_no_embedded_diurnal()
     test_significant_change_ignores_diurnal_field()
+    test_got_follower_resets_on_source_truncate()
     test_got_follower_writes_separate_tape()
     print("ok")
