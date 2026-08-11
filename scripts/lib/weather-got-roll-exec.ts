@@ -12,7 +12,10 @@ import type { KalshiClient } from "./kalshi-client.js";
 import { killSwitchActive } from "./orphan-monitor.js";
 import {
   type CityRollState,
+  type GotBinMarket,
+  type GotRollGuardOpts,
   type RollPlan,
+  marketsFromKalshi,
   notionalUsd,
   planBuyWalkForProceeds,
   yesAskLevelsFromBook,
@@ -39,7 +42,7 @@ export const MAX_DAILY_USD = Math.max(
 );
 export const MIN_ASK = Math.min(
   0.5,
-  Math.max(0.01, Number(process.env.WEATHER_GOT_ROLL_MIN_ASK ?? 0.05)),
+  Math.max(0.01, Number(process.env.WEATHER_GOT_ROLL_MIN_ASK ?? 0.15)),
 );
 export const MAX_ASK = Math.min(
   0.99,
@@ -48,11 +51,50 @@ export const MAX_ASK = Math.min(
 const TIF = (process.env.WEATHER_GOT_ROLL_TIF ?? "immediate_or_cancel") as
   | "fill_or_kill"
   | "immediate_or_cancel";
-/** Absolute $ walk past TOB on each roll leg (opens stay TOB-only). */
+/** Absolute $ walk past TOB on each roll leg. */
 export const ROLL_WALK_SLIP = Math.max(
   0,
   Math.min(0.2, Number(process.env.WEATHER_GOT_ROLL_WALK_SLIP ?? 0.03)),
 );
+/** Absolute $ walk on opens (size to depth). */
+export const OPEN_WALK_SLIP = Math.max(
+  0,
+  Math.min(0.2, Number(process.env.WEATHER_GOT_ROLL_OPEN_WALK_SLIP ?? ROLL_WALK_SLIP)),
+);
+/** Do not roll stubs below this mark (contracts × bid). */
+export const MIN_ROLL_NOTIONAL_USD = Math.max(
+  0,
+  Number(process.env.WEATHER_GOT_ROLL_MIN_ROLL_NOTIONAL ?? 5),
+);
+/** Require sell fill ≥ this fraction of held before advancing to buy. */
+export const MIN_SELL_FILL_FRAC = Math.min(
+  1,
+  Math.max(0, Number(process.env.WEATHER_GOT_ROLL_MIN_SELL_FILL_FRAC ?? 0.95)),
+);
+/** Skip rolls that would buy fewer than this × contracts sold (price cliff). */
+export const MIN_BUY_TO_SELL_RATIO = Math.max(
+  0,
+  Number(process.env.WEATHER_GOT_ROLL_MIN_BUY_TO_SELL ?? 0.5),
+);
+/** Cap successful rolls per city-day. */
+export const MAX_ROLLS_PER_CITY_DAY = Math.max(
+  0,
+  Math.floor(Number(process.env.WEATHER_GOT_ROLL_MAX_ROLLS_PER_DAY ?? 5)),
+);
+/** Consecutive GOT preds on same new bin before rolling. */
+export const CONFIRM_TICKS = Math.max(
+  1,
+  Math.floor(Number(process.env.WEATHER_GOT_ROLL_CONFIRM_TICKS ?? 2)),
+);
+
+export function gotRollGuards(): GotRollGuardOpts {
+  return {
+    minRollNotionalUsd: MIN_ROLL_NOTIONAL_USD,
+    minSellFillFrac: MIN_SELL_FILL_FRAC,
+    minBuyToSellRatio: MIN_BUY_TO_SELL_RATIO,
+    maxRollsPerCityDay: MAX_ROLLS_PER_CITY_DAY,
+  };
+}
 
 type StateFile = {
   spentDayKey?: string;
@@ -124,12 +166,24 @@ export function gotRollExecLabel(): string {
     + `minAsk=${MIN_ASK} `
     + `maxAsk=${MAX_ASK} `
     + `rollWalkSlip=${ROLL_WALK_SLIP} `
+    + `openWalkSlip=${OPEN_WALK_SLIP} `
+    + `minRollNotional=${MIN_ROLL_NOTIONAL_USD} `
+    + `minSellFill=${MIN_SELL_FILL_FRAC} `
+    + `minBuyToSell=${MIN_BUY_TO_SELL_RATIO} `
+    + `maxRolls/day=${MAX_ROLLS_PER_CITY_DAY} `
+    + `confirmTicks=${CONFIRM_TICKS} `
     + `tif=${TIF}`
   );
 }
 
 export function getHeld(city: string): CityRollState | null {
   return cityState.get(city) ?? null;
+}
+
+export function setHeld(city: string, held: CityRollState | null): void {
+  if (!held || held.contracts <= 0) cityState.delete(city);
+  else cityState.set(city, held);
+  persistState();
 }
 
 export function clearHeldIfDay(city: string, day: string): void {
@@ -175,6 +229,76 @@ function avgFillPrice(resp: unknown, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+/**
+ * Sync city state from Kalshi portfolio so orphans are visible to the roller.
+ * Picks the largest YES position for each city's event day.
+ */
+export async function reconcileGotRollFromKalshi(opts: {
+  cities: Array<{ key: string; series: string; day: string }>;
+}): Promise<void> {
+  if (!client) {
+    log("reconcile skip: no_client");
+    return;
+  }
+  try {
+    const resp = await client.get<{
+      market_positions?: Array<{
+        ticker?: string;
+        position_fp?: string | number;
+        position?: string | number;
+      }>;
+    }>("/portfolio/positions?limit=200");
+    const positions = resp.market_positions ?? [];
+    for (const city of opts.cities) {
+      const prefix = `${city.series}-${city.day.toUpperCase()}`;
+      const matches = positions
+        .map((p) => ({
+          ticker: String(p.ticker ?? ""),
+          pos: Number(p.position_fp ?? p.position ?? 0),
+        }))
+        .filter((p) => p.ticker.startsWith(prefix) && p.pos > 0)
+        .sort((a, b) => b.pos - a.pos);
+      if (!matches.length) {
+        const held = cityState.get(city.key);
+        if (held && held.day === city.day) {
+          log(`reconcile ${city.key}: flat on Kalshi; clearing local held`);
+          cityState.delete(city.key);
+        }
+        continue;
+      }
+      const best = matches[0]!;
+      let markets: GotBinMarket[] = [];
+      try {
+        const event = await client.getEvent(`${city.series}-${city.day.toUpperCase()}`, true);
+        markets = marketsFromKalshi(event?.markets ?? []);
+      } catch {
+        /* keep empty */
+      }
+      const mkt = markets.find((m) => m.ticker === best.ticker);
+      const prev = cityState.get(city.key);
+      const bin = mkt?.label
+        ?? (prev?.ticker === best.ticker ? prev.bin : best.ticker.split("-").pop() ?? "unknown");
+      const next: CityRollState = {
+        day: city.day,
+        bin,
+        ticker: best.ticker,
+        contracts: Number(best.pos.toFixed(2)),
+        avgEntry: prev?.ticker === best.ticker ? prev.avgEntry : 0,
+        openedAt: prev?.openedAt ?? new Date().toISOString(),
+        lastActionAt: new Date().toISOString(),
+        rollsToday: prev?.day === city.day ? (prev.rollsToday ?? 0) : 0,
+      };
+      cityState.set(city.key, next);
+      log(
+        `reconcile ${city.key}: ${next.contracts}×${next.bin} (${next.ticker})`
+        + (matches.length > 1 ? ` (+${matches.length - 1} other pos)` : ""),
+      );
+    }
+    persistState();
+  } catch (err) {
+    log(`reconcile error: ${(err as Error).message}`);
+  }
+}
 
 export async function executeGotRollPlan(opts: {
   city: string;
@@ -241,16 +365,18 @@ export async function executeGotRollPlan(opts: {
         plan.contracts,
         plan.limit,
       );
+      const avg = avgFillPrice(resp, plan.limit);
       if (fillCount > 0) {
-        spentTodayUsd += fillCount * plan.limit;
+        spentTodayUsd += fillCount * avg;
         cityState.set(city, {
           day,
           bin: plan.bin,
           ticker: plan.ticker,
           contracts: fillCount,
-          avgEntry: plan.limit,
+          avgEntry: avg,
           openedAt: new Date().toISOString(),
           lastActionAt: new Date().toISOString(),
+          rollsToday: 0,
         });
         persistState();
       }
@@ -262,6 +388,7 @@ export async function executeGotRollPlan(opts: {
         count: plan.contracts,
         price: plan.limit,
         fillCount,
+        avgFill: avg,
         resp,
         rttMs,
         spentTodayUsd,
@@ -278,6 +405,7 @@ export async function executeGotRollPlan(opts: {
       + `sell x${plan.sellContracts}@${plan.sellLimit.toFixed(2)} `
       + `buy x${plan.buyContracts}@${plan.buyLimit.toFixed(2)}${walkNote}`,
     );
+    const prev = cityState.get(city);
     const sell = await place("ask", plan.fromTicker, plan.sellContracts, plan.sellLimit);
     const sellAvg = avgFillPrice(sell.resp, plan.sellLimit);
     appendOrder({
@@ -297,6 +425,38 @@ export async function executeGotRollPlan(opts: {
       appendOrder({ ...base, kind: "weather_got_roll_skip", reason: "sell_unfilled" });
       return "skipped";
     }
+
+    // Orphan guard: do not advance to a new bin on a partial sell.
+    if (
+      MIN_SELL_FILL_FRAC > 0
+      && sell.fillCount + 1e-9 < plan.sellContracts * MIN_SELL_FILL_FRAC
+    ) {
+      const remaining = Number((plan.sellContracts - sell.fillCount).toFixed(2));
+      if (remaining > 0 && prev) {
+        cityState.set(city, {
+          ...prev,
+          contracts: remaining,
+          lastActionAt: new Date().toISOString(),
+        });
+      } else if (remaining <= 0) {
+        cityState.delete(city);
+      }
+      persistState();
+      appendOrder({
+        ...base,
+        kind: "weather_got_roll_skip",
+        reason: "sell_partial_orphan_guard",
+        fillCount: sell.fillCount,
+        want: plan.sellContracts,
+        remaining,
+      });
+      log(
+        `orphan guard ${city}: sold ${sell.fillCount}/${plan.sellContracts}; `
+        + `staying on ${plan.fromBin} with ${remaining}`,
+      );
+      return "skipped";
+    }
+
     // Size buy from actual sell proceeds; re-walk ask ladder when slip enabled.
     const proceeds = sell.fillCount * sellAvg;
     let buyCount = Math.floor(proceeds / plan.buyLimit);
@@ -327,6 +487,28 @@ export async function executeGotRollPlan(opts: {
         log(`buy walk refresh failed ${city}: ${(err as Error).message}`);
       }
     }
+
+    // Cliff guard at execution time (after actual sell).
+    if (
+      MIN_BUY_TO_SELL_RATIO > 0
+      && buyCount + 1e-9 < sell.fillCount * MIN_BUY_TO_SELL_RATIO
+    ) {
+      // Sold fully — flat rather than buying a cliff stub.
+      cityState.delete(city);
+      persistState();
+      appendOrder({
+        ...base,
+        kind: "weather_got_roll_skip",
+        reason: "roll_cliff_after_sell",
+        sellFill: sell.fillCount,
+        buyCount,
+      });
+      log(
+        `cliff guard ${city}: buy ${buyCount} < ${MIN_BUY_TO_SELL_RATIO}× sold ${sell.fillCount}; flat`,
+      );
+      return "skipped";
+    }
+
     if (buyCount < 1) {
       cityState.delete(city);
       persistState();
@@ -357,8 +539,9 @@ export async function executeGotRollPlan(opts: {
         ticker: plan.toTicker,
         contracts: buy.fillCount,
         avgEntry: buyAvg,
-        openedAt: cityState.get(city)?.openedAt ?? new Date().toISOString(),
+        openedAt: prev?.openedAt ?? new Date().toISOString(),
         lastActionAt: new Date().toISOString(),
+        rollsToday: (prev?.day === day ? (prev.rollsToday ?? 0) : 0) + 1,
       });
     } else {
       // Sold but failed to rebuy — flat.

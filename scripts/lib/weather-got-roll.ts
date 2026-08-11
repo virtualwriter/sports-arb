@@ -91,11 +91,20 @@ export type CityRollState = {
   avgEntry: number;
   openedAt: string;
   lastActionAt: string;
+  /** Successful roll count for this city-day (opens do not increment). */
+  rollsToday?: number;
 };
 
 export type RollPlan =
   | { action: "skip"; reason: string }
-  | { action: "open"; bin: string; ticker: string; contracts: number; limit: number }
+  | {
+      action: "open";
+      bin: string;
+      ticker: string;
+      contracts: number;
+      limit: number;
+      walk?: { maxSlip: number; tob: number; vwap: number; fillable: number };
+    }
   | {
       action: "roll";
       fromBin: string;
@@ -232,9 +241,68 @@ export function planBuyWalkForProceeds(opts: {
 }
 
 /**
- * Plan open/roll for one city. Opens use TOB ask.
- * Rolls use TOB by default; when sellBidLevels/buyAskLevels + rollMaxSlip are
- * provided, walk within slip so IOC can take deeper size.
+ * Size an open to stake, capped by visible ask depth within maxSlip of TOB.
+ */
+export function planOpenWalk(opts: {
+  stakeUsd: number;
+  askLevels: BookLevel[];
+  maxSlip: number;
+  minAsk: number;
+  maxAsk: number;
+}): WalkFill & { contracts: number } {
+  const levels = [...opts.askLevels].sort((a, b) => a[0] - b[0]);
+  const tob = levels[0]?.[0] ?? 0;
+  if (!(tob > 0)) {
+    return { tob: 0, limit: 0, vwap: 0, fillable: 0, contracts: 0, levelsTaken: [] };
+  }
+  const want = contractsForStake(opts.stakeUsd, tob);
+  const ceil = Math.min(opts.maxAsk, Number((tob + opts.maxSlip).toFixed(4)));
+  let left = want;
+  let notional = 0;
+  let fillable = 0;
+  let limit = tob;
+  const levelsTaken: BookLevel[] = [];
+  for (const [px, sz] of levels) {
+    if (left <= 1e-9) break;
+    if (px + 1e-9 < opts.minAsk) continue;
+    if (px > ceil + 1e-9) break;
+    const roomUsd = opts.stakeUsd - notional;
+    if (roomUsd <= 1e-9) break;
+    const maxByUsd = Math.floor(roomUsd / px + 1e-9);
+    const take = Math.min(sz, left, maxByUsd);
+    if (take < 1) break;
+    levelsTaken.push([px, take]);
+    fillable += take;
+    notional += take * px;
+    left -= take;
+    limit = px;
+  }
+  const vwap = fillable > 0 ? notional / fillable : tob;
+  return {
+    tob,
+    limit: Number(limit.toFixed(4)),
+    vwap: Number(vwap.toFixed(4)),
+    fillable: Number(fillable.toFixed(2)),
+    contracts: Math.floor(fillable),
+    levelsTaken,
+  };
+}
+
+export type GotRollGuardOpts = {
+  /** Skip roll when held mark (contracts×bid) is below this. */
+  minRollNotionalUsd?: number;
+  /** Require planned sell depth ≥ this fraction of held (else skip). */
+  minSellFillFrac?: number;
+  /** Require buyContracts ≥ sellContracts × ratio (anti cliff). */
+  minBuyToSellRatio?: number;
+  /** Max successful rolls per city-day. */
+  maxRollsPerCityDay?: number;
+};
+
+/**
+ * Plan open/roll for one city.
+ * Opens size to book depth when askLevels provided.
+ * Rolls walk within slip and apply anti-orphan / anti-thrash guards.
  */
 export function planGotRoll(opts: {
   bin: string | null | undefined;
@@ -248,14 +316,26 @@ export function planGotRoll(opts: {
   stakeUsd: number;
   minAsk: number;
   maxAsk: number;
+  /** YES ask ladder on target (opens + roll buys). */
+  buyAskLevels?: BookLevel[] | null;
   /** YES bid ladder on the held ticker (best first). Enables roll sell walk. */
   sellBidLevels?: BookLevel[] | null;
-  /** YES ask ladder on the target ticker (best first). Enables roll buy walk. */
-  buyAskLevels?: BookLevel[] | null;
-  /** Max absolute price walk past TOB on each roll leg (default 0 = TOB only). */
+  /** Max absolute price walk past TOB on roll legs (default 0 = TOB only). */
   rollMaxSlip?: number;
+  /** Max absolute price walk on opens when ask levels provided. */
+  openMaxSlip?: number;
+  guards?: GotRollGuardOpts;
 }): RollPlan {
   const { bin, markets, held, day, stakeUsd, minAsk, maxAsk } = opts;
+  const guards = opts.guards ?? {};
+  const minRollNotional = Math.max(0, Number(guards.minRollNotionalUsd ?? 0) || 0);
+  const minSellFillFrac = Math.min(
+    1,
+    Math.max(0, Number(guards.minSellFillFrac ?? 0) || 0),
+  );
+  const minBuyToSell = Math.max(0, Number(guards.minBuyToSellRatio ?? 0) || 0);
+  const maxRolls = Math.max(0, Math.floor(Number(guards.maxRollsPerCityDay ?? 0) || 0));
+
   if (!bin) return { action: "skip", reason: "no_bin" };
   const target = findMarketForBin(markets, bin);
   if (!target) return { action: "skip", reason: "bin_not_in_strip" };
@@ -272,6 +352,32 @@ export function planGotRoll(opts: {
     if (ask == null) return { action: "skip", reason: "no_ask" };
     if (ask < minAsk) return { action: "skip", reason: "ask_below_min" };
     if (ask > maxAsk) return { action: "skip", reason: "ask_above_max" };
+
+    const openSlip = Math.max(0, Number(opts.openMaxSlip ?? 0) || 0);
+    if (openSlip > 0 && opts.buyAskLevels && opts.buyAskLevels.length > 0) {
+      const openWalk = planOpenWalk({
+        stakeUsd,
+        askLevels: opts.buyAskLevels,
+        maxSlip: openSlip,
+        minAsk,
+        maxAsk,
+      });
+      if (openWalk.contracts < 1) return { action: "skip", reason: "size_zero" };
+      return {
+        action: "open",
+        bin,
+        ticker: target.ticker,
+        contracts: openWalk.contracts,
+        limit: openWalk.limit,
+        walk: {
+          maxSlip: openSlip,
+          tob: openWalk.tob,
+          vwap: openWalk.vwap,
+          fillable: openWalk.fillable,
+        },
+      };
+    }
+
     const contracts = contractsForStake(stakeUsd, ask);
     if (contracts < 1) return { action: "skip", reason: "size_zero" };
     return {
@@ -285,12 +391,21 @@ export function planGotRoll(opts: {
 
   // Roll held → new bin.
   if (held.bin === bin) return { action: "skip", reason: "already_in_bin" };
+  if (maxRolls > 0 && (held.rollsToday ?? 0) >= maxRolls) {
+    return { action: "skip", reason: "roll_cap" };
+  }
+
   const bid = opts.yesBid;
   const newAsk = opts.newYesAsk;
   if (bid == null || bid <= 0) return { action: "skip", reason: "no_bid_to_sell" };
   if (newAsk == null) return { action: "skip", reason: "no_ask" };
   if (newAsk < minAsk) return { action: "skip", reason: "ask_below_min" };
   if (newAsk > maxAsk) return { action: "skip", reason: "ask_above_max" };
+
+  const mark = held.contracts * bid;
+  if (minRollNotional > 0 && mark + 1e-9 < minRollNotional) {
+    return { action: "skip", reason: "min_roll_notional" };
+  }
 
   const maxSlip = Math.max(0, Number(opts.rollMaxSlip ?? 0) || 0);
   const canWalk =
@@ -300,6 +415,12 @@ export function planGotRoll(opts: {
     && opts.buyAskLevels
     && opts.buyAskLevels.length > 0;
 
+  let sellContracts = held.contracts;
+  let sellLimit = bid;
+  let buyContracts = 0;
+  let buyLimit = newAsk;
+  let walkMeta: Extract<RollPlan, { action: "roll" }>["walk"];
+
   if (canWalk) {
     const sellWalk = planSellWalk({
       wantContracts: held.contracts,
@@ -308,6 +429,12 @@ export function planGotRoll(opts: {
       minBid: 0.01,
     });
     if (sellWalk.fillable < 1) return { action: "skip", reason: "no_bid_to_sell" };
+    if (
+      minSellFillFrac > 0
+      && sellWalk.fillable + 1e-9 < held.contracts * minSellFillFrac
+    ) {
+      return { action: "skip", reason: "sell_depth_thin" };
+    }
     const proceeds = sellWalk.vwap * sellWalk.fillable;
     const buyWalk = planBuyWalkForProceeds({
       proceedsUsd: proceeds,
@@ -317,40 +444,42 @@ export function planGotRoll(opts: {
       maxAsk,
     });
     if (buyWalk.contracts < 1) return { action: "skip", reason: "roll_size_zero" };
-    return {
-      action: "roll",
-      fromBin: held.bin,
-      fromTicker: held.ticker,
-      sellContracts: held.contracts,
-      sellLimit: sellWalk.limit,
-      toBin: bin,
-      toTicker: target.ticker,
-      buyContracts: buyWalk.contracts,
-      buyLimit: buyWalk.limit,
-      walk: {
-        maxSlip,
-        sellTob: sellWalk.tob,
-        sellVwap: sellWalk.vwap,
-        sellFillable: sellWalk.fillable,
-        buyTob: buyWalk.tob,
-        buyVwap: buyWalk.vwap,
-      },
+    sellContracts = held.contracts;
+    sellLimit = sellWalk.limit;
+    buyContracts = buyWalk.contracts;
+    buyLimit = buyWalk.limit;
+    walkMeta = {
+      maxSlip,
+      sellTob: sellWalk.tob,
+      sellVwap: sellWalk.vwap,
+      sellFillable: sellWalk.fillable,
+      buyTob: buyWalk.tob,
+      buyVwap: buyWalk.vwap,
     };
+  } else {
+    const proceeds = held.contracts * bid;
+    buyContracts = Math.floor(proceeds / newAsk);
+    if (buyContracts < 1) return { action: "skip", reason: "roll_size_zero" };
   }
 
-  const proceeds = held.contracts * bid;
-  const buyContracts = Math.floor(proceeds / newAsk);
-  if (buyContracts < 1) return { action: "skip", reason: "roll_size_zero" };
+  if (
+    minBuyToSell > 0
+    && buyContracts + 1e-9 < sellContracts * minBuyToSell
+  ) {
+    return { action: "skip", reason: "roll_cliff" };
+  }
+
   return {
     action: "roll",
     fromBin: held.bin,
     fromTicker: held.ticker,
-    sellContracts: held.contracts,
-    sellLimit: bid,
+    sellContracts,
+    sellLimit,
     toBin: bin,
     toTicker: target.ticker,
     buyContracts,
-    buyLimit: newAsk,
+    buyLimit,
+    walk: walkMeta,
   };
 }
 

@@ -16,15 +16,19 @@ import { existsSync, openSync, readSync, statSync, closeSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { bookQuotes, KalshiClient } from "./lib/kalshi-client.js";
 import {
+  CONFIRM_TICKS,
   clearHeldIfDay,
   configureGotRollExec,
   executeGotRollPlan,
   getHeld,
   gotRollExecLabel,
+  gotRollGuards,
   loadGotRollState,
   MAX_ASK,
   MIN_ASK,
+  OPEN_WALK_SLIP,
   ROLL_WALK_SLIP,
+  reconcileGotRollFromKalshi,
   STAKE_USD,
   WEATHER_GOT_ROLL_LIVE,
 } from "./lib/weather-got-roll-exec.js";
@@ -75,6 +79,9 @@ type CityRuntime = {
   markets: GotBinMarket[];
   marketsLoadedAt: number;
   lastBin: string | null;
+  /** Pending GOT bin awaiting CONFIRM_TICKS consecutive preds before roll. */
+  confirmBin: string | null;
+  confirmCount: number;
 };
 
 function log(msg: string): void {
@@ -126,14 +133,41 @@ async function handlePrediction(
     await refreshMarkets(client, rt);
   }
   const held = getHeld(rt.cfg.key);
-  // Same bin we already acted on this process — still re-check held for restarts.
-  if (rt.lastBin === bin && held?.bin === bin) return;
+  // Already handled this GOT bin (open/roll/skip). Wait for a different bin.
+  // Confirm waits intentionally leave lastBin unset so a second tick can land.
+  if (rt.lastBin === bin) {
+    if (!held || held.bin === bin) {
+      rt.confirmBin = null;
+      rt.confirmCount = 0;
+    }
+    return;
+  }
 
   const target = rt.markets.find((m) => m.label === bin);
   if (!target) {
     log(`${rt.cfg.key} skip bin=${bin} not in strip`);
     rt.lastBin = bin;
+    rt.confirmBin = null;
+    rt.confirmCount = 0;
     return;
+  }
+
+  // Two-tick confirm before rolling off an existing hold (opens stay 1-tick).
+  if (held && held.day === rt.day && held.contracts > 0 && held.bin !== bin) {
+    if (rt.confirmBin !== bin) {
+      rt.confirmBin = bin;
+      rt.confirmCount = 1;
+      log(`${rt.cfg.key} confirm ${bin} 1/${CONFIRM_TICKS} (held ${held.bin})`);
+      return;
+    }
+    rt.confirmCount += 1;
+    if (rt.confirmCount < CONFIRM_TICKS) {
+      log(`${rt.cfg.key} confirm ${bin} ${rt.confirmCount}/${CONFIRM_TICKS}`);
+      return;
+    }
+  } else {
+    rt.confirmBin = null;
+    rt.confirmCount = 0;
   }
 
   let yesAsk: number | null = null;
@@ -143,9 +177,11 @@ async function handlePrediction(
   let buyAskLevels: BookLevel[] | null = null;
 
   if (!held || held.day !== rt.day || held.contracts <= 0) {
-    const q = bookQuotes(await client.getOrderbook(target.ticker, 5));
+    const openBook = await client.getOrderbook(target.ticker, BOOK_DEPTH);
+    const q = bookQuotes(openBook);
     yesAsk = q.yesAsk > 0 ? q.yesAsk : null;
     yesBid = q.yesBid > 0 ? q.yesBid : null;
+    buyAskLevels = yesAskLevelsFromBook(openBook);
     const m = (await client.getEvent(eventTickerFor(rt.cfg.series, rt.day), true))
       ?.markets
       ?.find((x) => x.ticker === target.ticker);
@@ -184,6 +220,8 @@ async function handlePrediction(
     sellBidLevels,
     buyAskLevels,
     rollMaxSlip: ROLL_WALK_SLIP,
+    openMaxSlip: OPEN_WALK_SLIP,
+    guards: gotRollGuards(),
   });
 
   const result = await executeGotRollPlan({
@@ -192,7 +230,10 @@ async function handlePrediction(
     plan,
     gotRecv: typeof row.recv === "string" ? row.recv : undefined,
   });
-  log(`${rt.cfg.key} bin=${bin} plan=${plan.action} result=${result}`);
+  log(`${rt.cfg.key} bin=${bin} plan=${plan.action}${plan.action === "skip" ? `:${plan.reason}` : ""} result=${result}`);
+  rt.confirmBin = null;
+  rt.confirmCount = 0;
+  // Mark this GOT bin handled (including guard skips) so we wait for a change.
   rt.lastBin = bin;
 }
 
@@ -233,6 +274,8 @@ async function pollCity(
     rt.markets = [];
     rt.marketsLoadedAt = 0;
     rt.lastBin = null;
+    rt.confirmBin = null;
+    rt.confirmCount = 0;
     clearHeldIfDay(rt.cfg.key, day);
   }
   const path = gotTapePath(rt.cfg.fileKey, rt.day);
@@ -298,6 +341,8 @@ async function main(): Promise<void> {
     markets: [],
     marketsLoadedAt: 0,
     lastBin: null,
+    confirmBin: null,
+    confirmCount: 0,
   }));
 
   // Seek to EOF on existing tapes (do not replay history into orders).
@@ -308,6 +353,17 @@ async function main(): Promise<void> {
     } catch (err) {
       log(`${rt.cfg.key} catch-up error: ${(err as Error).message}`);
     }
+  }
+
+  // Pull Kalshi inventory so orphans / desyncs are tracked before trading.
+  if (WEATHER_GOT_ROLL_LIVE) {
+    await reconcileGotRollFromKalshi({
+      cities: runtimes.map((rt) => ({
+        key: rt.cfg.key,
+        series: rt.cfg.series,
+        day: rt.day,
+      })),
+    });
   }
 
   // If already flat but GOT has a current bin, open once (post-seek sync).
@@ -325,6 +381,7 @@ async function main(): Promise<void> {
     }
   }
 
+  let loops = 0;
   for (;;) {
     for (const rt of runtimes) {
       try {
@@ -332,6 +389,17 @@ async function main(): Promise<void> {
       } catch (err) {
         log(`${rt.cfg.key} poll error: ${(err as Error).message}`);
       }
+    }
+    loops += 1;
+    // Periodic reconcile (~every 5 min at 2s poll).
+    if (WEATHER_GOT_ROLL_LIVE && loops % 150 === 0) {
+      await reconcileGotRollFromKalshi({
+        cities: runtimes.map((rt) => ({
+          key: rt.cfg.key,
+          series: rt.cfg.series,
+          day: rt.day,
+        })),
+      });
     }
     await new Promise((r) => setTimeout(r, POLL_MS));
   }

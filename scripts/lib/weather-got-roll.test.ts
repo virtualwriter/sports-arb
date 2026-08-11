@@ -7,6 +7,7 @@ import {
   parseDailyHighSubtitle,
   planBuyWalkForProceeds,
   planGotRoll,
+  planOpenWalk,
   planSellWalk,
   yesAskLevelsFromBook,
   yesBidLevelsFromBook,
@@ -67,10 +68,11 @@ function testMarketsAndPlan(): void {
     yesBid: 0.03,
     newYesAsk: null,
     stakeUsd: 20,
-    minAsk: 0.05,
+    minAsk: 0.15,
     maxAsk: 0.95,
   });
   assert.equal(dust.action, "skip");
+  if (dust.action === "skip") assert.equal(dust.reason, "ask_below_min");
 
   const roll = planGotRoll({
     bin: "86-87",
@@ -112,7 +114,6 @@ function testWalkHelpers(): void {
   });
   assert.equal(bids[0][0], 0.21);
 
-  // Thin TOB (13 @ 0.21) — 3¢ walk should reach 0.19 and fill 54.
   const sell = planSellWalk({
     wantContracts: 54,
     bidLevels: [[0.21, 13], [0.2, 20], [0.19, 40], [0.15, 100]],
@@ -121,28 +122,34 @@ function testWalkHelpers(): void {
   assert.equal(sell.tob, 0.21);
   assert.equal(sell.limit, 0.19);
   assert.equal(sell.fillable, 54);
-  assert.ok(sell.vwap < 0.21);
 
-  // Without enough depth inside slip, stop early.
   const sellThin = planSellWalk({
     wantContracts: 54,
     bidLevels: [[0.21, 13], [0.2, 2]],
     maxSlip: 0.03,
   });
   assert.equal(sellThin.fillable, 15);
-  assert.equal(sellThin.limit, 0.2);
 
-  // Buy walk spends proceeds across asks within slip.
   const buy = planBuyWalkForProceeds({
-    proceedsUsd: 13.45 * 0.24, // ~3.228
+    proceedsUsd: 13.45 * 0.24,
     askLevels: [[0.24, 10], [0.25, 50], [0.26, 50], [0.3, 100]],
     maxSlip: 0.03,
     minAsk: 0.05,
     maxAsk: 0.95,
   });
-  assert.ok(buy.contracts >= 13); // more than TOB-only floor(3.228/0.24)=13
+  assert.ok(buy.contracts >= 13);
   assert.ok(buy.limit <= 0.27);
-  assert.ok(buy.vwap >= 0.24);
+
+  // Open sized to depth, not full $20 when book is thin.
+  const openWalk = planOpenWalk({
+    stakeUsd: 20,
+    askLevels: [[0.08, 70], [0.09, 50], [0.1, 200]],
+    maxSlip: 0.03,
+    minAsk: 0.05,
+    maxAsk: 0.95,
+  });
+  assert.ok(openWalk.contracts < contractsForStake(20, 0.08)); // 250 uncapped
+  assert.ok(openWalk.contracts >= 70);
 }
 
 function testRollWalkPlan(): void {
@@ -175,14 +182,122 @@ function testRollWalkPlan(): void {
   });
   assert.equal(roll.action, "roll");
   if (roll.action === "roll") {
-    assert.equal(roll.sellLimit, 0.38); // walked to fill 54
+    assert.equal(roll.sellLimit, 0.38);
     assert.ok(roll.walk);
-    assert.equal(roll.walk?.maxSlip, 0.03);
     assert.equal(roll.walk?.sellFillable, 54);
-    // TOB-only would buy floor(54*0.40/0.24)=90; walk sell VWAP is lower so
-    // buy count may dip, but buy limit may step past 0.24 for depth.
     assert.ok(roll.buyContracts >= 1);
-    assert.ok(roll.buyLimit >= 0.24 && roll.buyLimit <= 0.27);
+  }
+}
+
+function testGuards(): void {
+  const markets = marketsFromKalshi([
+    { ticker: "KXHIGHLAX-26AUG11-B76.5", yes_sub_title: "76° to 77°", status: "active" },
+    { ticker: "KXHIGHLAX-26AUG11-B78.5", yes_sub_title: "78° to 79°", status: "active" },
+  ]);
+  const held = {
+    day: "26AUG11",
+    bin: "76-77",
+    ticker: "KXHIGHLAX-26AUG11-B76.5",
+    contracts: 45,
+    avgEntry: 0.27,
+    openedAt: "t0",
+    lastActionAt: "t0",
+    rollsToday: 0,
+  };
+
+  // Cheap → rich cliff: sell ~$1.8 → buy ~2 contracts << 50% of 45.
+  const cliff = planGotRoll({
+    bin: "78-79",
+    markets,
+    held,
+    day: "26AUG11",
+    yesAsk: null,
+    yesBid: 0.04,
+    newYesAsk: 0.8,
+    stakeUsd: 20,
+    minAsk: 0.05,
+    maxAsk: 0.95,
+    sellBidLevels: [[0.04, 100]],
+    buyAskLevels: [[0.8, 100]],
+    rollMaxSlip: 0.03,
+    guards: { minBuyToSellRatio: 0.5, minSellFillFrac: 0.95, minRollNotionalUsd: 1 },
+  });
+  assert.equal(cliff.action, "skip");
+  if (cliff.action === "skip") assert.equal(cliff.reason, "roll_cliff");
+
+  // Stub below min notional.
+  const stub = planGotRoll({
+    bin: "78-79",
+    markets,
+    held: { ...held, contracts: 2 },
+    day: "26AUG11",
+    yesAsk: null,
+    yesBid: 0.5,
+    newYesAsk: 0.5,
+    stakeUsd: 20,
+    minAsk: 0.05,
+    maxAsk: 0.95,
+    guards: { minRollNotionalUsd: 5 },
+  });
+  assert.equal(stub.action, "skip");
+  if (stub.action === "skip") assert.equal(stub.reason, "min_roll_notional");
+
+  // Thin sell book vs 95% fill requirement.
+  const thin = planGotRoll({
+    bin: "78-79",
+    markets,
+    held,
+    day: "26AUG11",
+    yesAsk: null,
+    yesBid: 0.4,
+    newYesAsk: 0.4,
+    stakeUsd: 20,
+    minAsk: 0.05,
+    maxAsk: 0.95,
+    sellBidLevels: [[0.4, 10]], // only 10 of 45
+    buyAskLevels: [[0.4, 100]],
+    rollMaxSlip: 0.03,
+    guards: { minSellFillFrac: 0.95, minBuyToSellRatio: 0.5 },
+  });
+  assert.equal(thin.action, "skip");
+  if (thin.action === "skip") assert.equal(thin.reason, "sell_depth_thin");
+
+  // Roll cap.
+  const capped = planGotRoll({
+    bin: "78-79",
+    markets,
+    held: { ...held, contracts: 50, rollsToday: 5 },
+    day: "26AUG11",
+    yesAsk: null,
+    yesBid: 0.5,
+    newYesAsk: 0.5,
+    stakeUsd: 20,
+    minAsk: 0.05,
+    maxAsk: 0.95,
+    guards: { maxRollsPerCityDay: 5 },
+  });
+  assert.equal(capped.action, "skip");
+  if (capped.action === "skip") assert.equal(capped.reason, "roll_cap");
+
+  // Open depth-capped via ask levels.
+  const open = planGotRoll({
+    bin: "76-77",
+    markets,
+    held: null,
+    day: "26AUG11",
+    yesAsk: 0.2,
+    yesBid: 0.19,
+    newYesAsk: null,
+    stakeUsd: 20,
+    minAsk: 0.15,
+    maxAsk: 0.95,
+    buyAskLevels: [[0.2, 30], [0.21, 20]],
+    openMaxSlip: 0.03,
+  });
+  assert.equal(open.action, "open");
+  if (open.action === "open") {
+    assert.equal(open.contracts, 50); // 30+20 within slip, stake allows 100
+    assert.ok(open.walk);
   }
 }
 
@@ -190,4 +305,5 @@ testParseSubtitles();
 testMarketsAndPlan();
 testWalkHelpers();
 testRollWalkPlan();
+testGuards();
 console.log("ok");

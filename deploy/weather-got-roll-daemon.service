@@ -10,21 +10,31 @@ Type=simple
 WorkingDirectory=/opt/sports-arb
 EnvironmentFile=/etc/sports-arb.env
 EnvironmentFile=-/etc/kalshi.env
+EnvironmentFile=-/etc/kalshi-hourly-desk.env
 Environment=SPORTS_ARB_STATE_DIR=/var/lib/sports-arb
 Environment=SPORTS_ARB_DATA_DIR=/var/lib/sports-arb/data
 Environment=SPORTS_ARB_RUNTIME_DIR=/var/lib/sports-arb/runtime
 Environment=NODE_NO_WARNINGS=1
-# Real-money GOT roll test — $20/city, $100/day cap.
+# Real-money GOT roll — $20/city, $100/day cap.
 # No local-hour gate: trade from first GOT prediction of the day (same as paper).
 Environment=WEATHER_GOT_ROLL_LIVE=1
 Environment=WEATHER_GOT_ROLL_STAKE_USD=20
 Environment=WEATHER_GOT_ROLL_MAX_DAILY_USD=100
-Environment=WEATHER_GOT_ROLL_MIN_ASK=0.05
+# Avoid lottery opens (today's Miami 8¢ bag).
+Environment=WEATHER_GOT_ROLL_MIN_ASK=0.15
 Environment=WEATHER_GOT_ROLL_MAX_ASK=0.95
-# Walk up to 3¢ past TOB on roll legs (opens stay TOB-only).
+# Walk up to 3¢ past TOB on opens (depth-capped) and roll legs.
 Environment=WEATHER_GOT_ROLL_WALK_SLIP=0.03
+Environment=WEATHER_GOT_ROLL_OPEN_WALK_SLIP=0.03
 Environment=WEATHER_GOT_ROLL_BOOK_DEPTH=20
-Environment=WEATHER_GOT_ROLL_START_DAY=26AUG11
+# Anti-thrash / anti-orphan guards (lessons from 26AUG11 live).
+Environment=WEATHER_GOT_ROLL_MIN_ROLL_NOTIONAL=5
+Environment=WEATHER_GOT_ROLL_MIN_SELL_FILL_FRAC=0.95
+Environment=WEATHER_GOT_ROLL_MIN_BUY_TO_SELL=0.5
+Environment=WEATHER_GOT_ROLL_MAX_ROLLS_PER_DAY=5
+Environment=WEATHER_GOT_ROLL_CONFIRM_TICKS=2
+# Floor: do not trade city-days before this stamp.
+Environment=WEATHER_GOT_ROLL_START_DAY=26AUG12
 Environment=WEATHER_GOT_ROLL_CITIES=chicago,nyc,miami,austin,la
 Environment=WEATHER_GOT_ROLL_POLL_MS=2000
 ExecStart=/opt/sports-arb/node_modules/.bin/tsx /opt/sports-arb/scripts/weather-got-roll-daemon.ts
