@@ -1,0 +1,337 @@
+/**
+ * Live / shadow execution for GOT daily-high directional rolls.
+ *
+ * LIVE requires WEATHER_GOT_ROLL_LIVE=1.
+ * Independent of KALSHI_SOFTBALL_LIVE / weather PM softballs.
+ */
+
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import type { KalshiClient } from "./kalshi-client.js";
+import { killSwitchActive } from "./orphan-monitor.js";
+import {
+  type CityRollState,
+  type RollPlan,
+  notionalUsd,
+} from "./weather-got-roll.js";
+
+const DATA_DIR = resolve(
+  process.env.SPORTS_ARB_DATA_DIR
+    ?? process.env.SPORTS_ARB_STATE_DIR
+    ?? join(process.cwd(), "data"),
+);
+const ORDERS_PATH = join(DATA_DIR, "weather-got-roll-orders.jsonl");
+const STATE_PATH = join(DATA_DIR, "weather-got-roll-state.json");
+
+export const WEATHER_GOT_ROLL_LIVE = /^(1|true|yes)$/i.test(
+  process.env.WEATHER_GOT_ROLL_LIVE ?? "",
+);
+export const STAKE_USD = Math.max(
+  1,
+  Number(process.env.WEATHER_GOT_ROLL_STAKE_USD ?? 20),
+);
+export const MAX_DAILY_USD = Math.max(
+  STAKE_USD,
+  Number(process.env.WEATHER_GOT_ROLL_MAX_DAILY_USD ?? 100),
+);
+export const MIN_ASK = Math.min(
+  0.5,
+  Math.max(0.01, Number(process.env.WEATHER_GOT_ROLL_MIN_ASK ?? 0.05)),
+);
+export const MAX_ASK = Math.min(
+  0.99,
+  Math.max(MIN_ASK, Number(process.env.WEATHER_GOT_ROLL_MAX_ASK ?? 0.95)),
+);
+const TIF = (process.env.WEATHER_GOT_ROLL_TIF ?? "immediate_or_cancel") as
+  | "fill_or_kill"
+  | "immediate_or_cancel";
+
+type StateFile = {
+  spentDayKey?: string;
+  spentTodayUsd?: number;
+  cities?: Record<string, CityRollState>;
+};
+
+let client: KalshiClient | null = null;
+let spentTodayUsd = 0;
+let spentDayKey = "";
+const cityState = new Map<string, CityRollState>();
+let busy = false;
+
+function dayKey(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function ensureParent(p: string): void {
+  const d = dirname(p);
+  if (!existsSync(d)) mkdirSync(d, { recursive: true });
+}
+
+function log(msg: string): void {
+  console.log(`[weather-got-roll ${new Date().toISOString()}] ${msg}`);
+}
+
+function appendOrder(row: Record<string, unknown>): void {
+  ensureParent(ORDERS_PATH);
+  appendFileSync(ORDERS_PATH, `${JSON.stringify(row)}\n`);
+}
+
+function persistState(): void {
+  ensureParent(STATE_PATH);
+  const body: StateFile = {
+    spentDayKey,
+    spentTodayUsd,
+    cities: Object.fromEntries(cityState.entries()),
+  };
+  writeFileSync(STATE_PATH, `${JSON.stringify(body, null, 2)}\n`);
+}
+
+export function loadGotRollState(): void {
+  if (!existsSync(STATE_PATH)) return;
+  try {
+    const raw = JSON.parse(readFileSync(STATE_PATH, "utf8")) as StateFile;
+    spentDayKey = raw.spentDayKey ?? "";
+    spentTodayUsd = Number(raw.spentTodayUsd ?? 0) || 0;
+    cityState.clear();
+    for (const [k, v] of Object.entries(raw.cities ?? {})) {
+      if (v?.bin && v?.ticker && v.contracts > 0) cityState.set(k, v);
+    }
+    log(
+      `loaded state cities=${cityState.size} spentTodayUsd=${spentTodayUsd.toFixed(2)} day=${spentDayKey}`,
+    );
+  } catch (err) {
+    log(`state load error: ${(err as Error).message}`);
+  }
+}
+
+export function configureGotRollExec(opts: { client?: KalshiClient | null }): void {
+  if (opts.client !== undefined) client = opts.client;
+}
+
+export function gotRollExecLabel(): string {
+  return (
+    `live=${WEATHER_GOT_ROLL_LIVE ? 1 : 0} `
+    + `stakeUsd=${STAKE_USD} `
+    + `maxDailyUsd=${MAX_DAILY_USD} `
+    + `minAsk=${MIN_ASK} `
+    + `maxAsk=${MAX_ASK} `
+    + `tif=${TIF}`
+  );
+}
+
+export function getHeld(city: string): CityRollState | null {
+  return cityState.get(city) ?? null;
+}
+
+export function clearHeldIfDay(city: string, day: string): void {
+  const h = cityState.get(city);
+  if (h && h.day !== day) {
+    cityState.delete(city);
+    persistState();
+  }
+}
+
+function refreshSpendDay(): void {
+  const dk = dayKey();
+  if (dk !== spentDayKey) {
+    spentDayKey = dk;
+    spentTodayUsd = 0;
+  }
+}
+
+async function place(
+  side: "bid" | "ask",
+  ticker: string,
+  count: number,
+  price: number,
+): Promise<{ fillCount: number; resp: unknown; rttMs: number }> {
+  if (!client) throw new Error("no_client");
+  const started = Date.now();
+  const resp = await client.createOrderV2({
+    ticker,
+    side,
+    count,
+    price: Number(price.toFixed(4)),
+    time_in_force: TIF,
+    client_order_id: randomUUID(),
+  });
+  const rttMs = Date.now() - started;
+  const fillCount = Number((resp as { fill_count?: string }).fill_count ?? 0);
+  return { fillCount, resp, rttMs };
+}
+
+export async function executeGotRollPlan(opts: {
+  city: string;
+  day: string;
+  plan: RollPlan;
+  gotRecv?: string;
+}): Promise<"shadow" | "fired" | "skipped"> {
+  const { city, day, plan } = opts;
+  const base = {
+    kind: "weather_got_roll_signal" as const,
+    observedAt: new Date().toISOString(),
+    city,
+    day,
+    gotRecv: opts.gotRecv,
+    plan,
+    live: WEATHER_GOT_ROLL_LIVE,
+  };
+  appendOrder(base);
+
+  if (plan.action === "skip") {
+    return "skipped";
+  }
+
+  if (!WEATHER_GOT_ROLL_LIVE) {
+    log(`shadow ${city} ${plan.action} ${JSON.stringify(plan)}`);
+    // Do not persist shadow holds — enabling LIVE later must still be able to open.
+    return "shadow";
+  }
+
+  if (killSwitchActive()) {
+    appendOrder({ ...base, kind: "weather_got_roll_skip", reason: "kill_switch" });
+    return "skipped";
+  }
+  if (!client) {
+    appendOrder({ ...base, kind: "weather_got_roll_skip", reason: "no_client" });
+    return "skipped";
+  }
+  if (busy) {
+    appendOrder({ ...base, kind: "weather_got_roll_skip", reason: "busy" });
+    return "skipped";
+  }
+
+  busy = true;
+  try {
+    refreshSpendDay();
+    if (plan.action === "open") {
+      const notional = notionalUsd(plan.contracts, plan.limit);
+      if (spentTodayUsd + notional > MAX_DAILY_USD) {
+        appendOrder({
+          ...base,
+          kind: "weather_got_roll_skip",
+          reason: "daily_cap",
+          spentTodayUsd,
+          notional,
+        });
+        return "skipped";
+      }
+      log(
+        `!!! LIVE OPEN ${city} ${plan.bin} ${plan.ticker} x${plan.contracts} @${plan.limit.toFixed(2)} (≈$${notional.toFixed(2)})`,
+      );
+      const { fillCount, resp, rttMs } = await place(
+        "bid",
+        plan.ticker,
+        plan.contracts,
+        plan.limit,
+      );
+      if (fillCount > 0) {
+        spentTodayUsd += fillCount * plan.limit;
+        cityState.set(city, {
+          day,
+          bin: plan.bin,
+          ticker: plan.ticker,
+          contracts: fillCount,
+          avgEntry: plan.limit,
+          openedAt: new Date().toISOString(),
+          lastActionAt: new Date().toISOString(),
+        });
+        persistState();
+      }
+      appendOrder({
+        ...base,
+        kind: "weather_got_roll_order",
+        side: "bid",
+        ticker: plan.ticker,
+        count: plan.contracts,
+        price: plan.limit,
+        fillCount,
+        resp,
+        rttMs,
+        spentTodayUsd,
+      });
+      return fillCount > 0 ? "fired" : "skipped";
+    }
+
+    // roll
+    log(
+      `!!! LIVE ROLL ${city} ${plan.fromBin}→${plan.toBin} sell x${plan.sellContracts}@${plan.sellLimit.toFixed(2)} buy x${plan.buyContracts}@${plan.buyLimit.toFixed(2)}`,
+    );
+    const sell = await place("ask", plan.fromTicker, plan.sellContracts, plan.sellLimit);
+    appendOrder({
+      ...base,
+      kind: "weather_got_roll_order",
+      leg: "sell",
+      side: "ask",
+      ticker: plan.fromTicker,
+      count: plan.sellContracts,
+      price: plan.sellLimit,
+      fillCount: sell.fillCount,
+      resp: sell.resp,
+      rttMs: sell.rttMs,
+    });
+    if (sell.fillCount <= 0) {
+      appendOrder({ ...base, kind: "weather_got_roll_skip", reason: "sell_unfilled" });
+      return "skipped";
+    }
+    // Size buy from actual sell proceeds.
+    const proceeds = sell.fillCount * plan.sellLimit;
+    const buyCount = Math.floor(proceeds / plan.buyLimit);
+    if (buyCount < 1) {
+      cityState.delete(city);
+      persistState();
+      appendOrder({ ...base, kind: "weather_got_roll_skip", reason: "buy_size_zero_after_sell" });
+      return "skipped";
+    }
+    const buy = await place("bid", plan.toTicker, buyCount, plan.buyLimit);
+    appendOrder({
+      ...base,
+      kind: "weather_got_roll_order",
+      leg: "buy",
+      side: "bid",
+      ticker: plan.toTicker,
+      count: buyCount,
+      price: plan.buyLimit,
+      fillCount: buy.fillCount,
+      resp: buy.resp,
+      rttMs: buy.rttMs,
+      spentTodayUsd,
+    });
+    if (buy.fillCount > 0) {
+      cityState.set(city, {
+        day,
+        bin: plan.toBin,
+        ticker: plan.toTicker,
+        contracts: buy.fillCount,
+        avgEntry: plan.buyLimit,
+        openedAt: cityState.get(city)?.openedAt ?? new Date().toISOString(),
+        lastActionAt: new Date().toISOString(),
+      });
+    } else {
+      // Sold but failed to rebuy — flat.
+      cityState.delete(city);
+    }
+    persistState();
+    return buy.fillCount > 0 ? "fired" : "skipped";
+  } catch (err) {
+    appendOrder({
+      ...base,
+      kind: "weather_got_roll_order_error",
+      error: (err as Error).message.slice(0, 400),
+    });
+    log(`exec error ${city}: ${(err as Error).message}`);
+    return "skipped";
+  } finally {
+    busy = false;
+  }
+}
+
+/** Test helper */
+export function resetGotRollExecForTests(): void {
+  spentTodayUsd = 0;
+  spentDayKey = "";
+  cityState.clear();
+  busy = false;
+  client = null;
+}

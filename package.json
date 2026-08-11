@@ -52,6 +52,8 @@
 
     "weather:hourly-desk": "tsx scripts/kalshi-nyc-hourly-desk.ts",
     "weather:softball": "tsx scripts/weather-softball-daemon.ts",
+    "weather:got-roll": "tsx scripts/weather-got-roll-daemon.ts",
+    "weather:got-roll:test": "tsx scripts/lib/weather-got-roll.test.ts",
     "updown:collector": "tsx scripts/updown-5m-book-collector.ts",
     "updown:maker-guess": "tsx scripts/updown-5m-maker-guess-test.ts",
     "updown:ws-test": "tsx scripts/updown-5m-market-ws-test.ts",
