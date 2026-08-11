@@ -106,12 +106,135 @@ export type RollPlan =
       toTicker: string;
       buyContracts: number;
       buyLimit: number;
+      /** Present when roll limits were walked past TOB. */
+      walk?: {
+        maxSlip: number;
+        sellTob: number;
+        sellVwap: number;
+        sellFillable: number;
+        buyTob: number;
+        buyVwap: number;
+      };
     };
 
+export type BookLevel = [price: number, size: number];
+
+export type WalkFill = {
+  tob: number;
+  limit: number;
+  vwap: number;
+  fillable: number;
+  levelsTaken: BookLevel[];
+};
+
+/** YES ask ladder from Kalshi book (NO bids → YES asks at 1−p), best ask first. */
+export function yesAskLevelsFromBook(book: {
+  noBids: BookLevel[];
+}): BookLevel[] {
+  return book.noBids
+    .map(([noBid, sz]) => [Number((1 - noBid).toFixed(4)), sz] as BookLevel)
+    .filter(([p, s]) => p > 0 && p < 1 && s > 0)
+    .sort((a, b) => a[0] - b[0]);
+}
+
+/** YES bid ladder, best bid first. */
+export function yesBidLevelsFromBook(book: {
+  yesBids: BookLevel[];
+}): BookLevel[] {
+  return [...book.yesBids]
+    .filter(([p, s]) => p > 0 && p < 1 && s > 0)
+    .sort((a, b) => b[0] - a[0]);
+}
+
 /**
- * Plan open/roll for one city. Uses TOB ask for buys and TOB bid for sells.
- * Initial opens are capped at stakeUsd; rolls size the buy from sell proceeds
- * (contracts_sold * sellBid / buyAsk), floored.
+ * Walk YES bids down to sell `wantContracts` within maxSlip of TOB.
+ * Limit = worst (lowest) bid included — IOC ask at that price hits all better bids.
+ */
+export function planSellWalk(opts: {
+  wantContracts: number;
+  bidLevels: BookLevel[];
+  maxSlip: number;
+  minBid?: number;
+}): WalkFill {
+  const levels = [...opts.bidLevels].sort((a, b) => b[0] - a[0]);
+  const tob = levels[0]?.[0] ?? 0;
+  const floor = Math.max(opts.minBid ?? 0.01, Number((tob - opts.maxSlip).toFixed(4)));
+  let left = Math.max(0, opts.wantContracts);
+  let notional = 0;
+  let fillable = 0;
+  let limit = tob;
+  const levelsTaken: BookLevel[] = [];
+  for (const [px, sz] of levels) {
+    if (left <= 1e-9) break;
+    if (px + 1e-9 < floor) break;
+    const take = Math.min(left, sz);
+    if (take <= 0) continue;
+    levelsTaken.push([px, take]);
+    fillable += take;
+    notional += take * px;
+    left -= take;
+    limit = px;
+  }
+  const vwap = fillable > 0 ? notional / fillable : tob;
+  return {
+    tob,
+    limit: Number(limit.toFixed(4)),
+    vwap: Number(vwap.toFixed(4)),
+    fillable: Number(fillable.toFixed(2)),
+    levelsTaken,
+  };
+}
+
+/**
+ * Spend up to `proceedsUsd` walking YES asks within maxSlip of TOB / maxAsk.
+ * Limit = worst (highest) ask included — IOC bid at that price lifts all better asks.
+ */
+export function planBuyWalkForProceeds(opts: {
+  proceedsUsd: number;
+  askLevels: BookLevel[];
+  maxSlip: number;
+  minAsk: number;
+  maxAsk: number;
+}): WalkFill & { contracts: number } {
+  const levels = [...opts.askLevels].sort((a, b) => a[0] - b[0]);
+  const tob = levels[0]?.[0] ?? 0;
+  const ceil = Math.min(
+    opts.maxAsk,
+    tob > 0 ? Number((tob + opts.maxSlip).toFixed(4)) : opts.maxAsk,
+  );
+  let budget = Math.max(0, opts.proceedsUsd);
+  let contracts = 0;
+  let notional = 0;
+  let limit = tob;
+  const levelsTaken: BookLevel[] = [];
+  for (const [px, sz] of levels) {
+    if (budget <= 1e-9) break;
+    if (px + 1e-9 < opts.minAsk) continue;
+    if (px > ceil + 1e-9) break;
+    const maxByUsd = Math.floor(budget / px + 1e-9);
+    const take = Math.min(sz, maxByUsd);
+    if (take < 1) break;
+    levelsTaken.push([px, take]);
+    contracts += take;
+    notional += take * px;
+    budget -= take * px;
+    limit = px;
+  }
+  const vwap = contracts > 0 ? notional / contracts : tob;
+  return {
+    tob,
+    limit: Number((limit || tob).toFixed(4)),
+    vwap: Number(vwap.toFixed(4)),
+    fillable: contracts,
+    contracts,
+    levelsTaken,
+  };
+}
+
+/**
+ * Plan open/roll for one city. Opens use TOB ask.
+ * Rolls use TOB by default; when sellBidLevels/buyAskLevels + rollMaxSlip are
+ * provided, walk within slip so IOC can take deeper size.
  */
 export function planGotRoll(opts: {
   bin: string | null | undefined;
@@ -125,6 +248,12 @@ export function planGotRoll(opts: {
   stakeUsd: number;
   minAsk: number;
   maxAsk: number;
+  /** YES bid ladder on the held ticker (best first). Enables roll sell walk. */
+  sellBidLevels?: BookLevel[] | null;
+  /** YES ask ladder on the target ticker (best first). Enables roll buy walk. */
+  buyAskLevels?: BookLevel[] | null;
+  /** Max absolute price walk past TOB on each roll leg (default 0 = TOB only). */
+  rollMaxSlip?: number;
 }): RollPlan {
   const { bin, markets, held, day, stakeUsd, minAsk, maxAsk } = opts;
   if (!bin) return { action: "skip", reason: "no_bin" };
@@ -162,6 +291,53 @@ export function planGotRoll(opts: {
   if (newAsk == null) return { action: "skip", reason: "no_ask" };
   if (newAsk < minAsk) return { action: "skip", reason: "ask_below_min" };
   if (newAsk > maxAsk) return { action: "skip", reason: "ask_above_max" };
+
+  const maxSlip = Math.max(0, Number(opts.rollMaxSlip ?? 0) || 0);
+  const canWalk =
+    maxSlip > 0
+    && opts.sellBidLevels
+    && opts.sellBidLevels.length > 0
+    && opts.buyAskLevels
+    && opts.buyAskLevels.length > 0;
+
+  if (canWalk) {
+    const sellWalk = planSellWalk({
+      wantContracts: held.contracts,
+      bidLevels: opts.sellBidLevels!,
+      maxSlip,
+      minBid: 0.01,
+    });
+    if (sellWalk.fillable < 1) return { action: "skip", reason: "no_bid_to_sell" };
+    const proceeds = sellWalk.vwap * sellWalk.fillable;
+    const buyWalk = planBuyWalkForProceeds({
+      proceedsUsd: proceeds,
+      askLevels: opts.buyAskLevels!,
+      maxSlip,
+      minAsk,
+      maxAsk,
+    });
+    if (buyWalk.contracts < 1) return { action: "skip", reason: "roll_size_zero" };
+    return {
+      action: "roll",
+      fromBin: held.bin,
+      fromTicker: held.ticker,
+      sellContracts: held.contracts,
+      sellLimit: sellWalk.limit,
+      toBin: bin,
+      toTicker: target.ticker,
+      buyContracts: buyWalk.contracts,
+      buyLimit: buyWalk.limit,
+      walk: {
+        maxSlip,
+        sellTob: sellWalk.tob,
+        sellVwap: sellWalk.vwap,
+        sellFillable: sellWalk.fillable,
+        buyTob: buyWalk.tob,
+        buyVwap: buyWalk.vwap,
+      },
+    };
+  }
+
   const proceeds = held.contracts * bid;
   const buyContracts = Math.floor(proceeds / newAsk);
   if (buyContracts < 1) return { action: "skip", reason: "roll_size_zero" };

@@ -21,6 +21,9 @@ Environment=WEATHER_GOT_ROLL_STAKE_USD=20
 Environment=WEATHER_GOT_ROLL_MAX_DAILY_USD=100
 Environment=WEATHER_GOT_ROLL_MIN_ASK=0.05
 Environment=WEATHER_GOT_ROLL_MAX_ASK=0.95
+# Walk up to 3¢ past TOB on roll legs (opens stay TOB-only).
+Environment=WEATHER_GOT_ROLL_WALK_SLIP=0.03
+Environment=WEATHER_GOT_ROLL_BOOK_DEPTH=20
 Environment=WEATHER_GOT_ROLL_START_DAY=26AUG11
 Environment=WEATHER_GOT_ROLL_CITIES=chicago,nyc,miami,austin,la
 Environment=WEATHER_GOT_ROLL_POLL_MS=2000

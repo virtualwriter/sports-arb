@@ -24,6 +24,7 @@ import {
   loadGotRollState,
   MAX_ASK,
   MIN_ASK,
+  ROLL_WALK_SLIP,
   STAKE_USD,
   WEATHER_GOT_ROLL_LIVE,
 } from "./lib/weather-got-roll-exec.js";
@@ -31,8 +32,13 @@ import {
   eventTickerFor,
   marketsFromKalshi,
   planGotRoll,
+  yesAskLevelsFromBook,
+  yesBidLevelsFromBook,
+  type BookLevel,
   type GotBinMarket,
 } from "./lib/weather-got-roll.js";
+
+const BOOK_DEPTH = Math.max(5, Number(process.env.WEATHER_GOT_ROLL_BOOK_DEPTH ?? 20));
 
 const ROOT = resolve(process.cwd());
 const POLL_MS = Math.max(500, Number(process.env.WEATHER_GOT_ROLL_POLL_MS ?? 2000));
@@ -133,6 +139,8 @@ async function handlePrediction(
   let yesAsk: number | null = null;
   let yesBid: number | null = null;
   let newYesAsk: number | null = null;
+  let sellBidLevels: BookLevel[] | null = null;
+  let buyAskLevels: BookLevel[] | null = null;
 
   if (!held || held.day !== rt.day || held.contracts <= 0) {
     const q = bookQuotes(await client.getOrderbook(target.ticker, 5));
@@ -144,10 +152,14 @@ async function handlePrediction(
     if (yesAsk == null && m?.yes_ask != null) yesAsk = Number(m.yes_ask);
     if (yesBid == null && m?.yes_bid != null) yesBid = Number(m.yes_bid);
   } else if (held.bin !== bin) {
-    const sellQ = bookQuotes(await client.getOrderbook(held.ticker, 5));
-    const buyQ = bookQuotes(await client.getOrderbook(target.ticker, 5));
+    const sellBook = await client.getOrderbook(held.ticker, BOOK_DEPTH);
+    const buyBook = await client.getOrderbook(target.ticker, BOOK_DEPTH);
+    const sellQ = bookQuotes(sellBook);
+    const buyQ = bookQuotes(buyBook);
     yesBid = sellQ.yesBid > 0 ? sellQ.yesBid : null;
     newYesAsk = buyQ.yesAsk > 0 ? buyQ.yesAsk : null;
+    sellBidLevels = yesBidLevelsFromBook(sellBook);
+    buyAskLevels = yesAskLevelsFromBook(buyBook);
     const event = await client.getEvent(eventTickerFor(rt.cfg.series, rt.day), true);
     const sellM = event?.markets?.find((x) => x.ticker === held.ticker);
     const buyM = event?.markets?.find((x) => x.ticker === target.ticker);
@@ -169,6 +181,9 @@ async function handlePrediction(
     stakeUsd: STAKE_USD,
     minAsk: MIN_ASK,
     maxAsk: MAX_ASK,
+    sellBidLevels,
+    buyAskLevels,
+    rollMaxSlip: ROLL_WALK_SLIP,
   });
 
   const result = await executeGotRollPlan({

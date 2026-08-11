@@ -14,6 +14,8 @@ import {
   type CityRollState,
   type RollPlan,
   notionalUsd,
+  planBuyWalkForProceeds,
+  yesAskLevelsFromBook,
 } from "./weather-got-roll.js";
 
 const DATA_DIR = resolve(
@@ -46,6 +48,11 @@ export const MAX_ASK = Math.min(
 const TIF = (process.env.WEATHER_GOT_ROLL_TIF ?? "immediate_or_cancel") as
   | "fill_or_kill"
   | "immediate_or_cancel";
+/** Absolute $ walk past TOB on each roll leg (opens stay TOB-only). */
+export const ROLL_WALK_SLIP = Math.max(
+  0,
+  Math.min(0.2, Number(process.env.WEATHER_GOT_ROLL_WALK_SLIP ?? 0.03)),
+);
 
 type StateFile = {
   spentDayKey?: string;
@@ -116,6 +123,7 @@ export function gotRollExecLabel(): string {
     + `maxDailyUsd=${MAX_DAILY_USD} `
     + `minAsk=${MIN_ASK} `
     + `maxAsk=${MAX_ASK} `
+    + `rollWalkSlip=${ROLL_WALK_SLIP} `
     + `tif=${TIF}`
   );
 }
@@ -160,6 +168,13 @@ async function place(
   const fillCount = Number((resp as { fill_count?: string }).fill_count ?? 0);
   return { fillCount, resp, rttMs };
 }
+
+function avgFillPrice(resp: unknown, fallback: number): number {
+  const raw = (resp as { average_fill_price?: string })?.average_fill_price;
+  const n = raw != null ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
 
 export async function executeGotRollPlan(opts: {
   city: string;
@@ -254,11 +269,17 @@ export async function executeGotRollPlan(opts: {
       return fillCount > 0 ? "fired" : "skipped";
     }
 
-    // roll
+    // roll — IOC with walked limits (plan.sellLimit/buyLimit may be past TOB).
+    const walkNote = plan.walk
+      ? ` walk≤${plan.walk.maxSlip} sellTob=${plan.walk.sellTob}→${plan.sellLimit} buyTob=${plan.walk.buyTob}→${plan.buyLimit}`
+      : "";
     log(
-      `!!! LIVE ROLL ${city} ${plan.fromBin}→${plan.toBin} sell x${plan.sellContracts}@${plan.sellLimit.toFixed(2)} buy x${plan.buyContracts}@${plan.buyLimit.toFixed(2)}`,
+      `!!! LIVE ROLL ${city} ${plan.fromBin}→${plan.toBin} `
+      + `sell x${plan.sellContracts}@${plan.sellLimit.toFixed(2)} `
+      + `buy x${plan.buyContracts}@${plan.buyLimit.toFixed(2)}${walkNote}`,
     );
     const sell = await place("ask", plan.fromTicker, plan.sellContracts, plan.sellLimit);
+    const sellAvg = avgFillPrice(sell.resp, plan.sellLimit);
     appendOrder({
       ...base,
       kind: "weather_got_roll_order",
@@ -268,6 +289,7 @@ export async function executeGotRollPlan(opts: {
       count: plan.sellContracts,
       price: plan.sellLimit,
       fillCount: sell.fillCount,
+      avgFill: sellAvg,
       resp: sell.resp,
       rttMs: sell.rttMs,
     });
@@ -275,16 +297,44 @@ export async function executeGotRollPlan(opts: {
       appendOrder({ ...base, kind: "weather_got_roll_skip", reason: "sell_unfilled" });
       return "skipped";
     }
-    // Size buy from actual sell proceeds.
-    const proceeds = sell.fillCount * plan.sellLimit;
-    const buyCount = Math.floor(proceeds / plan.buyLimit);
+    // Size buy from actual sell proceeds; re-walk ask ladder when slip enabled.
+    const proceeds = sell.fillCount * sellAvg;
+    let buyCount = Math.floor(proceeds / plan.buyLimit);
+    let buyLimit = plan.buyLimit;
+    let buyWalkMeta: Record<string, unknown> | undefined;
+    if (ROLL_WALK_SLIP > 0 && client) {
+      try {
+        const buyLevels = yesAskLevelsFromBook(
+          await client.getOrderbook(plan.toTicker, 20),
+        );
+        const buyWalk = planBuyWalkForProceeds({
+          proceedsUsd: proceeds,
+          askLevels: buyLevels,
+          maxSlip: ROLL_WALK_SLIP,
+          minAsk: MIN_ASK,
+          maxAsk: MAX_ASK,
+        });
+        if (buyWalk.contracts >= 1) {
+          buyCount = buyWalk.contracts;
+          buyLimit = buyWalk.limit;
+          buyWalkMeta = {
+            tob: buyWalk.tob,
+            vwap: buyWalk.vwap,
+            levelsTaken: buyWalk.levelsTaken,
+          };
+        }
+      } catch (err) {
+        log(`buy walk refresh failed ${city}: ${(err as Error).message}`);
+      }
+    }
     if (buyCount < 1) {
       cityState.delete(city);
       persistState();
       appendOrder({ ...base, kind: "weather_got_roll_skip", reason: "buy_size_zero_after_sell" });
       return "skipped";
     }
-    const buy = await place("bid", plan.toTicker, buyCount, plan.buyLimit);
+    const buy = await place("bid", plan.toTicker, buyCount, buyLimit);
+    const buyAvg = avgFillPrice(buy.resp, buyLimit);
     appendOrder({
       ...base,
       kind: "weather_got_roll_order",
@@ -292,8 +342,10 @@ export async function executeGotRollPlan(opts: {
       side: "bid",
       ticker: plan.toTicker,
       count: buyCount,
-      price: plan.buyLimit,
+      price: buyLimit,
       fillCount: buy.fillCount,
+      avgFill: buyAvg,
+      buyWalk: buyWalkMeta,
       resp: buy.resp,
       rttMs: buy.rttMs,
       spentTodayUsd,
@@ -304,7 +356,7 @@ export async function executeGotRollPlan(opts: {
         bin: plan.toBin,
         ticker: plan.toTicker,
         contracts: buy.fillCount,
-        avgEntry: plan.buyLimit,
+        avgEntry: buyAvg,
         openedAt: cityState.get(city)?.openedAt ?? new Date().toISOString(),
         lastActionAt: new Date().toISOString(),
       });
