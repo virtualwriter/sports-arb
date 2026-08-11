@@ -36,11 +36,6 @@ import {
 
 const ROOT = resolve(process.cwd());
 const POLL_MS = Math.max(500, Number(process.env.WEATHER_GOT_ROLL_POLL_MS ?? 2000));
-/** Don't open before this local hour (city tz). Default 7. */
-const EARLIEST_LOCAL_HOUR = Math.max(
-  0,
-  Math.min(12, Number(process.env.WEATHER_GOT_ROLL_EARLIEST_LOCAL_HOUR ?? 7)),
-);
 /** Refuse to trade city-days before this stamp (YYMONDD). Empty = no floor. */
 const START_DAY = (process.env.WEATHER_GOT_ROLL_START_DAY ?? "").toUpperCase();
 
@@ -94,15 +89,6 @@ function localDay(tz: string, now = new Date()): string {
   return `${yy}${mon}${dd.padStart(2, "0")}`;
 }
 
-function localHour(tz: string, now = new Date()): number {
-  const fmt = new Intl.DateTimeFormat("en-US", {
-    timeZone: tz,
-    hour: "numeric",
-    hourCycle: "h23",
-  });
-  return Number(fmt.format(now));
-}
-
 function gotTapePath(fileKey: string, day: string): string {
   return join(ROOT, ".tmp", `${fileKey}-diurnal-got-${day.toLowerCase()}-monitor.jsonl`);
 }
@@ -127,9 +113,6 @@ async function handlePrediction(
   const bin = typeof row.bin === "string" ? row.bin : null;
   if (!bin) return;
   if (START_DAY && rt.day < START_DAY) {
-    return;
-  }
-  if (localHour(rt.cfg.localTz) < EARLIEST_LOCAL_HOUR) {
     return;
   }
   clearHeldIfDay(rt.cfg.key, rt.day);
@@ -290,9 +273,7 @@ async function main(): Promise<void> {
   );
   configureGotRollExec({ client });
   log(`start ${gotRollExecLabel()} cities=${cities.map((c) => c.key).join(",")}`);
-  log(
-    `earliestLocalHour=${EARLIEST_LOCAL_HOUR} startDay=${START_DAY || "—"} pollMs=${POLL_MS}`,
-  );
+  log(`startDay=${START_DAY || "—"} pollMs=${POLL_MS} (no local-hour gate; first GOT pred of day)`);
 
   const runtimes: CityRuntime[] = cities.map((cfg) => ({
     cfg,

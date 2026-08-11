@@ -14,7 +14,6 @@ if [[ -f /etc/kalshi.env ]]; then set -a; # shellcheck disable=SC1091
 
 export WEATHER_GOT_ROLL_STAKE_USD="${WEATHER_GOT_ROLL_STAKE_USD:-20}"
 export WEATHER_GOT_ROLL_MAX_DAILY_USD="${WEATHER_GOT_ROLL_MAX_DAILY_USD:-100}"
-export WEATHER_GOT_ROLL_EARLIEST_LOCAL_HOUR="${WEATHER_GOT_ROLL_EARLIEST_LOCAL_HOUR:-7}"
 
 if pgrep -f "weather-got-roll-daemon.ts" >/dev/null 2>&1; then
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) already running" | tee -a "$LOG"
