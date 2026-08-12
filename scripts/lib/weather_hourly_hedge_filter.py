@@ -126,6 +126,19 @@ def bin_contains(label: str, temp_f: float) -> bool:
     return lo <= t <= hi
 
 
+def bin_for_temp(temp_f: float, labels: list[str] | tuple[str, ...] | None) -> str | None:
+    """Map a °F high to a Kalshi daily-high bin label from the market strip."""
+    if not labels:
+        return None
+    t = int(round(temp_f))
+    for label in labels:
+        if bin_contains(label, t):
+            return label
+    # Fallback: nearest even 2° bucket (matches predictor when strip missing).
+    even_floor = t - (t % 2)
+    return f"{even_floor}-{even_floor + 1}"
+
+
 @dataclass
 class LegResult:
     name: str
@@ -354,6 +367,7 @@ def simulate_roll_policy(
     book_aware: anti_thrash + book_lead
 
     Buys require a *same-row* mid ≥ min_buy_mid (no stale walk-back).
+    Contract count uses the actual buy mid (stake / buy_px).
     """
     notes: list[str] = []
     if not preds:

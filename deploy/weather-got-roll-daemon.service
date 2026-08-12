@@ -1,0 +1,53 @@
+[Unit]
+Description=Kalshi GOT daily-high $20/city directional roll (LIVE via WEATHER_GOT_ROLL_LIVE)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/sports-arb
+EnvironmentFile=/etc/sports-arb.env
+EnvironmentFile=-/etc/kalshi.env
+EnvironmentFile=-/etc/kalshi-hourly-desk.env
+Environment=SPORTS_ARB_STATE_DIR=/var/lib/sports-arb
+Environment=SPORTS_ARB_DATA_DIR=/var/lib/sports-arb/data
+Environment=SPORTS_ARB_RUNTIME_DIR=/var/lib/sports-arb/runtime
+Environment=NODE_NO_WARNINGS=1
+# Policy matches paper GOT research roll (mode=model, min_buy_mid=5¢).
+# Live differs only on execution: walk the book within slip (not mid fills).
+Environment=WEATHER_GOT_ROLL_LIVE=1
+Environment=WEATHER_GOT_ROLL_STAKE_USD=20
+Environment=WEATHER_GOT_ROLL_MAX_DAILY_USD=100
+Environment=WEATHER_GOT_ROLL_MIN_ASK=0.01
+Environment=WEATHER_GOT_ROLL_MIN_BUY_MID=0.05
+Environment=WEATHER_GOT_ROLL_MAX_ASK=0.95
+Environment=WEATHER_GOT_ROLL_WALK_SLIP=0.03
+Environment=WEATHER_GOT_ROLL_OPEN_WALK_SLIP=0.03
+Environment=WEATHER_GOT_ROLL_BOOK_DEPTH=20
+# Live IOC safety (paper assumes full mid fills).
+Environment=WEATHER_GOT_ROLL_MIN_ROLL_NOTIONAL=5
+Environment=WEATHER_GOT_ROLL_MIN_SELL_FILL_FRAC=0.95
+Environment=WEATHER_GOT_ROLL_MIN_BUY_TO_SELL=0.5
+# Match paper switching: no roll cap, 1-tick confirm.
+Environment=WEATHER_GOT_ROLL_MAX_ROLLS_PER_DAY=0
+Environment=WEATHER_GOT_ROLL_CONFIRM_TICKS=1
+Environment=WEATHER_GOT_ROLL_START_DAY=26AUG12
+Environment=WEATHER_GOT_ROLL_CITIES=chicago,nyc,miami,austin,la
+Environment=WEATHER_GOT_ROLL_POLL_MS=2000
+ExecStart=/opt/sports-arb/node_modules/.bin/tsx /opt/sports-arb/scripts/weather-got-roll-daemon.ts
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+KillSignal=SIGTERM
+TimeoutStopSec=15
+User=sports-arb
+Group=sports-arb
+StateDirectory=sports-arb
+RuntimeDirectory=sports-arb
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
