@@ -3,6 +3,9 @@
  * Follow GOT diurnal tapes and (optionally) place $STAKE YES on each city's
  * current GOT bin on Kalshi. Rolls on GOT bin changes.
  *
+ * Policy matches paper GOT research roll (mode=model, min_buy_mid).
+ * Live differs only on execution: walk ask/bid within slip vs paper mid fills.
+ *
  * Shadow by default. Real money requires:
  *   WEATHER_GOT_ROLL_LIVE=1
  *   Kalshi API credentials in env
