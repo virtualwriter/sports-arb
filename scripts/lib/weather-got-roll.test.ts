@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   contractsForStake,
+  effectiveOpenStake,
   eventTickerFor,
   findMarketForBin,
   marketsFromKalshi,
@@ -59,20 +60,51 @@ function testMarketsAndPlan(): void {
     assert.equal(open.ticker, "KXHIGHCHI-26AUG11-B88.5");
   }
 
+  // Absolute floor still blocks true dust.
   const dust = planGotRoll({
     bin: "88-89",
     markets,
     held: null,
     day: "26AUG11",
-    yesAsk: 0.04,
-    yesBid: 0.03,
+    yesAsk: 0.005,
+    yesBid: 0.003,
     newYesAsk: null,
     stakeUsd: 20,
-    minAsk: 0.15,
+    minAsk: 0.01,
     maxAsk: 0.95,
   });
   assert.equal(dust.action, "skip");
   if (dust.action === "skip") assert.equal(dust.reason, "ask_below_min");
+
+  // Bargain open: probe stake below fullStakeMinAsk, depth-capped.
+  const probe = planGotRoll({
+    bin: "88-89",
+    markets,
+    held: null,
+    day: "26AUG11",
+    yesAsk: 0.03,
+    yesBid: 0.02,
+    newYesAsk: null,
+    stakeUsd: 20,
+    minAsk: 0.01,
+    maxAsk: 0.95,
+    buyAskLevels: [[0.03, 40], [0.04, 80], [0.05, 200]],
+    openMaxSlip: 0.03,
+    guards: { fullStakeMinAsk: 0.15, probeStakeUsd: 5 },
+  });
+  assert.equal(probe.action, "open");
+  if (probe.action === "open") {
+    // $5 probe walks depth; well under full $20/0.03 ≈ 666.
+    assert.ok(probe.contracts >= 40);
+    assert.ok(probe.contracts < contractsForStake(20, 0.03));
+    assert.ok((probe.walk?.vwap ?? probe.limit) * probe.contracts <= 5.01);
+  }
+  assert.deepEqual(effectiveOpenStake({
+    ask: 0.03, stakeUsd: 20, fullStakeMinAsk: 0.15, probeStakeUsd: 5,
+  }), { stakeUsd: 5, probe: true });
+  assert.deepEqual(effectiveOpenStake({
+    ask: 0.2, stakeUsd: 20, fullStakeMinAsk: 0.15, probeStakeUsd: 5,
+  }), { stakeUsd: 20, probe: false });
 
   const roll = planGotRoll({
     bin: "86-87",
@@ -289,15 +321,77 @@ function testGuards(): void {
     yesBid: 0.19,
     newYesAsk: null,
     stakeUsd: 20,
-    minAsk: 0.15,
+    minAsk: 0.01,
     maxAsk: 0.95,
     buyAskLevels: [[0.2, 30], [0.21, 20]],
     openMaxSlip: 0.03,
+    guards: { fullStakeMinAsk: 0.15, probeStakeUsd: 5 },
   });
   assert.equal(open.action, "open");
   if (open.action === "open") {
     assert.equal(open.contracts, 50); // 30+20 within slip, stake allows 100
     assert.ok(open.walk);
+  }
+
+  // Cheap → rich with preserved notional: allow (notional guard, not contract cliff).
+  const cheapExitOk = planGotRoll({
+    bin: "78-79",
+    markets,
+    held: { ...held, contracts: 200, avgEntry: 0.03 },
+    day: "26AUG11",
+    yesAsk: null,
+    yesBid: 0.03,
+    newYesAsk: 0.5,
+    stakeUsd: 20,
+    minAsk: 0.01,
+    maxAsk: 0.95,
+    sellBidLevels: [[0.03, 200]],
+    buyAskLevels: [[0.5, 100]],
+    rollMaxSlip: 0.03,
+    guards: {
+      fullStakeMinAsk: 0.15,
+      minSellFillFrac: 0.95,
+      minBuyToSellRatio: 0.5, // would fail on contracts (12 vs 200)
+      minRollNotionalUsd: 5,
+      cheapExitMinBuyNotionalFrac: 0.7,
+    },
+  });
+  assert.equal(cheapExitOk.action, "roll");
+  if (cheapExitOk.action === "roll") {
+    // proceeds $6 → 12 contracts @ 0.5
+    assert.equal(cheapExitOk.buyContracts, 12);
+  }
+
+  // Cheap exit with destroyed proceeds (1¢ bid after 27¢ entry path): skip.
+  const cheapExitBad = planGotRoll({
+    bin: "78-79",
+    markets,
+    held: { ...held, contracts: 45, avgEntry: 0.27 },
+    day: "26AUG11",
+    yesAsk: null,
+    yesBid: 0.01,
+    newYesAsk: 0.8,
+    stakeUsd: 20,
+    minAsk: 0.01,
+    maxAsk: 0.95,
+    sellBidLevels: [[0.01, 100]],
+    buyAskLevels: [[0.8, 100]],
+    rollMaxSlip: 0.03,
+    guards: {
+      fullStakeMinAsk: 0.15,
+      minSellFillFrac: 0.95,
+      minRollNotionalUsd: 5,
+      cheapExitMinBuyNotionalFrac: 0.7,
+    },
+  });
+  assert.equal(cheapExitBad.action, "skip");
+  if (cheapExitBad.action === "skip") {
+    assert.ok(
+      cheapExitBad.reason === "min_roll_notional"
+      || cheapExitBad.reason === "cheap_exit_thin"
+      || cheapExitBad.reason === "roll_notional_cliff"
+      || cheapExitBad.reason === "roll_size_zero",
+    );
   }
 }
 
