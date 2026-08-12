@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   earlyOverCategories,
+  isMultiRunLateHighAsk,
   kalshiYesTobFromPaperMap,
   parseMlbInning,
   planAskWalk,
@@ -18,14 +19,17 @@ describe("parseMlbInning", () => {
 });
 
 describe("earlyOverCategories", () => {
-  it("tags multi_run_early for 2+ runs in innings 1–6", () => {
+  it("tags multi_run_early for 2+ runs in innings 1–5", () => {
     expect(earlyOverCategories(4, 2, 0.91)).toEqual(["multi_run_early"]);
+    expect(earlyOverCategories(5, 2, 0.91)).toEqual(["multi_run_early"]);
+    expect(earlyOverCategories(6, 2, 0.74)).toEqual([]);
     expect(earlyOverCategories(7, 2, 0.91)).toEqual([]);
     expect(earlyOverCategories(4, 1, 0.91)).toEqual([]);
   });
 
-  it("tags cheap_over_early for ask in [0.50, 0.80) early", () => {
+  it("tags cheap_over_early for ask in [0.50, 0.80) innings 1–5", () => {
     expect(earlyOverCategories(3, 1, 0.65)).toEqual(["cheap_over_early"]);
+    expect(earlyOverCategories(6, 1, 0.65)).toEqual([]);
     expect(earlyOverCategories(3, 1, 0.8)).toEqual([]);
     expect(earlyOverCategories(3, 1, 0.49)).toEqual([]);
   });
@@ -142,5 +146,70 @@ describe("planAskWalk", () => {
     });
     expect(walk.count).toBe(6); // 2x tob = 6
     expect(walk.limitPrice).toBe(0.93);
+  });
+
+  it("fillBook clears all levels ≤ maxAsk within caps", () => {
+    const walk = planAskWalk({
+      tobAsk: 0.92,
+      tobSize: 3,
+      askLevels: [[0.92, 3], [0.93, 3], [0.94, 8], [0.95, 31]],
+      maxAsk: 0.94,
+      maxContracts: 1000,
+      maxUsd: 1000,
+      fillBook: true,
+    });
+    expect(walk.count).toBe(14); // 3+3+8
+    expect(walk.limitPrice).toBe(0.94);
+    expect(walk.targetSize).toBe(1000);
+  });
+
+  it("maxWalkAboveTob stops fill-book from walking a cheap TOB into at-cost", () => {
+    // MIL@SD-style: TOB 87¢ with size deeper at 89–90¢
+    const walk = planAskWalk({
+      tobAsk: 0.87,
+      tobSize: 20,
+      askLevels: [[0.87, 20], [0.89, 40], [0.90, 50], [0.91, 80]],
+      maxAsk: 0.9,
+      maxContracts: 1000,
+      maxUsd: 100,
+      fillBook: true,
+      maxWalkAboveTob: 0.02,
+    });
+    expect(walk.limitPrice).toBeLessThanOrEqual(0.89);
+    expect(walk.vwap).toBeLessThan(0.89);
+    expect(walk.count).toBeGreaterThan(0);
+  });
+});
+
+describe("isMultiRunLateHighAsk", () => {
+  it("flags multi_run ≥0.90 from inn 5+", () => {
+    expect(
+      isMultiRunLateHighAsk({
+        cats: ["multi_run_early"],
+        inning: 5,
+        ask: 0.9,
+      }),
+    ).toBe(true);
+    expect(
+      isMultiRunLateHighAsk({
+        cats: ["multi_run_early"],
+        inning: 4,
+        ask: 0.92,
+      }),
+    ).toBe(false);
+    expect(
+      isMultiRunLateHighAsk({
+        cats: ["cheap_over_early"],
+        inning: 5,
+        ask: 0.75,
+      }),
+    ).toBe(false);
+    expect(
+      isMultiRunLateHighAsk({
+        cats: ["multi_run_early", "cheap_over_early"],
+        inning: 5,
+        ask: 0.72,
+      }),
+    ).toBe(false);
   });
 });

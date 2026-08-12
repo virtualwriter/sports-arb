@@ -6,6 +6,7 @@ import {
 
 afterEach(() => {
   resetMlbOverSoftballExecForTests();
+  delete process.env.MLB_OVER_SOFTBALL_LIVE;
 });
 
 describe("executeMlbOverSoftball shadow", () => {

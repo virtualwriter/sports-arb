@@ -32,8 +32,12 @@
  *      PLR_SCORE_PING_PORT (MLB: HTTP phone tap UI + POST /ping → phone_ping race source),
  *      PLR_SCORE_PING_TOKEN / PLR_SCORE_PING_BIND (optional auth token / bind host),
  *      MLB_OVER_SOFTBALL_LIVE (default 0; buy early next-line Kalshi overs on bwin_score),
+ *      MLB_OVER_SOFTBALL_FILL_BOOK (default 1; clear ask ≤ maxAsk up to caps),
  *      MLB_OVER_SOFTBALL_MAX_CONTRACTS / _MAX_USD / _MAX_DAILY_USD / _MAX_ASK,
- *      MLB_OVER_SOFTBALL_TOB_SIZE_MULT (default 2; walk ask to ≥ mult × TOB size)
+ *      MLB_OVER_SOFTBALL_MAX_WALK (default 0.02; max cents above TOB to walk),
+ *      MLB_OVER_SOFTBALL_TOB_SIZE_MULT (default 2; only when FILL_BOOK=0),
+ *      MLB_OVER_SOFTBALL_MULTI_RUN_LATE_HIGH_MODE (shadow|enforce|off; default shadow),
+ *      MLB_OVER_SOFTBALL_MULTI_RUN_LATE_HIGH_MIN_INN / _ASK (default 5 / 0.90)
  */
 import { readdirSync } from "node:fs";
 import { join } from "node:path";

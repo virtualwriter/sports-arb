@@ -222,9 +222,10 @@ def leg_quote_at(ticks, key, t_cut):
 
 def over_categories(inning, runs_delta, ask):
     cats = []
-    if inning is not None and runs_delta >= 2 and inning <= 6:
+    # Early softballs: innings 1–5 only (6th+ not treated as early/cheap).
+    if inning is not None and runs_delta >= 2 and inning <= 5:
         cats.append(CAT_A)
-    if inning is not None and 0.50 <= ask < 0.80 and inning <= 6:
+    if inning is not None and 0.50 <= ask < 0.80 and inning <= 5:
         cats.append(CAT_B)
     if inning is not None and ask < 0.65 and inning >= 7:
         cats.append(CAT_C)

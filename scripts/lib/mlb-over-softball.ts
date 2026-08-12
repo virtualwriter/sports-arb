@@ -2,11 +2,14 @@
  * Early MLB next-line Kalshi over softballs (live + shadow).
  *
  * Matches scripts/collect-mlb-softballs.py early cats:
- *   multi_run_early  — 2+ runs, inning ≤ 6
- *   cheap_over_early — ask ∈ [0.50, 0.80), inning ≤ 6
+ *   multi_run_early  — 2+ runs, inning ≤ 5
+ *   cheap_over_early — ask ∈ [0.50, 0.80), inning ≤ 5
  *
  * Late cheap overs / middles are intentionally out of scope.
  */
+
+/** Inclusive max inning for early over softballs (6th+ is too late / not cheap). */
+export const EARLY_OVER_MAX_INNING = 5;
 
 export const CAT_MULTI_RUN_EARLY = "multi_run_early";
 export const CAT_CHEAP_OVER_EARLY = "cheap_over_early";
@@ -78,8 +81,12 @@ export function yesAskLevelsFromNoBids(
 }
 
 /**
- * Walk YES asks from best until we reach targetSize (= max(tobSize, floor(tobMult*tobSize)))
- * or hit maxAsk / maxContracts / maxUsd. Limit price = worst level included.
+ * Walk YES asks from best until we reach targetSize or hit maxAsk / maxContracts / maxUsd.
+ * Limit price = worst level included.
+ *
+ * - Default target: max(tobSize, floor(tobMult * tobSize))
+ * - fillBook=true: take every level ≤ maxAsk up to maxContracts / maxUsd (ignore tobMult)
+ * - maxWalkAboveTob: also cap at tobAsk + delta so a cheap TOB isn't walked into at-cost
  */
 export function planAskWalk(input: {
   tobAsk: number;
@@ -89,19 +96,33 @@ export function planAskWalk(input: {
   maxContracts: number;
   maxUsd: number;
   tobMult?: number;
+  /** When true, clear the visible book ≤ maxAsk (capped by maxContracts/maxUsd). */
+  fillBook?: boolean;
+  /**
+   * Max cents above TOB to walk (e.g. 0.02). Applied as
+   * effectiveMaxAsk = min(maxAsk, tobAsk + maxWalkAboveTob).
+   */
+  maxWalkAboveTob?: number;
 }): AskWalkPlan {
   const tobMult = Math.max(1, input.tobMult ?? 2);
   const tobAsk = input.tobAsk;
   const tobSize = Math.max(0, input.tobSize);
+  const walkCap =
+    input.maxWalkAboveTob != null && Number.isFinite(input.maxWalkAboveTob)
+      ? tobAsk + Math.max(0, input.maxWalkAboveTob)
+      : input.maxAsk;
+  const effectiveMaxAsk = Math.min(input.maxAsk, walkCap);
   const levels =
     input.askLevels && input.askLevels.length > 0
       ? [...input.askLevels].sort((a, b) => a[0] - b[0])
       : ([[tobAsk, tobSize]] as Array<[number, number]>);
 
-  const targetSize = Math.min(
-    input.maxContracts,
-    Math.max(Math.floor(tobSize), Math.floor(tobSize * tobMult)),
-  );
+  const targetSize = input.fillBook
+    ? input.maxContracts
+    : Math.min(
+      input.maxContracts,
+      Math.max(Math.floor(tobSize), Math.floor(tobSize * tobMult)),
+    );
 
   let count = 0;
   let notional = 0;
@@ -109,7 +130,7 @@ export function planAskWalk(input: {
   const levelsTaken: Array<[number, number]> = [];
 
   for (const [ask, sz] of levels) {
-    if (!(ask > 0) || ask > input.maxAsk + 1e-9) break;
+    if (!(ask > 0) || ask > effectiveMaxAsk + 1e-9) break;
     if (count >= targetSize) break;
     const roomContracts = targetSize - count;
     const roomUsd = input.maxUsd - notional;
@@ -127,7 +148,7 @@ export function planAskWalk(input: {
   }
 
   // If depth missing/thin, still try at least TOB size at tob ask (capped).
-  if (count <= 0 && tobAsk <= input.maxAsk && tobSize > 0) {
+  if (count <= 0 && tobAsk <= effectiveMaxAsk && tobSize > 0) {
     const take = Math.min(
       Math.floor(tobSize),
       input.maxContracts,
@@ -166,13 +187,30 @@ export function earlyOverCategories(
   ask: number,
 ): MlbOverSoftballCat[] {
   const cats: MlbOverSoftballCat[] = [];
-  if (inning != null && runsDelta >= 2 && inning <= 6) {
+  if (inning != null && runsDelta >= 2 && inning <= EARLY_OVER_MAX_INNING) {
     cats.push(CAT_MULTI_RUN_EARLY);
   }
-  if (inning != null && ask >= 0.5 && ask < 0.8 && inning <= 6) {
+  if (inning != null && ask >= 0.5 && ask < 0.8 && inning <= EARLY_OVER_MAX_INNING) {
     cats.push(CAT_CHEAP_OVER_EARLY);
   }
   return cats;
+}
+
+/**
+ * Proposed tighten: no multi_run_early chase at ask ≥ threshold from minInning on
+ * (default: ≥ $0.90 from the 5th). Cheap-over-early alone is unaffected.
+ */
+export function isMultiRunLateHighAsk(input: {
+  cats: readonly MlbOverSoftballCat[];
+  inning: number;
+  ask: number;
+  minInning?: number;
+  askThreshold?: number;
+}): boolean {
+  if (!input.cats.includes(CAT_MULTI_RUN_EARLY)) return false;
+  const minInning = input.minInning ?? 5;
+  const askThreshold = input.askThreshold ?? 0.9;
+  return input.inning >= minInning && input.ask + 1e-12 >= askThreshold;
 }
 
 /**

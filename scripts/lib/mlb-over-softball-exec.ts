@@ -2,6 +2,10 @@
  * Live / shadow execution for early MLB next-line Kalshi over softballs.
  *
  * LIVE requires MLB_OVER_SOFTBALL_LIVE=1. Independent of weather KALSHI_SOFTBALL_LIVE.
+ *
+ * Shadow tighten (default on): multi_run_early with ask ≥ $0.90 from inn 5+
+ * logs would-skip and does not live-fire (cheap_over_early unaffected).
+ * Flip with MLB_OVER_SOFTBALL_MULTI_RUN_LATE_HIGH_MODE=enforce|off.
  */
 
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
@@ -10,6 +14,7 @@ import { randomUUID } from "node:crypto";
 import type { KalshiClient } from "./kalshi-client.js";
 import { killSwitchActive } from "./orphan-monitor.js";
 import {
+  isMultiRunLateHighAsk,
   planAskWalk,
   type MlbOverSoftballCandidate,
 } from "./mlb-over-softball.js";
@@ -24,15 +29,50 @@ const ORDERS_PATH = join(DATA_DIR, "mlb-over-softball-orders.jsonl");
 export const MLB_OVER_SOFTBALL_LIVE = /^(1|true|yes)$/i.test(
   process.env.MLB_OVER_SOFTBALL_LIVE ?? "",
 );
-const MAX_CONTRACTS = Math.max(1, Number(process.env.MLB_OVER_SOFTBALL_MAX_CONTRACTS ?? 25));
-const MAX_USD = Math.max(1, Number(process.env.MLB_OVER_SOFTBALL_MAX_USD ?? 25));
-const MAX_DAILY_USD = Math.max(1, Number(process.env.MLB_OVER_SOFTBALL_MAX_DAILY_USD ?? 200));
-const MAX_ASK = Math.min(0.99, Math.max(0.05, Number(process.env.MLB_OVER_SOFTBALL_MAX_ASK ?? 0.94)));
-/** Walk the ask until at least tobMult × TOB size (within maxAsk / caps). */
+
+/** Clear visible book ≤ maxAsk (capped by maxContracts / maxUsd). Default on. */
+const FILL_BOOK = !/^(0|false|no)$/i.test(process.env.MLB_OVER_SOFTBALL_FILL_BOOK ?? "1");
+
+const MAX_CONTRACTS = Math.max(
+  1,
+  Number(process.env.MLB_OVER_SOFTBALL_MAX_CONTRACTS ?? (FILL_BOOK ? 1000 : 25)),
+);
+const MAX_USD = Math.max(
+  1,
+  Number(process.env.MLB_OVER_SOFTBALL_MAX_USD ?? (FILL_BOOK ? 100 : 25)),
+);
+const MAX_DAILY_USD = Math.max(
+  1,
+  Number(process.env.MLB_OVER_SOFTBALL_MAX_DAILY_USD ?? (FILL_BOOK ? 3000 : 200)),
+);
+/** Skip / don't walk above this YES ask — 0.90 avoids ~at-cost 93–94¢ chases. */
+const MAX_ASK = Math.min(0.99, Math.max(0.05, Number(process.env.MLB_OVER_SOFTBALL_MAX_ASK ?? 0.9)));
+/**
+ * Don't walk more than this above TOB (default 2¢). Stops fill-book from
+ * turning an 87¢ print into a ~90¢ VWAP with almost no edge.
+ */
+const MAX_WALK = Math.min(
+  0.2,
+  Math.max(0, Number(process.env.MLB_OVER_SOFTBALL_MAX_WALK ?? 0.02)),
+);
+/** Used only when FILL_BOOK=0. */
 const TOB_SIZE_MULT = Math.max(1, Number(process.env.MLB_OVER_SOFTBALL_TOB_SIZE_MULT ?? 2));
 const TIF = (process.env.MLB_OVER_SOFTBALL_TIF ?? "immediate_or_cancel") as
   | "fill_or_kill"
   | "immediate_or_cancel";
+
+/** shadow (default) | enforce | off */
+const LATE_HIGH_MODE = (
+  process.env.MLB_OVER_SOFTBALL_MULTI_RUN_LATE_HIGH_MODE ?? "shadow"
+).toLowerCase();
+const LATE_HIGH_MIN_INN = Math.max(
+  1,
+  Number(process.env.MLB_OVER_SOFTBALL_MULTI_RUN_LATE_HIGH_MIN_INN ?? 5),
+);
+const LATE_HIGH_ASK = Math.min(
+  0.99,
+  Math.max(0.5, Number(process.env.MLB_OVER_SOFTBALL_MULTI_RUN_LATE_HIGH_ASK ?? 0.9)),
+);
 
 export type MlbOverSoftballFireCtx = {
   slug: string;
@@ -77,12 +117,15 @@ function dedupeKey(ctx: MlbOverSoftballFireCtx): string {
 export function mlbOverSoftballExecLabel(): string {
   return (
     `live=${MLB_OVER_SOFTBALL_LIVE ? 1 : 0} `
+    + `fillBook=${FILL_BOOK ? 1 : 0} `
     + `maxContracts=${MAX_CONTRACTS} `
     + `maxUsd=${MAX_USD} `
     + `maxDailyUsd=${MAX_DAILY_USD} `
     + `maxAsk=${MAX_ASK} `
+    + `maxWalk=${MAX_WALK} `
     + `tobMult=${TOB_SIZE_MULT} `
-    + `tif=${TIF}`
+    + `tif=${TIF} `
+    + `lateHigh=${LATE_HIGH_MODE}@inn≥${LATE_HIGH_MIN_INN}/ask≥${LATE_HIGH_ASK}`
   );
 }
 
@@ -99,8 +142,19 @@ function publish(row: Record<string, unknown>): void {
   emitHook?.(row);
 }
 
+function lateHighAskHit(c: MlbOverSoftballCandidate): boolean {
+  if (LATE_HIGH_MODE === "off") return false;
+  return isMultiRunLateHighAsk({
+    cats: c.cats,
+    inning: c.inning,
+    ask: c.ask,
+    minInning: LATE_HIGH_MIN_INN,
+    askThreshold: LATE_HIGH_ASK,
+  });
+}
+
 /**
- * Fire-and-forget. Always emits a shadow/signal row; places a Kalshi FOK bid
+ * Fire-and-forget. Always emits a shadow/signal row; places a Kalshi order
  * only when LIVE=1 and gates pass.
  */
 export function enqueueMlbOverSoftball(ctx: MlbOverSoftballFireCtx): void {
@@ -146,10 +200,13 @@ export async function executeMlbOverSoftball(
     maxContracts: MAX_CONTRACTS,
     maxUsd: MAX_USD,
     tobMult: TOB_SIZE_MULT,
+    fillBook: FILL_BOOK,
+    maxWalkAboveTob: MAX_WALK,
   });
   const count = walk.count;
   const limitPrice = walk.limitPrice;
   const vwap = walk.vwap;
+  const lateHigh = lateHighAskHit(c);
   const base = {
     kind: "mlb_over_softball_signal" as const,
     observedAt: new Date().toISOString(),
@@ -170,9 +227,18 @@ export async function executeMlbOverSoftball(
     limitPrice,
     vwap,
     tobMult: TOB_SIZE_MULT,
+    fillBook: FILL_BOOK,
+    maxWalkAboveTob: MAX_WALK,
     targetSize: walk.targetSize,
     levelsTaken: walk.levelsTaken,
     live: MLB_OVER_SOFTBALL_LIVE,
+    lateHighAskGate: lateHigh
+      ? {
+        mode: LATE_HIGH_MODE,
+        minInning: LATE_HIGH_MIN_INN,
+        askThreshold: LATE_HIGH_ASK,
+      }
+      : null,
   };
   publish(base);
 
@@ -180,9 +246,31 @@ export async function executeMlbOverSoftball(
     log(
       `shadow ${ctx.slug} over${c.line} tob=${c.ask.toFixed(2)}x${c.askSize.toFixed(0)} `
       + `→ walk x${count} limit=${limitPrice.toFixed(2)} vwap=${vwap.toFixed(3)} `
-      + `cats=${c.cats.join(",")}`,
+      + `fillBook=${FILL_BOOK ? 1 : 0} cats=${c.cats.join(",")}`
+      + (lateHigh ? ` LATE_HIGH_WOULD_SKIP` : ""),
     );
     return "shadow";
+  }
+
+  if (lateHigh) {
+    const reason =
+      LATE_HIGH_MODE === "enforce"
+        ? "multi_run_late_high_ask"
+        : "shadow_multi_run_late_high_ask";
+    log(
+      `skip ${reason} ${ctx.slug} inn${c.inning} over${c.line} @${c.ask.toFixed(2)} `
+      + `(mode=${LATE_HIGH_MODE})`,
+    );
+    publish({
+      ...base,
+      kind: "mlb_over_softball_skip",
+      reason,
+      wouldHaveContracts: count,
+      wouldHaveLimit: limitPrice,
+      wouldHaveVwap: vwap,
+      wouldHaveNotional: count * limitPrice,
+    });
+    return "skipped";
   }
 
   if (killSwitchActive()) {
@@ -239,7 +327,8 @@ export async function executeMlbOverSoftball(
   log(
     `!!! LIVE FIRE ${ctx.slug} over${c.line} tob=${c.ask.toFixed(2)}x${Math.floor(c.askSize)} `
     + `→ x${count} limit=${limitPrice.toFixed(2)} vwap≈${vwap.toFixed(3)} `
-    + `(≈$${notionalCap.toFixed(2)}) tif=${tif} cats=${c.cats.join(",")}`,
+    + `(≈$${notionalCap.toFixed(2)}) tif=${tif} fillBook=${FILL_BOOK ? 1 : 0} `
+    + `cats=${c.cats.join(",")}`,
   );
   const started = Date.now();
   try {
