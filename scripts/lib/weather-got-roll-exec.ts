@@ -40,32 +40,18 @@ export const MAX_DAILY_USD = Math.max(
   STAKE_USD,
   Number(process.env.WEATHER_GOT_ROLL_MAX_DAILY_USD ?? 100),
 );
-/** Absolute ask floor — still skip dust below this. */
+/** Absolute ask floor for book walks. */
 export const MIN_ASK = Math.min(
   0.5,
   Math.max(0.01, Number(process.env.WEATHER_GOT_ROLL_MIN_ASK ?? 0.01)),
 );
 /**
- * Opens at/above this get full STAKE_USD; below use PROBE_STAKE_USD.
- * Also marks "cheap" for exit notional guards.
+ * Paper `MIN_BUY_MID` (default 0.05): skip open/roll when decision mid/ask
+ * is below this. Policy match for research GOT roll.
  */
-export const FULL_STAKE_MIN_ASK = Math.min(
+export const MIN_BUY_MID = Math.min(
   0.99,
-  Math.max(MIN_ASK, Number(process.env.WEATHER_GOT_ROLL_FULL_STAKE_MIN_ASK ?? 0.15)),
-);
-/** Probe size for bargain opens (ask < FULL_STAKE_MIN_ASK). */
-export const PROBE_STAKE_USD = Math.max(
-  0,
-  Math.min(STAKE_USD, Number(process.env.WEATHER_GOT_ROLL_PROBE_STAKE_USD ?? 5)),
-);
-/** When exiting a cheap bin, require buy notional ≥ this × sell proceeds. */
-export const CHEAP_EXIT_BUY_FRAC = Math.min(
-  1,
-  Math.max(0, Number(process.env.WEATHER_GOT_ROLL_CHEAP_EXIT_BUY_FRAC ?? 0.7)),
-);
-/** If true, allow rolls into asks below FULL_STAKE_MIN_ASK (default: blocked). */
-export const ALLOW_ROLL_INTO_CHEAP = /^(1|true|yes)$/i.test(
-  process.env.WEATHER_GOT_ROLL_ALLOW_ROLL_INTO_CHEAP ?? "",
+  Math.max(MIN_ASK, Number(process.env.WEATHER_GOT_ROLL_MIN_BUY_MID ?? 0.05)),
 );
 export const MAX_ASK = Math.min(
   0.99,
@@ -99,27 +85,24 @@ export const MIN_BUY_TO_SELL_RATIO = Math.max(
   0,
   Number(process.env.WEATHER_GOT_ROLL_MIN_BUY_TO_SELL ?? 0.5),
 );
-/** Cap successful rolls per city-day. */
+/** Cap successful rolls per city-day (0 = unlimited, matching paper). */
 export const MAX_ROLLS_PER_CITY_DAY = Math.max(
   0,
-  Math.floor(Number(process.env.WEATHER_GOT_ROLL_MAX_ROLLS_PER_DAY ?? 5)),
+  Math.floor(Number(process.env.WEATHER_GOT_ROLL_MAX_ROLLS_PER_DAY ?? 0)),
 );
-/** Consecutive GOT preds on same new bin before rolling. */
+/** Consecutive GOT preds on same new bin before rolling (1 = paper-like). */
 export const CONFIRM_TICKS = Math.max(
   1,
-  Math.floor(Number(process.env.WEATHER_GOT_ROLL_CONFIRM_TICKS ?? 2)),
+  Math.floor(Number(process.env.WEATHER_GOT_ROLL_CONFIRM_TICKS ?? 1)),
 );
 
 export function gotRollGuards(): GotRollGuardOpts {
   return {
+    minBuyMid: MIN_BUY_MID,
     minRollNotionalUsd: MIN_ROLL_NOTIONAL_USD,
     minSellFillFrac: MIN_SELL_FILL_FRAC,
     minBuyToSellRatio: MIN_BUY_TO_SELL_RATIO,
     maxRollsPerCityDay: MAX_ROLLS_PER_CITY_DAY,
-    fullStakeMinAsk: FULL_STAKE_MIN_ASK,
-    probeStakeUsd: PROBE_STAKE_USD,
-    cheapExitMinBuyNotionalFrac: CHEAP_EXIT_BUY_FRAC,
-    allowRollIntoCheap: ALLOW_ROLL_INTO_CHEAP,
   };
 }
 
@@ -189,19 +172,16 @@ export function gotRollExecLabel(): string {
   return (
     `live=${WEATHER_GOT_ROLL_LIVE ? 1 : 0} `
     + `stakeUsd=${STAKE_USD} `
-    + `probeStakeUsd=${PROBE_STAKE_USD} `
     + `maxDailyUsd=${MAX_DAILY_USD} `
     + `minAsk=${MIN_ASK} `
-    + `fullStakeMinAsk=${FULL_STAKE_MIN_ASK} `
+    + `minBuyMid=${MIN_BUY_MID} `
     + `maxAsk=${MAX_ASK} `
     + `rollWalkSlip=${ROLL_WALK_SLIP} `
     + `openWalkSlip=${OPEN_WALK_SLIP} `
     + `minRollNotional=${MIN_ROLL_NOTIONAL_USD} `
     + `minSellFill=${MIN_SELL_FILL_FRAC} `
     + `minBuyToSell=${MIN_BUY_TO_SELL_RATIO} `
-    + `cheapExitBuyFrac=${CHEAP_EXIT_BUY_FRAC} `
-    + `allowRollIntoCheap=${ALLOW_ROLL_INTO_CHEAP ? 1 : 0} `
-    + `maxRolls/day=${MAX_ROLLS_PER_CITY_DAY} `
+    + `maxRolls/day=${MAX_ROLLS_PER_CITY_DAY || "∞"} `
     + `confirmTicks=${CONFIRM_TICKS} `
     + `tif=${TIF}`
   );
@@ -519,40 +499,23 @@ export async function executeGotRollPlan(opts: {
       }
     }
 
-    // Cliff guard at execution time (after actual sell).
-    // Cheap exits: keep notional; normal exits: contract-count ratio.
-    const sellPx = sellAvg;
-    const exitingCheap = sellPx + 1e-9 < FULL_STAKE_MIN_ASK;
-    const buyNotional = buyCount * buyLimit;
-    const notionalCliff = exitingCheap
-      && (
-        (MIN_ROLL_NOTIONAL_USD > 0 && buyNotional + 1e-9 < MIN_ROLL_NOTIONAL_USD)
-        || (
-          CHEAP_EXIT_BUY_FRAC > 0
-          && buyNotional + 1e-9 < proceeds * CHEAP_EXIT_BUY_FRAC
-        )
-      );
-    const contractCliff = !exitingCheap
-      && MIN_BUY_TO_SELL_RATIO > 0
-      && buyCount + 1e-9 < sell.fillCount * MIN_BUY_TO_SELL_RATIO;
-    if (notionalCliff || contractCliff) {
-      // Sold fully — flat rather than buying a cliff stub.
+    // Live-only cliff after walk: paper assumes mid recycle; we may lose size.
+    if (
+      MIN_BUY_TO_SELL_RATIO > 0
+      && buyCount + 1e-9 < sell.fillCount * MIN_BUY_TO_SELL_RATIO
+    ) {
       cityState.delete(city);
       persistState();
       appendOrder({
         ...base,
         kind: "weather_got_roll_skip",
-        reason: notionalCliff ? "roll_notional_cliff_after_sell" : "roll_cliff_after_sell",
+        reason: "roll_cliff_after_sell",
         sellFill: sell.fillCount,
         buyCount,
-        buyNotional,
         proceeds,
-        exitingCheap,
       });
       log(
-        exitingCheap
-          ? `cheap-exit cliff ${city}: buyNotional=${buyNotional.toFixed(2)} vs proceeds=${proceeds.toFixed(2)}; flat`
-          : `cliff guard ${city}: buy ${buyCount} < ${MIN_BUY_TO_SELL_RATIO}× sold ${sell.fillCount}; flat`,
+        `cliff guard ${city}: buy ${buyCount} < ${MIN_BUY_TO_SELL_RATIO}× sold ${sell.fillCount}; flat`,
       );
       return "skipped";
     }

@@ -289,54 +289,28 @@ export function planOpenWalk(opts: {
 }
 
 export type GotRollGuardOpts = {
-  /** Skip roll when held mark (contracts×bid) is below this. */
+  /**
+   * Paper `MIN_BUY_MID`: skip open/roll when decision buy price (mid, else ask)
+   * is below this. Matches research GOT roll dust filter.
+   */
+  minBuyMid?: number;
+  /** Skip roll when held mark (contracts×bid) is below this (live stub guard). */
   minRollNotionalUsd?: number;
-  /** Require planned sell depth ≥ this fraction of held (else skip). */
+  /** Require planned sell depth ≥ this fraction of held (live IOC guard). */
   minSellFillFrac?: number;
-  /** Require buyContracts ≥ sellContracts × ratio (anti cliff) when not exiting cheap. */
+  /** Require buyContracts ≥ sellContracts × ratio after walk (live cliff). */
   minBuyToSellRatio?: number;
-  /** Max successful rolls per city-day. */
+  /** Max successful rolls per city-day (0 = unlimited, matching paper). */
   maxRollsPerCityDay?: number;
-  /**
-   * Ask at/above this gets full stakeUsd on opens.
-   * Below (but ≥ minAsk) uses probeStakeUsd. Default: unset → no tiering.
-   */
-  fullStakeMinAsk?: number;
-  /** Open stake when ask < fullStakeMinAsk. Default 5. */
-  probeStakeUsd?: number;
-  /**
-   * When exiting a cheap bin (bid < fullStakeMinAsk), require buy notional
-   * ≥ this fraction of sell proceeds. Default 0.7.
-   */
-  cheapExitMinBuyNotionalFrac?: number;
-  /**
-   * If false (default), refuse rolls whose target ask is below fullStakeMinAsk.
-   * Flat probe opens into cheap bins remain allowed; only roll-into-cheap is blocked.
-   */
-  allowRollIntoCheap?: boolean;
 };
-
-/** Effective open stake: full size above the tier threshold, probe below. */
-export function effectiveOpenStake(opts: {
-  ask: number;
-  stakeUsd: number;
-  fullStakeMinAsk?: number;
-  probeStakeUsd?: number;
-}): { stakeUsd: number; probe: boolean } {
-  const fullMin = Number(opts.fullStakeMinAsk);
-  if (!(fullMin > 0) || opts.ask + 1e-9 >= fullMin) {
-    return { stakeUsd: opts.stakeUsd, probe: false };
-  }
-  const probe = Math.max(0, Number(opts.probeStakeUsd ?? 5) || 0);
-  const stakeUsd = Math.min(opts.stakeUsd, probe > 0 ? probe : opts.stakeUsd);
-  return { stakeUsd, probe: stakeUsd + 1e-9 < opts.stakeUsd };
-}
 
 /**
  * Plan open/roll for one city.
- * Opens size to book depth when askLevels provided; cheap asks use probe stake.
- * Rolls walk within slip and apply anti-orphan / anti-thrash guards.
- * Cheap-bin exits use notional retention instead of contract-count cliff.
+ *
+ * Policy matches paper GOT research roll (`simulate_roll_policy` mode=model):
+ * follow GOT bin; skip buys when mid/ask &lt; minBuyMid; full stake otherwise.
+ * Execution differs only in sizing: live walks the ask/bid book within slip
+ * instead of assuming a full mid fill.
  */
 export function planGotRoll(opts: {
   bin: string | null | undefined;
@@ -347,8 +321,13 @@ export function planGotRoll(opts: {
   yesBid: number | null;
   /** For rolls onto a new bin. */
   newYesAsk: number | null;
+  /**
+   * Paper same-row mid for the *target* bin (from GOT daily_implied).
+   * Used for minBuyMid gate; execution still walks the ask.
+   */
+  buyMid?: number | null;
   stakeUsd: number;
-  /** Absolute ask floor (opens + roll targets). */
+  /** Absolute ask floor for book walks. */
   minAsk: number;
   maxAsk: number;
   /** YES ask ladder on target (opens + roll buys). */
@@ -363,6 +342,7 @@ export function planGotRoll(opts: {
 }): RollPlan {
   const { bin, markets, held, day, stakeUsd, minAsk, maxAsk } = opts;
   const guards = opts.guards ?? {};
+  const minBuyMid = Math.max(0, Number(guards.minBuyMid ?? 0) || 0);
   const minRollNotional = Math.max(0, Number(guards.minRollNotionalUsd ?? 0) || 0);
   const minSellFillFrac = Math.min(
     1,
@@ -370,13 +350,6 @@ export function planGotRoll(opts: {
   );
   const minBuyToSell = Math.max(0, Number(guards.minBuyToSellRatio ?? 0) || 0);
   const maxRolls = Math.max(0, Math.floor(Number(guards.maxRollsPerCityDay ?? 0) || 0));
-  const fullStakeMinAsk = Math.max(0, Number(guards.fullStakeMinAsk ?? 0) || 0);
-  const probeStakeUsd = Math.max(0, Number(guards.probeStakeUsd ?? 5) || 0);
-  const cheapExitBuyFrac = Math.min(
-    1,
-    Math.max(0, Number(guards.cheapExitMinBuyNotionalFrac ?? 0.7) || 0),
-  );
-  const allowRollIntoCheap = guards.allowRollIntoCheap === true;
 
   if (!bin) return { action: "skip", reason: "no_bin" };
   const target = findMarketForBin(markets, bin);
@@ -394,19 +367,16 @@ export function planGotRoll(opts: {
     if (ask == null) return { action: "skip", reason: "no_ask" };
     if (ask < minAsk) return { action: "skip", reason: "ask_below_min" };
     if (ask > maxAsk) return { action: "skip", reason: "ask_above_max" };
-
-    const tier = effectiveOpenStake({
-      ask,
-      stakeUsd,
-      fullStakeMinAsk: fullStakeMinAsk > 0 ? fullStakeMinAsk : undefined,
-      probeStakeUsd,
-    });
-    if (!(tier.stakeUsd > 0)) return { action: "skip", reason: "size_zero" };
+    // Paper dust filter: decision price is same-row mid when present, else ask.
+    const decisionPx = opts.buyMid != null && opts.buyMid > 0 ? opts.buyMid : ask;
+    if (minBuyMid > 0 && decisionPx + 1e-9 < minBuyMid) {
+      return { action: "skip", reason: "buy_below_min_mid" };
+    }
 
     const openSlip = Math.max(0, Number(opts.openMaxSlip ?? 0) || 0);
     if (openSlip > 0 && opts.buyAskLevels && opts.buyAskLevels.length > 0) {
       const openWalk = planOpenWalk({
-        stakeUsd: tier.stakeUsd,
+        stakeUsd,
         askLevels: opts.buyAskLevels,
         maxSlip: openSlip,
         minAsk,
@@ -428,7 +398,7 @@ export function planGotRoll(opts: {
       };
     }
 
-    const contracts = contractsForStake(tier.stakeUsd, ask);
+    const contracts = contractsForStake(stakeUsd, ask);
     if (contracts < 1) return { action: "skip", reason: "size_zero" };
     return {
       action: "open",
@@ -451,25 +421,15 @@ export function planGotRoll(opts: {
   if (newAsk == null) return { action: "skip", reason: "no_ask" };
   if (newAsk < minAsk) return { action: "skip", reason: "ask_below_min" };
   if (newAsk > maxAsk) return { action: "skip", reason: "ask_above_max" };
-  // Never chase full proceeds into a lottery bin — only flat probes may enter cheap.
-  if (
-    !allowRollIntoCheap
-    && fullStakeMinAsk > 0
-    && newAsk + 1e-9 < fullStakeMinAsk
-  ) {
-    return { action: "skip", reason: "roll_into_cheap" };
+  const decisionPx = opts.buyMid != null && opts.buyMid > 0 ? opts.buyMid : newAsk;
+  if (minBuyMid > 0 && decisionPx + 1e-9 < minBuyMid) {
+    return { action: "skip", reason: "buy_below_min_mid" };
   }
 
   const mark = held.contracts * bid;
   if (minRollNotional > 0 && mark + 1e-9 < minRollNotional) {
     return { action: "skip", reason: "min_roll_notional" };
   }
-
-  const exitingCheap = fullStakeMinAsk > 0 && bid + 1e-9 < fullStakeMinAsk;
-  // Cheap exits must fully clear the sell book — never orphan a lottery stub.
-  const sellFracRequired = exitingCheap
-    ? Math.max(minSellFillFrac, 0.95)
-    : minSellFillFrac;
 
   const maxSlip = Math.max(0, Number(opts.rollMaxSlip ?? 0) || 0);
   const canWalk =
@@ -483,7 +443,6 @@ export function planGotRoll(opts: {
   let sellLimit = bid;
   let buyContracts = 0;
   let buyLimit = newAsk;
-  let proceeds = held.contracts * bid;
   let walkMeta: Extract<RollPlan, { action: "roll" }>["walk"];
 
   if (canWalk) {
@@ -495,12 +454,12 @@ export function planGotRoll(opts: {
     });
     if (sellWalk.fillable < 1) return { action: "skip", reason: "no_bid_to_sell" };
     if (
-      sellFracRequired > 0
-      && sellWalk.fillable + 1e-9 < held.contracts * sellFracRequired
+      minSellFillFrac > 0
+      && sellWalk.fillable + 1e-9 < held.contracts * minSellFillFrac
     ) {
       return { action: "skip", reason: "sell_depth_thin" };
     }
-    proceeds = sellWalk.vwap * sellWalk.fillable;
+    const proceeds = sellWalk.vwap * sellWalk.fillable;
     const buyWalk = planBuyWalkForProceeds({
       proceedsUsd: proceeds,
       askLevels: opts.buyAskLevels!,
@@ -522,25 +481,12 @@ export function planGotRoll(opts: {
       buyVwap: buyWalk.vwap,
     };
   } else {
+    const proceeds = held.contracts * bid;
     buyContracts = Math.floor(proceeds / newAsk);
     if (buyContracts < 1) return { action: "skip", reason: "roll_size_zero" };
   }
 
-  const buyVwap = walkMeta?.buyVwap ?? buyLimit;
-  const buyNotional = buyContracts * buyVwap;
-
-  if (exitingCheap) {
-    // Don't chase out of a bargain unless rebuy keeps meaningful notional.
-    if (minRollNotional > 0 && buyNotional + 1e-9 < minRollNotional) {
-      return { action: "skip", reason: "cheap_exit_thin" };
-    }
-    if (
-      cheapExitBuyFrac > 0
-      && buyNotional + 1e-9 < proceeds * cheapExitBuyFrac
-    ) {
-      return { action: "skip", reason: "roll_notional_cliff" };
-    }
-  } else if (
+  if (
     minBuyToSell > 0
     && buyContracts + 1e-9 < sellContracts * minBuyToSell
   ) {

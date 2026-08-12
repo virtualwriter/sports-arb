@@ -206,6 +206,14 @@ async function handlePrediction(
     return;
   }
 
+  // Paper same-row mid for minBuyMid gate (execution still walks the ask).
+  const di = row.daily_implied;
+  let buyMid: number | null = null;
+  if (di && typeof di === "object" && bin in (di as Record<string, unknown>)) {
+    const raw = Number((di as Record<string, unknown>)[bin]);
+    if (Number.isFinite(raw) && raw > 0) buyMid = raw;
+  }
+
   const plan = planGotRoll({
     bin,
     markets: rt.markets,
@@ -214,6 +222,7 @@ async function handlePrediction(
     yesAsk,
     yesBid,
     newYesAsk,
+    buyMid,
     stakeUsd: STAKE_USD,
     minAsk: MIN_ASK,
     maxAsk: MAX_ASK,

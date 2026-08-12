@@ -15,30 +15,24 @@ Environment=SPORTS_ARB_STATE_DIR=/var/lib/sports-arb
 Environment=SPORTS_ARB_DATA_DIR=/var/lib/sports-arb/data
 Environment=SPORTS_ARB_RUNTIME_DIR=/var/lib/sports-arb/runtime
 Environment=NODE_NO_WARNINGS=1
-# Real-money GOT roll — $20/city, $100/day cap.
-# No local-hour gate: trade from first GOT prediction of the day (same as paper).
+# Policy matches paper GOT research roll (mode=model, min_buy_mid=5¢).
+# Live differs only on execution: walk the book within slip (not mid fills).
 Environment=WEATHER_GOT_ROLL_LIVE=1
 Environment=WEATHER_GOT_ROLL_STAKE_USD=20
 Environment=WEATHER_GOT_ROLL_MAX_DAILY_USD=100
-# Absolute floor 1¢; full $20 above 15¢, $5 probe below (depth-capped).
-# Rolls into <15¢ asks blocked (flat probes only) — prevents lottery trap.
 Environment=WEATHER_GOT_ROLL_MIN_ASK=0.01
-Environment=WEATHER_GOT_ROLL_FULL_STAKE_MIN_ASK=0.15
-Environment=WEATHER_GOT_ROLL_PROBE_STAKE_USD=5
-Environment=WEATHER_GOT_ROLL_CHEAP_EXIT_BUY_FRAC=0.7
-Environment=WEATHER_GOT_ROLL_ALLOW_ROLL_INTO_CHEAP=0
+Environment=WEATHER_GOT_ROLL_MIN_BUY_MID=0.05
 Environment=WEATHER_GOT_ROLL_MAX_ASK=0.95
-# Walk up to 3¢ past TOB on opens (depth-capped) and roll legs.
 Environment=WEATHER_GOT_ROLL_WALK_SLIP=0.03
 Environment=WEATHER_GOT_ROLL_OPEN_WALK_SLIP=0.03
 Environment=WEATHER_GOT_ROLL_BOOK_DEPTH=20
-# Anti-thrash / anti-orphan guards (lessons from 26AUG11 live).
+# Live IOC safety (paper assumes full mid fills).
 Environment=WEATHER_GOT_ROLL_MIN_ROLL_NOTIONAL=5
 Environment=WEATHER_GOT_ROLL_MIN_SELL_FILL_FRAC=0.95
 Environment=WEATHER_GOT_ROLL_MIN_BUY_TO_SELL=0.5
-Environment=WEATHER_GOT_ROLL_MAX_ROLLS_PER_DAY=5
-Environment=WEATHER_GOT_ROLL_CONFIRM_TICKS=2
-# Floor: do not trade city-days before this stamp.
+# Match paper switching: no roll cap, 1-tick confirm.
+Environment=WEATHER_GOT_ROLL_MAX_ROLLS_PER_DAY=0
+Environment=WEATHER_GOT_ROLL_CONFIRM_TICKS=1
 Environment=WEATHER_GOT_ROLL_START_DAY=26AUG12
 Environment=WEATHER_GOT_ROLL_CITIES=chicago,nyc,miami,austin,la
 Environment=WEATHER_GOT_ROLL_POLL_MS=2000
