@@ -63,6 +63,10 @@ export const CHEAP_EXIT_BUY_FRAC = Math.min(
   1,
   Math.max(0, Number(process.env.WEATHER_GOT_ROLL_CHEAP_EXIT_BUY_FRAC ?? 0.7)),
 );
+/** If true, allow rolls into asks below FULL_STAKE_MIN_ASK (default: blocked). */
+export const ALLOW_ROLL_INTO_CHEAP = /^(1|true|yes)$/i.test(
+  process.env.WEATHER_GOT_ROLL_ALLOW_ROLL_INTO_CHEAP ?? "",
+);
 export const MAX_ASK = Math.min(
   0.99,
   Math.max(MIN_ASK, Number(process.env.WEATHER_GOT_ROLL_MAX_ASK ?? 0.95)),
@@ -115,6 +119,7 @@ export function gotRollGuards(): GotRollGuardOpts {
     fullStakeMinAsk: FULL_STAKE_MIN_ASK,
     probeStakeUsd: PROBE_STAKE_USD,
     cheapExitMinBuyNotionalFrac: CHEAP_EXIT_BUY_FRAC,
+    allowRollIntoCheap: ALLOW_ROLL_INTO_CHEAP,
   };
 }
 
@@ -195,6 +200,7 @@ export function gotRollExecLabel(): string {
     + `minSellFill=${MIN_SELL_FILL_FRAC} `
     + `minBuyToSell=${MIN_BUY_TO_SELL_RATIO} `
     + `cheapExitBuyFrac=${CHEAP_EXIT_BUY_FRAC} `
+    + `allowRollIntoCheap=${ALLOW_ROLL_INTO_CHEAP ? 1 : 0} `
     + `maxRolls/day=${MAX_ROLLS_PER_CITY_DAY} `
     + `confirmTicks=${CONFIRM_TICKS} `
     + `tif=${TIF}`

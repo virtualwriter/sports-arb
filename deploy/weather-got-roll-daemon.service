@@ -21,10 +21,12 @@ Environment=WEATHER_GOT_ROLL_LIVE=1
 Environment=WEATHER_GOT_ROLL_STAKE_USD=20
 Environment=WEATHER_GOT_ROLL_MAX_DAILY_USD=100
 # Absolute floor 1¢; full $20 above 15¢, $5 probe below (depth-capped).
+# Rolls into <15¢ asks blocked (flat probes only) — prevents lottery trap.
 Environment=WEATHER_GOT_ROLL_MIN_ASK=0.01
 Environment=WEATHER_GOT_ROLL_FULL_STAKE_MIN_ASK=0.15
 Environment=WEATHER_GOT_ROLL_PROBE_STAKE_USD=5
 Environment=WEATHER_GOT_ROLL_CHEAP_EXIT_BUY_FRAC=0.7
+Environment=WEATHER_GOT_ROLL_ALLOW_ROLL_INTO_CHEAP=0
 Environment=WEATHER_GOT_ROLL_MAX_ASK=0.95
 # Walk up to 3¢ past TOB on opens (depth-capped) and roll legs.
 Environment=WEATHER_GOT_ROLL_WALK_SLIP=0.03

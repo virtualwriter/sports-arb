@@ -309,6 +309,11 @@ export type GotRollGuardOpts = {
    * ≥ this fraction of sell proceeds. Default 0.7.
    */
   cheapExitMinBuyNotionalFrac?: number;
+  /**
+   * If false (default), refuse rolls whose target ask is below fullStakeMinAsk.
+   * Flat probe opens into cheap bins remain allowed; only roll-into-cheap is blocked.
+   */
+  allowRollIntoCheap?: boolean;
 };
 
 /** Effective open stake: full size above the tier threshold, probe below. */
@@ -371,6 +376,7 @@ export function planGotRoll(opts: {
     1,
     Math.max(0, Number(guards.cheapExitMinBuyNotionalFrac ?? 0.7) || 0),
   );
+  const allowRollIntoCheap = guards.allowRollIntoCheap === true;
 
   if (!bin) return { action: "skip", reason: "no_bin" };
   const target = findMarketForBin(markets, bin);
@@ -445,6 +451,14 @@ export function planGotRoll(opts: {
   if (newAsk == null) return { action: "skip", reason: "no_ask" };
   if (newAsk < minAsk) return { action: "skip", reason: "ask_below_min" };
   if (newAsk > maxAsk) return { action: "skip", reason: "ask_above_max" };
+  // Never chase full proceeds into a lottery bin — only flat probes may enter cheap.
+  if (
+    !allowRollIntoCheap
+    && fullStakeMinAsk > 0
+    && newAsk + 1e-9 < fullStakeMinAsk
+  ) {
+    return { action: "skip", reason: "roll_into_cheap" };
+  }
 
   const mark = held.contracts * bid;
   if (minRollNotional > 0 && mark + 1e-9 < minRollNotional) {

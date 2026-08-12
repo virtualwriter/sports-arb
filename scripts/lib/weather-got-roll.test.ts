@@ -362,6 +362,56 @@ function testGuards(): void {
     assert.equal(cheapExitOk.buyContracts, 12);
   }
 
+  // Roll-into-cheap blocked when already holding a mid bin.
+  const intoCheap = planGotRoll({
+    bin: "76-77",
+    markets,
+    held: { ...held, bin: "78-79", ticker: "KXHIGHLAX-26AUG11-B78.5", contracts: 30, avgEntry: 0.6 },
+    day: "26AUG11",
+    yesAsk: null,
+    yesBid: 0.55,
+    newYesAsk: 0.04,
+    stakeUsd: 20,
+    minAsk: 0.01,
+    maxAsk: 0.95,
+    sellBidLevels: [[0.55, 30]],
+    buyAskLevels: [[0.04, 500]],
+    rollMaxSlip: 0.03,
+    guards: {
+      fullStakeMinAsk: 0.15,
+      allowRollIntoCheap: false,
+      minSellFillFrac: 0.95,
+      minBuyToSellRatio: 0.5,
+    },
+  });
+  assert.equal(intoCheap.action, "skip");
+  if (intoCheap.action === "skip") assert.equal(intoCheap.reason, "roll_into_cheap");
+
+  // Opt-in still allows roll-into-cheap.
+  const intoCheapOk = planGotRoll({
+    bin: "76-77",
+    markets,
+    held: { ...held, bin: "78-79", ticker: "KXHIGHLAX-26AUG11-B78.5", contracts: 30, avgEntry: 0.6 },
+    day: "26AUG11",
+    yesAsk: null,
+    yesBid: 0.55,
+    newYesAsk: 0.04,
+    stakeUsd: 20,
+    minAsk: 0.01,
+    maxAsk: 0.95,
+    sellBidLevels: [[0.55, 30]],
+    buyAskLevels: [[0.04, 500]],
+    rollMaxSlip: 0.03,
+    guards: {
+      fullStakeMinAsk: 0.15,
+      allowRollIntoCheap: true,
+      minSellFillFrac: 0.95,
+      cheapExitMinBuyNotionalFrac: 0.7,
+      minRollNotionalUsd: 5,
+    },
+  });
+  assert.equal(intoCheapOk.action, "roll");
+
   // Cheap exit with destroyed proceeds (1¢ bid after 27¢ entry path): skip.
   const cheapExitBad = planGotRoll({
     bin: "78-79",
