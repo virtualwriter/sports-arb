@@ -83,6 +83,22 @@ const LATE_HIGH_ASK = Math.min(
 const MIN_EDGE = Number(process.env.MLB_OVER_SOFTBALL_MIN_EDGE ?? -1);
 const MIN_EDGE_ON = Number.isFinite(MIN_EDGE) && MIN_EDGE > 0;
 
+/**
+ * Separate, tighter ask cap for inning 4. inn4 is the one early bucket with
+ * paper losses (28/31 vs 45/46 in inn5), and its overs price in the same
+ * 89–93¢ band as inn5, so a shared MAX_ASK can't tell them apart. Historically
+ * no inn4 print has come in at or below this, so expect it to stand down
+ * rather than fill cheaper.
+ */
+const INN4_MAX_ASK = Math.min(
+  0.99,
+  Math.max(0.05, Number(process.env.MLB_OVER_SOFTBALL_INN4_MAX_ASK ?? 0.86)),
+);
+
+function maxAskForInning(inning: number | null | undefined): number {
+  return inning === 4 ? Math.min(MAX_ASK, INN4_MAX_ASK) : MAX_ASK;
+}
+
 export type MlbOverSoftballFireCtx = {
   slug: string;
   t0: number;
@@ -131,6 +147,7 @@ export function mlbOverSoftballExecLabel(): string {
     + `maxUsd=${MAX_USD} `
     + `maxDailyUsd=${MAX_DAILY_USD} `
     + `maxAsk=${MAX_ASK} `
+    + `inn4MaxAsk=${INN4_MAX_ASK} `
     + `maxWalk=${MAX_WALK} `
     + `tobMult=${TOB_SIZE_MULT} `
     + `tif=${TIF} `
@@ -202,11 +219,12 @@ export async function executeMlbOverSoftball(
   }
   firedKeys.add(key);
 
+  const maxAsk = maxAskForInning(c.inning);
   const walk = planAskWalk({
     tobAsk: c.ask,
     tobSize: c.askSize,
     askLevels: c.askLevels,
-    maxAsk: MAX_ASK,
+    maxAsk,
     maxContracts: MAX_CONTRACTS,
     maxUsd: MAX_USD,
     tobMult: TOB_SIZE_MULT,
@@ -241,6 +259,7 @@ export async function executeMlbOverSoftball(
     tobMult: TOB_SIZE_MULT,
     fillBook: FILL_BOOK,
     maxWalkAboveTob: MAX_WALK,
+    maxAsk,
     modelEdge,
     minEdge: MIN_EDGE_ON ? MIN_EDGE : null,
     targetSize: walk.targetSize,
@@ -310,8 +329,13 @@ export async function executeMlbOverSoftball(
     publish({ ...base, kind: "mlb_over_softball_skip", reason: "kill_switch" });
     return "skipped";
   }
-  if (c.ask > MAX_ASK) {
-    publish({ ...base, kind: "mlb_over_softball_skip", reason: "ask_above_max" });
+  if (c.ask > maxAsk) {
+    const reason = maxAsk < MAX_ASK ? "ask_above_inning_max" : "ask_above_max";
+    log(
+      `skip ${reason} ${ctx.slug} inn${c.inning} over${c.line} `
+      + `@${c.ask.toFixed(2)} > max=${maxAsk.toFixed(2)}`,
+    );
+    publish({ ...base, kind: "mlb_over_softball_skip", reason });
     return "skipped";
   }
   if (count < 1) {

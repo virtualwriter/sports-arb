@@ -35,7 +35,8 @@
  *      MLB_OVER_SOFTBALL_FILL_BOOK (default 1; clear ask ≤ maxAsk up to caps),
  *      MLB_OVER_SOFTBALL_MAX_CONTRACTS / _MAX_USD / _MAX_DAILY_USD / _MAX_ASK,
  *      MLB_OVER_SOFTBALL_MAX_WALK (default 0.02; max cents above TOB to walk),
- *      MLB_OVER_SOFTBALL_MIN_EDGE (default 0.04; skip if model edge $/ct below this),
+ *      MLB_OVER_SOFTBALL_MIN_EDGE (default off; skip if model edge $/ct below this),
+ *      MLB_OVER_SOFTBALL_INN4_MAX_ASK (default 0.86; tighter ask cap for inn 4),
  *      MLB_OVER_SOFTBALL_TOB_SIZE_MULT (default 2; only when FILL_BOOK=0),
  *      MLB_OVER_SOFTBALL_MULTI_RUN_LATE_HIGH_MODE (shadow|enforce|off; default shadow),
  *      MLB_OVER_SOFTBALL_MULTI_RUN_LATE_HIGH_MIN_INN / _ASK (default 5 / 0.90)
