@@ -181,6 +181,16 @@ describe("planAskWalk", () => {
   });
 });
 
+describe("modelEdgePerContract", () => {
+  it("flags inn4 @89¢ as flat and inn5 @89¢ as solid", async () => {
+    const { modelEdgePerContract } = await import("./mlb-over-softball.js");
+    const inn4 = modelEdgePerContract(0.89, 4);
+    const inn5 = modelEdgePerContract(0.89, 5);
+    expect(inn4).toBeLessThan(0.02);
+    expect(inn5).toBeGreaterThan(0.04);
+  });
+});
+
 describe("isMultiRunLateHighAsk", () => {
   it("flags multi_run ≥0.90 from inn 5+", () => {
     expect(

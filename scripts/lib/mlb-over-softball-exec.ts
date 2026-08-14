@@ -15,6 +15,7 @@ import type { KalshiClient } from "./kalshi-client.js";
 import { killSwitchActive } from "./orphan-monitor.js";
 import {
   isMultiRunLateHighAsk,
+  modelEdgePerContract,
   planAskWalk,
   type MlbOverSoftballCandidate,
 } from "./mlb-over-softball.js";
@@ -73,6 +74,14 @@ const LATE_HIGH_ASK = Math.min(
   0.99,
   Math.max(0.5, Number(process.env.MLB_OVER_SOFTBALL_MULTI_RUN_LATE_HIGH_ASK ?? 0.9)),
 );
+/**
+ * Skip if fee-adjusted model edge on planned VWAP is below this ($/ct).
+ * Off by default: the per-inning priors it relies on are too thin to gate live
+ * money (inn4 is 28/31, not separable from inn5 at p=0.30). Set negative to
+ * disable entirely; 0.04 blocks the whole inn4 bucket.
+ */
+const MIN_EDGE = Number(process.env.MLB_OVER_SOFTBALL_MIN_EDGE ?? -1);
+const MIN_EDGE_ON = Number.isFinite(MIN_EDGE) && MIN_EDGE > 0;
 
 export type MlbOverSoftballFireCtx = {
   slug: string;
@@ -125,6 +134,7 @@ export function mlbOverSoftballExecLabel(): string {
     + `maxWalk=${MAX_WALK} `
     + `tobMult=${TOB_SIZE_MULT} `
     + `tif=${TIF} `
+    + `minEdge=${MIN_EDGE_ON ? MIN_EDGE : "off"} `
     + `lateHigh=${LATE_HIGH_MODE}@inn≥${LATE_HIGH_MIN_INN}/ask≥${LATE_HIGH_ASK}`
   );
 }
@@ -207,6 +217,8 @@ export async function executeMlbOverSoftball(
   const limitPrice = walk.limitPrice;
   const vwap = walk.vwap;
   const lateHigh = lateHighAskHit(c);
+  const modelEdge = modelEdgePerContract(vwap, c.inning);
+  const flatEdge = MIN_EDGE_ON && modelEdge + 1e-12 < MIN_EDGE;
   const base = {
     kind: "mlb_over_softball_signal" as const,
     observedAt: new Date().toISOString(),
@@ -229,6 +241,8 @@ export async function executeMlbOverSoftball(
     tobMult: TOB_SIZE_MULT,
     fillBook: FILL_BOOK,
     maxWalkAboveTob: MAX_WALK,
+    modelEdge,
+    minEdge: MIN_EDGE_ON ? MIN_EDGE : null,
     targetSize: walk.targetSize,
     levelsTaken: walk.levelsTaken,
     live: MLB_OVER_SOFTBALL_LIVE,
@@ -246,8 +260,9 @@ export async function executeMlbOverSoftball(
     log(
       `shadow ${ctx.slug} over${c.line} tob=${c.ask.toFixed(2)}x${c.askSize.toFixed(0)} `
       + `→ walk x${count} limit=${limitPrice.toFixed(2)} vwap=${vwap.toFixed(3)} `
-      + `fillBook=${FILL_BOOK ? 1 : 0} cats=${c.cats.join(",")}`
-      + (lateHigh ? ` LATE_HIGH_WOULD_SKIP` : ""),
+      + `edge=${modelEdge.toFixed(3)} fillBook=${FILL_BOOK ? 1 : 0} cats=${c.cats.join(",")}`
+      + (lateHigh ? ` LATE_HIGH_WOULD_SKIP` : "")
+      + (flatEdge ? ` FLAT_EDGE_WOULD_SKIP` : ""),
     );
     return "shadow";
   }
@@ -265,6 +280,23 @@ export async function executeMlbOverSoftball(
       ...base,
       kind: "mlb_over_softball_skip",
       reason,
+      wouldHaveContracts: count,
+      wouldHaveLimit: limitPrice,
+      wouldHaveVwap: vwap,
+      wouldHaveNotional: count * limitPrice,
+    });
+    return "skipped";
+  }
+
+  if (flatEdge) {
+    log(
+      `skip flat_edge ${ctx.slug} inn${c.inning} over${c.line} `
+      + `vwap=${vwap.toFixed(3)} edge=${modelEdge.toFixed(3)} < min=${MIN_EDGE}`,
+    );
+    publish({
+      ...base,
+      kind: "mlb_over_softball_skip",
+      reason: "flat_edge",
       wouldHaveContracts: count,
       wouldHaveLimit: limitPrice,
       wouldHaveVwap: vwap,

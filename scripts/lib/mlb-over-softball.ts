@@ -213,6 +213,39 @@ export function isMultiRunLateHighAsk(input: {
   return input.inning >= minInning && input.ask + 1e-12 >= askThreshold;
 }
 
+/** Kalshi taker fee on a YES contract priced at `p` (dollars). */
+export function kalshiYesFee(p: number): number {
+  return 0.07 * p * (1 - p);
+}
+
+/**
+ * Paper multi_run_early hit rates by inning (collector samples through mid-Aug).
+ * Inn 4 is the weak bucket (~90%); 1–3/5 are much higher.
+ */
+export const MULTI_RUN_EARLY_WR_BY_INNING: Readonly<Record<number, number>> = {
+  1: 0.98,
+  2: 0.98,
+  3: 0.98,
+  4: 0.90,
+  5: 0.975,
+};
+
+export const MULTI_RUN_EARLY_WR_DEFAULT = 0.97;
+
+export function multiRunEarlyWinRate(inning: number | null | undefined): number {
+  if (inning == null) return MULTI_RUN_EARLY_WR_DEFAULT;
+  return MULTI_RUN_EARLY_WR_BY_INNING[inning] ?? MULTI_RUN_EARLY_WR_DEFAULT;
+}
+
+/**
+ * Model edge $/contract for a YES buy at `ask`, using the multi_run_early
+ * inning prior (fee-adjusted). Negative ⇒ paying above fair.
+ */
+export function modelEdgePerContract(ask: number, inning: number | null | undefined): number {
+  const p = multiRunEarlyWinRate(inning);
+  return p * (1 - ask) + (1 - p) * (-ask) - kalshiYesFee(ask);
+}
+
 /**
  * Cheapest Kalshi total YES with 0 < line − curTotal ≤ 1 and ask in (0.05, 0.95).
  * Returns null unless at least one early softball category matches.
