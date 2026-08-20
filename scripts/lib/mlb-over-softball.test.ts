@@ -163,6 +163,40 @@ describe("planAskWalk", () => {
     expect(walk.targetSize).toBe(1000);
   });
 
+  it("walks past a phantom one-lot TOB to reach the real size behind it", () => {
+    // SEA@MIL: best ask 69¢ for a single contract, ~10 more at 75–80¢.
+    // Anchoring on the one-lot capped us at 71¢ and bought exactly 1.
+    const walk = planAskWalk({
+      tobAsk: 0.69,
+      tobSize: 1,
+      askLevels: [[0.69, 1], [0.75, 1], [0.76, 1], [0.79, 4], [0.8, 5]],
+      maxAsk: 0.9,
+      maxContracts: 1000,
+      maxUsd: 100,
+      fillBook: true,
+      maxWalkAboveTob: 0.02,
+      walkAnchorSize: 10,
+    });
+    expect(walk.count).toBe(12);
+    expect(walk.vwap).toBeLessThan(0.79);
+  });
+
+  it("still anchors on TOB when TOB itself carries real size", () => {
+    const walk = planAskWalk({
+      tobAsk: 0.87,
+      tobSize: 10,
+      askLevels: [[0.87, 10], [0.89, 10], [0.9, 91]],
+      maxAsk: 0.9,
+      maxContracts: 1000,
+      maxUsd: 100,
+      fillBook: true,
+      maxWalkAboveTob: 0.02,
+      walkAnchorSize: 10,
+    });
+    expect(walk.limitPrice).toBeLessThanOrEqual(0.89);
+    expect(walk.count).toBe(20);
+  });
+
   it("maxWalkAboveTob stops fill-book from walking a cheap TOB into at-cost", () => {
     // MIL@SD-style: TOB 87¢ with size deeper at 89–90¢
     const walk = planAskWalk({

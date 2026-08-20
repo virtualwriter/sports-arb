@@ -34,7 +34,9 @@
  *      MLB_OVER_SOFTBALL_LIVE (default 0; buy early next-line Kalshi overs on bwin_score),
  *      MLB_OVER_SOFTBALL_FILL_BOOK (default 1; clear ask ≤ maxAsk up to caps),
  *      MLB_OVER_SOFTBALL_MAX_CONTRACTS / _MAX_USD / _MAX_DAILY_USD / _MAX_ASK,
- *      MLB_OVER_SOFTBALL_MAX_WALK (default 0.02; max cents above TOB to walk),
+ *      MLB_OVER_SOFTBALL_MAX_WALK (default 0.02; max cents above anchor to walk),
+ *      MLB_OVER_SOFTBALL_WALK_ANCHOR_SIZE (default 10; size a level needs to
+ *        anchor the walk cap, so a one-lot TOB can't pin it),
  *      MLB_OVER_SOFTBALL_MIN_EDGE (default off; skip if model edge $/ct below this),
  *      MLB_OVER_SOFTBALL_INN4_MAX_ASK (default 0.86; tighter ask cap for inn 4),
  *      MLB_OVER_SOFTBALL_TOB_SIZE_MULT (default 2; only when FILL_BOOK=0),

@@ -88,6 +88,26 @@ export function yesAskLevelsFromNoBids(
  * - fillBook=true: take every level ≤ maxAsk up to maxContracts / maxUsd (ignore tobMult)
  * - maxWalkAboveTob: also cap at tobAsk + delta so a cheap TOB isn't walked into at-cost
  */
+/**
+ * Lowest ask by which cumulative visible size reaches `anchorSize`. When the
+ * whole visible book is thinner than that, anchor on the deepest level so a
+ * tiny book can be swept outright — `maxAsk` is still the hard ceiling.
+ */
+export function anchorAsk(
+  levels: Array<[number, number]>,
+  tobAsk: number,
+  anchorSize: number,
+): number {
+  if (anchorSize <= 0 || levels.length === 0) return tobAsk;
+  let cum = 0;
+  for (const [ask, sz] of levels) {
+    if (!(ask > 0)) continue;
+    cum += Math.max(0, sz);
+    if (cum >= anchorSize - 1e-9) return ask;
+  }
+  return levels[levels.length - 1][0];
+}
+
 export function planAskWalk(input: {
   tobAsk: number;
   tobSize: number;
@@ -99,23 +119,32 @@ export function planAskWalk(input: {
   /** When true, clear the visible book ≤ maxAsk (capped by maxContracts/maxUsd). */
   fillBook?: boolean;
   /**
-   * Max cents above TOB to walk (e.g. 0.02). Applied as
-   * effectiveMaxAsk = min(maxAsk, tobAsk + maxWalkAboveTob).
+   * Max cents to walk above the anchor price (e.g. 0.02). See walkAnchorSize
+   * for what the anchor is.
    */
   maxWalkAboveTob?: number;
+  /**
+   * Size that makes a price level a credible anchor for the walk cap.
+   * Anchoring on raw TOB lets a 1-lot quote define where the liquidity is: a
+   * 69¢ one-lot pinned the cap at 71¢ and we bought a single contract while
+   * ~10 more sat at 75–80¢. Default 10.
+   */
+  walkAnchorSize?: number;
 }): AskWalkPlan {
   const tobMult = Math.max(1, input.tobMult ?? 2);
   const tobAsk = input.tobAsk;
   const tobSize = Math.max(0, input.tobSize);
-  const walkCap =
-    input.maxWalkAboveTob != null && Number.isFinite(input.maxWalkAboveTob)
-      ? tobAsk + Math.max(0, input.maxWalkAboveTob)
-      : input.maxAsk;
-  const effectiveMaxAsk = Math.min(input.maxAsk, walkCap);
   const levels =
     input.askLevels && input.askLevels.length > 0
       ? [...input.askLevels].sort((a, b) => a[0] - b[0])
       : ([[tobAsk, tobSize]] as Array<[number, number]>);
+
+  const anchorSize = Math.max(0, input.walkAnchorSize ?? 10);
+  const walkCap =
+    input.maxWalkAboveTob != null && Number.isFinite(input.maxWalkAboveTob)
+      ? anchorAsk(levels, tobAsk, anchorSize) + Math.max(0, input.maxWalkAboveTob)
+      : input.maxAsk;
+  const effectiveMaxAsk = Math.min(input.maxAsk, walkCap);
 
   const targetSize = input.fillBook
     ? input.maxContracts

@@ -56,6 +56,11 @@ const MAX_WALK = Math.min(
   0.2,
   Math.max(0, Number(process.env.MLB_OVER_SOFTBALL_MAX_WALK ?? 0.02)),
 );
+/** Size a level needs before it can anchor the walk cap. See planAskWalk. */
+const WALK_ANCHOR_SIZE = Math.max(
+  0,
+  Number(process.env.MLB_OVER_SOFTBALL_WALK_ANCHOR_SIZE ?? 10),
+);
 /** Used only when FILL_BOOK=0. */
 const TOB_SIZE_MULT = Math.max(1, Number(process.env.MLB_OVER_SOFTBALL_TOB_SIZE_MULT ?? 2));
 const TIF = (process.env.MLB_OVER_SOFTBALL_TIF ?? "immediate_or_cancel") as
@@ -148,7 +153,7 @@ export function mlbOverSoftballExecLabel(): string {
     + `maxDailyUsd=${MAX_DAILY_USD} `
     + `maxAsk=${MAX_ASK} `
     + `inn4MaxAsk=${INN4_MAX_ASK} `
-    + `maxWalk=${MAX_WALK} `
+    + `maxWalk=${MAX_WALK}@anchor${WALK_ANCHOR_SIZE} `
     + `tobMult=${TOB_SIZE_MULT} `
     + `tif=${TIF} `
     + `minEdge=${MIN_EDGE_ON ? MIN_EDGE : "off"} `
@@ -230,6 +235,7 @@ export async function executeMlbOverSoftball(
     tobMult: TOB_SIZE_MULT,
     fillBook: FILL_BOOK,
     maxWalkAboveTob: MAX_WALK,
+    walkAnchorSize: WALK_ANCHOR_SIZE,
   });
   const count = walk.count;
   const limitPrice = walk.limitPrice;
@@ -259,6 +265,7 @@ export async function executeMlbOverSoftball(
     tobMult: TOB_SIZE_MULT,
     fillBook: FILL_BOOK,
     maxWalkAboveTob: MAX_WALK,
+    walkAnchorSize: WALK_ANCHOR_SIZE,
     maxAsk,
     modelEdge,
     minEdge: MIN_EDGE_ON ? MIN_EDGE : null,
