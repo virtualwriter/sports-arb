@@ -61,6 +61,36 @@ describe("executeMlbOverSoftball shadow", () => {
   });
 });
 
+describe("retry after a skip", () => {
+  afterEach(() => {
+    delete process.env.MLB_OVER_SOFTBALL_MAX_ATTEMPTS;
+    vi.resetModules();
+  });
+
+  it("re-looks at the same score after a price skip, then stops", async () => {
+    process.env.MLB_OVER_SOFTBALL_LIVE = "1";
+    process.env.MLB_OVER_SOFTBALL_MAX_ATTEMPTS = "3";
+    vi.resetModules();
+    const mod = await import("./mlb-over-softball-exec.js");
+    const rows: Record<string, unknown>[] = [];
+    mod.configureMlbOverSoftballExec({ client: null, emit: (r) => rows.push(r) });
+
+    // inn4 at 91¢ is turned away on price; the score key must stay open so a
+    // cheaper requote seconds later still gets a look.
+    const ctx = ctxAt(4, 0.91);
+    await mod.executeMlbOverSoftball(ctx);
+    await mod.executeMlbOverSoftball(ctx);
+    const skips = rows.filter((r) => r.kind === "mlb_over_softball_skip");
+    expect(skips.length).toBe(2);
+    expect(skips[1]?.reason).toBe("ask_above_inning_max");
+
+    // ...but not forever.
+    await mod.executeMlbOverSoftball(ctx);
+    await mod.executeMlbOverSoftball(ctx);
+    expect(rows.filter((r) => r.kind === "mlb_over_softball_skip").length).toBe(3);
+  });
+});
+
 describe("deep-strike fallback", () => {
   afterEach(() => {
     delete process.env.MLB_OVER_SOFTBALL_DEEP_MIN_EDGE;

@@ -67,9 +67,17 @@ const TIF = (process.env.MLB_OVER_SOFTBALL_TIF ?? "immediate_or_cancel") as
   | "fill_or_kill"
   | "immediate_or_cancel";
 
-/** shadow (default) | enforce | off */
+/**
+ * shadow | enforce | off (default off).
+ *
+ * This predates MAX_ASK dropping to 0.90 and is now almost entirely subsumed
+ * by it: the gate fires on inn ≥ 5 with ask ≥ 0.90, and MAX_ASK already blocks
+ * everything above 0.90. All it still catches on its own is inn 5 at exactly
+ * 0.90, which the inning-5 prior (0.975) makes a +6.9¢ trade. Note "shadow"
+ * was never really shadow — it skipped the order too.
+ */
 const LATE_HIGH_MODE = (
-  process.env.MLB_OVER_SOFTBALL_MULTI_RUN_LATE_HIGH_MODE ?? "shadow"
+  process.env.MLB_OVER_SOFTBALL_MULTI_RUN_LATE_HIGH_MODE ?? "off"
 ).toLowerCase();
 const LATE_HIGH_MIN_INN = Math.max(
   1,
@@ -127,9 +135,16 @@ export type MlbOverSoftballFireCtx = {
 
 type EmitFn = (row: Record<string, unknown>) => void;
 
+/** Re-looks allowed per score state while no order has been placed yet. */
+const MAX_ATTEMPTS_PER_SCORE = Math.max(
+  1,
+  Number(process.env.MLB_OVER_SOFTBALL_MAX_ATTEMPTS ?? 6),
+);
+
 let spentTodayUsd = 0;
 let spentDayKey = "";
 const firedKeys = new Set<string>();
+const attemptsByKey = new Map<string, number>();
 let inFlight = false;
 let client: KalshiClient | null = null;
 let emitHook: EmitFn | null = null;
@@ -246,12 +261,24 @@ export async function executeMlbOverSoftball(
     log(`skip dedupe ${key}`);
     return "skipped";
   }
-  firedKeys.add(key);
+  // Only a fire (or a shadow, which stands in for one) consumes the score key.
+  // A skip must leave it open: quotes routinely dip back to cheap seconds after
+  // a score, and burning the key on the first bad look forfeits that requote.
+  // Attempts are bounded so a persistently ineligible score can't spin.
+  const attempt = (attemptsByKey.get(key) ?? 0) + 1;
+  if (attempt > MAX_ATTEMPTS_PER_SCORE) {
+    log(`skip attempts_exhausted ${key} (${MAX_ATTEMPTS_PER_SCORE})`);
+    return "skipped";
+  }
+  attemptsByKey.set(key, attempt);
 
   // When the next line is turned away purely on price, the rung above it is
   // often the better trade: the book quoting 91–94¢ is what makes it so.
   let c = ctx.candidate;
-  let deepFrom: string | null = null;
+  // The caller hands us the deep rung directly when the next line was not even
+  // quotable, so record that as its own reason for stepping up.
+  let deepFrom: string | null =
+    (ctx.candidate.runsNeeded ?? 1) >= 2 ? "near_unquotable" : null;
   const nearGate = priceGateReason(ctx.candidate);
   const deep = ctx.deepCandidate;
   if (nearGate && deep && DEEP_MIN_EDGE > 0 && !priceGateReason(deep)) {
@@ -287,6 +314,10 @@ export async function executeMlbOverSoftball(
   const runsNeeded = c.runsNeeded ?? 1;
   const modelEdge = modelEdgePerContract(vwap, c.inning, runsNeeded);
   const flatEdge = MIN_EDGE_ON && modelEdge + 1e-12 < MIN_EDGE;
+  // Two-run rungs hit ~89% vs ~97%, so they must clear their own bar no matter
+  // how they were selected — as a fallback or because the next line was dark.
+  const deepThin =
+    runsNeeded >= 2 && DEEP_MIN_EDGE > 0 && modelEdge + 1e-12 < DEEP_MIN_EDGE;
   const base = {
     kind: "mlb_over_softball_signal" as const,
     observedAt: new Date().toISOString(),
@@ -336,6 +367,7 @@ export async function executeMlbOverSoftball(
       + (lateHigh ? ` LATE_HIGH_WOULD_SKIP` : "")
       + (flatEdge ? ` FLAT_EDGE_WOULD_SKIP` : ""),
     );
+    firedKeys.add(key);
     return "shadow";
   }
 
@@ -352,6 +384,23 @@ export async function executeMlbOverSoftball(
       ...base,
       kind: "mlb_over_softball_skip",
       reason,
+      wouldHaveContracts: count,
+      wouldHaveLimit: limitPrice,
+      wouldHaveVwap: vwap,
+      wouldHaveNotional: count * limitPrice,
+    });
+    return "skipped";
+  }
+
+  if (deepThin) {
+    log(
+      `skip deep_thin_edge ${ctx.slug} inn${c.inning} over${c.line} `
+      + `vwap=${vwap.toFixed(3)} edge=${modelEdge.toFixed(3)} < min=${DEEP_MIN_EDGE}`,
+    );
+    publish({
+      ...base,
+      kind: "mlb_over_softball_skip",
+      reason: "deep_thin_edge",
       wouldHaveContracts: count,
       wouldHaveLimit: limitPrice,
       wouldHaveVwap: vwap,
@@ -440,6 +489,7 @@ export async function executeMlbOverSoftball(
     + `cats=${c.cats.join(",")}`,
   );
   const started = Date.now();
+  firedKeys.add(key);
   try {
     const resp = await client.createOrderV2(payload);
     const rttMs = Date.now() - started;
@@ -474,6 +524,7 @@ export function resetMlbOverSoftballExecForTests(): void {
   spentTodayUsd = 0;
   spentDayKey = "";
   firedKeys.clear();
+  attemptsByKey.clear();
   inFlight = false;
   client = null;
   emitHook = null;

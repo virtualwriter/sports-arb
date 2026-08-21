@@ -956,9 +956,14 @@ export class MlbMiddleArbPaperSidecar {
     const curTotal = away + home;
     const yesTob = kalshiYesTobFromPaperMap(this.kalshiTob);
     const selectInput = { inning, runsDelta, curTotal, kalshiYesTob: yesTob };
-    const candidate = selectEarlyOverSoftball(selectInput);
+    const nearCandidate = selectEarlyOverSoftball(selectInput);
+    const deep = selectDeepOverSoftball(selectInput);
+    // A next line that is locked (≥95¢) or has no size selects as null. That is
+    // the same "priced out" case the deep fallback exists for, so fall through
+    // to the rung above rather than dropping the event entirely.
+    const candidate = nearCandidate ?? deep;
     if (!candidate) return;
-    const deepCandidate = selectDeepOverSoftball(selectInput);
+    const deepCandidate = nearCandidate ? deep : null;
     const depthHint = candidate.askLevels?.length
       ? ` depth=${candidate.askLevels.length}lv`
       : "";
