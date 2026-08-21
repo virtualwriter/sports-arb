@@ -37,6 +37,8 @@ export type MlbOverSoftballCandidate = {
   inning: number;
   runsDelta: number;
   askLevels?: Array<[number, number]>;
+  /** Runs still needed to clear this line: 1 for the next line, 2 for the one above. */
+  runsNeeded?: number;
 };
 
 /** Plan a walk of the YES ask ladder up to ≥ tobMult × TOB size within maxAsk. */
@@ -261,30 +263,59 @@ export const MULTI_RUN_EARLY_WR_BY_INNING: Readonly<Record<number, number>> = {
 
 export const MULTI_RUN_EARLY_WR_DEFAULT = 0.97;
 
-export function multiRunEarlyWinRate(inning: number | null | undefined): number {
-  if (inning == null) return MULTI_RUN_EARLY_WR_DEFAULT;
-  return MULTI_RUN_EARLY_WR_BY_INNING[inning] ?? MULTI_RUN_EARLY_WR_DEFAULT;
+/**
+ * Same samples, but for the strike one rung above the next line — i.e. two more
+ * runs rather than one. Measured 159/178 overall; rounded down, and inn 1 is
+ * held at 0.93 because it is only 7 samples. Inn 4 stays the weak bucket.
+ */
+export const MULTI_RUN_EARLY_WR2_BY_INNING: Readonly<Record<number, number>> = {
+  1: 0.93,
+  2: 0.89,
+  3: 0.90,
+  4: 0.82,
+  5: 0.92,
+};
+
+export const MULTI_RUN_EARLY_WR2_DEFAULT = 0.89;
+
+export function multiRunEarlyWinRate(
+  inning: number | null | undefined,
+  runsNeeded = 1,
+): number {
+  const deep = runsNeeded >= 2;
+  const table = deep ? MULTI_RUN_EARLY_WR2_BY_INNING : MULTI_RUN_EARLY_WR_BY_INNING;
+  const fallback = deep ? MULTI_RUN_EARLY_WR2_DEFAULT : MULTI_RUN_EARLY_WR_DEFAULT;
+  if (inning == null) return fallback;
+  return table[inning] ?? fallback;
 }
 
 /**
  * Model edge $/contract for a YES buy at `ask`, using the multi_run_early
  * inning prior (fee-adjusted). Negative ⇒ paying above fair.
  */
-export function modelEdgePerContract(ask: number, inning: number | null | undefined): number {
-  const p = multiRunEarlyWinRate(inning);
+export function modelEdgePerContract(
+  ask: number,
+  inning: number | null | undefined,
+  runsNeeded = 1,
+): number {
+  const p = multiRunEarlyWinRate(inning, runsNeeded);
   return p * (1 - ask) + (1 - p) * (-ask) - kalshiYesFee(ask);
 }
 
-/**
- * Cheapest Kalshi total YES with 0 < line − curTotal ≤ 1 and ask in (0.05, 0.95).
- * Returns null unless at least one early softball category matches.
- */
-export function selectEarlyOverSoftball(input: {
+type OverSelectInput = {
   inning: number | null;
   runsDelta: number;
   curTotal: number;
   kalshiYesTob: ReadonlyMap<number, KalshiYesTobEntry> | Iterable<[number, KalshiYesTobEntry]>;
-}): MlbOverSoftballCandidate | null {
+};
+
+/** Cheapest qualifying YES rung whose distance from curTotal is in (minDist, maxDist]. */
+function selectOverAtDistance(
+  input: OverSelectInput,
+  minDist: number,
+  maxDist: number,
+  runsNeeded: number,
+): MlbOverSoftballCandidate | null {
   const { inning, runsDelta, curTotal } = input;
   if (inning == null || !(runsDelta > 0)) return null;
 
@@ -302,7 +333,7 @@ export function selectEarlyOverSoftball(input: {
   } | null = null;
   for (const [line, q] of entries) {
     const dist = line - curTotal;
-    if (!(dist > 0 && dist <= 1)) continue;
+    if (!(dist > minDist && dist <= maxDist)) continue;
     if (!(q.ask > 0.05 && q.ask < 0.95)) continue;
     if (!q.ticker || !(q.askSize > 0)) continue;
     if (best == null || q.ask < best.ask) {
@@ -329,8 +360,32 @@ export function selectEarlyOverSoftball(input: {
     curTotal,
     inning,
     runsDelta,
+    runsNeeded,
     ...(best.askLevels ? { askLevels: best.askLevels } : {}),
   };
+}
+
+/**
+ * Cheapest Kalshi total YES with 0 < line − curTotal ≤ 1 and ask in (0.05, 0.95).
+ * Returns null unless at least one early softball category matches.
+ */
+export function selectEarlyOverSoftball(
+  input: OverSelectInput,
+): MlbOverSoftballCandidate | null {
+  return selectOverAtDistance(input, 0, 1, 1);
+}
+
+/**
+ * The rung above the next line (needs two more runs). Used only as a fallback
+ * when the next line is gated on price: a next line quoted at 91–94¢ is the
+ * book calling it near-certain, which is what makes the rung above it the
+ * value. Hits 89% overall vs 97% for the next line, so it needs a real edge
+ * bar before it is worth taking.
+ */
+export function selectDeepOverSoftball(
+  input: OverSelectInput,
+): MlbOverSoftballCandidate | null {
+  return selectOverAtDistance(input, 1, 2, 2);
 }
 
 /** Build line → YES TOB map from paper keys like `total_7.5:yes`. */

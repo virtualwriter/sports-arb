@@ -104,6 +104,16 @@ function maxAskForInning(inning: number | null | undefined): number {
   return inning === 4 ? Math.min(MAX_ASK, INN4_MAX_ASK) : MAX_ASK;
 }
 
+/**
+ * Minimum model edge ($/ct) before the rung above the next line is worth
+ * taking. It hits ~89% vs ~97%, so it only earns its place when it is priced
+ * well below the near strike. 0 disables the fallback entirely.
+ */
+const DEEP_MIN_EDGE = Math.max(
+  0,
+  Number(process.env.MLB_OVER_SOFTBALL_DEEP_MIN_EDGE ?? 0.05),
+);
+
 export type MlbOverSoftballFireCtx = {
   slug: string;
   t0: number;
@@ -111,6 +121,8 @@ export type MlbOverSoftballFireCtx = {
   scoreHome: number;
   source: string;
   candidate: MlbOverSoftballCandidate;
+  /** Rung above the next line; taken only if the next line is gated on price. */
+  deepCandidate?: MlbOverSoftballCandidate | null;
 };
 
 type EmitFn = (row: Record<string, unknown>) => void;
@@ -157,6 +169,7 @@ export function mlbOverSoftballExecLabel(): string {
     + `tobMult=${TOB_SIZE_MULT} `
     + `tif=${TIF} `
     + `minEdge=${MIN_EDGE_ON ? MIN_EDGE : "off"} `
+    + `deepMinEdge=${DEEP_MIN_EDGE > 0 ? DEEP_MIN_EDGE : "off"} `
     + `lateHigh=${LATE_HIGH_MODE}@inn≥${LATE_HIGH_MIN_INN}/ask≥${LATE_HIGH_ASK}`
   );
 }
@@ -213,16 +226,46 @@ export function enqueueMlbOverSoftball(ctx: MlbOverSoftballFireCtx): void {
   })();
 }
 
+/** Price-only gate: which cap, if any, turns this candidate away. */
+function priceGateReason(c: MlbOverSoftballCandidate): string | null {
+  const cap = maxAskForInning(c.inning);
+  if (c.ask > cap) return cap < MAX_ASK ? "ask_above_inning_max" : "ask_above_max";
+  if (lateHighAskHit(c)) {
+    return LATE_HIGH_MODE === "enforce"
+      ? "multi_run_late_high_ask"
+      : "shadow_multi_run_late_high_ask";
+  }
+  return null;
+}
+
 export async function executeMlbOverSoftball(
   ctx: MlbOverSoftballFireCtx,
 ): Promise<"shadow" | "fired" | "skipped"> {
-  const { candidate: c } = ctx;
   const key = dedupeKey(ctx);
   if (firedKeys.has(key)) {
     log(`skip dedupe ${key}`);
     return "skipped";
   }
   firedKeys.add(key);
+
+  // When the next line is turned away purely on price, the rung above it is
+  // often the better trade: the book quoting 91–94¢ is what makes it so.
+  let c = ctx.candidate;
+  let deepFrom: string | null = null;
+  const nearGate = priceGateReason(ctx.candidate);
+  const deep = ctx.deepCandidate;
+  if (nearGate && deep && DEEP_MIN_EDGE > 0 && !priceGateReason(deep)) {
+    const deepEdge = modelEdgePerContract(deep.ask, deep.inning, deep.runsNeeded ?? 2);
+    if (deepEdge + 1e-12 >= DEEP_MIN_EDGE) {
+      c = deep;
+      deepFrom = nearGate;
+      log(
+        `deep-strike fallback ${ctx.slug} inn${deep.inning}: `
+        + `near over${ctx.candidate.line}@${ctx.candidate.ask.toFixed(2)} (${nearGate}) `
+        + `→ over${deep.line}@${deep.ask.toFixed(2)} edge=${deepEdge.toFixed(3)}`,
+      );
+    }
+  }
 
   const maxAsk = maxAskForInning(c.inning);
   const walk = planAskWalk({
@@ -241,7 +284,8 @@ export async function executeMlbOverSoftball(
   const limitPrice = walk.limitPrice;
   const vwap = walk.vwap;
   const lateHigh = lateHighAskHit(c);
-  const modelEdge = modelEdgePerContract(vwap, c.inning);
+  const runsNeeded = c.runsNeeded ?? 1;
+  const modelEdge = modelEdgePerContract(vwap, c.inning, runsNeeded);
   const flatEdge = MIN_EDGE_ON && modelEdge + 1e-12 < MIN_EDGE;
   const base = {
     kind: "mlb_over_softball_signal" as const,
@@ -267,6 +311,8 @@ export async function executeMlbOverSoftball(
     maxWalkAboveTob: MAX_WALK,
     walkAnchorSize: WALK_ANCHOR_SIZE,
     maxAsk,
+    runsNeeded,
+    deepFrom,
     modelEdge,
     minEdge: MIN_EDGE_ON ? MIN_EDGE : null,
     targetSize: walk.targetSize,

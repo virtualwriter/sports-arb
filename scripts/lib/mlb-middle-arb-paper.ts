@@ -74,6 +74,7 @@ import {
 import {
   kalshiYesTobFromPaperMap,
   parseMlbInning,
+  selectDeepOverSoftball,
   selectEarlyOverSoftball,
   yesAskLevelsFromNoBids,
 } from "./mlb-over-softball.js";
@@ -953,13 +954,11 @@ export class MlbMiddleArbPaperSidecar {
       ?? null;
     const inning = parseMlbInning(period);
     const curTotal = away + home;
-    const candidate = selectEarlyOverSoftball({
-      inning,
-      runsDelta,
-      curTotal,
-      kalshiYesTob: kalshiYesTobFromPaperMap(this.kalshiTob),
-    });
+    const yesTob = kalshiYesTobFromPaperMap(this.kalshiTob);
+    const selectInput = { inning, runsDelta, curTotal, kalshiYesTob: yesTob };
+    const candidate = selectEarlyOverSoftball(selectInput);
     if (!candidate) return;
+    const deepCandidate = selectDeepOverSoftball(selectInput);
     const depthHint = candidate.askLevels?.length
       ? ` depth=${candidate.askLevels.length}lv`
       : "";
@@ -976,6 +975,7 @@ export class MlbMiddleArbPaperSidecar {
       scoreHome: home,
       source,
       candidate,
+      deepCandidate,
     });
   }
 

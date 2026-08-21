@@ -61,6 +61,84 @@ describe("executeMlbOverSoftball shadow", () => {
   });
 });
 
+describe("deep-strike fallback", () => {
+  afterEach(() => {
+    delete process.env.MLB_OVER_SOFTBALL_DEEP_MIN_EDGE;
+    vi.resetModules();
+  });
+
+  function deepAt(inning: number, line: number, ask: number) {
+    return {
+      line,
+      ask,
+      askSize: 40,
+      ticker: `T-deep-${line}`,
+      cats: ["multi_run_early" as const],
+      curTotal: line - 1.5,
+      inning,
+      runsDelta: 2,
+      runsNeeded: 2,
+    };
+  }
+
+  it("steps up a rung when the near line is gated on price", async () => {
+    process.env.MLB_OVER_SOFTBALL_LIVE = "1";
+    vi.resetModules();
+    const mod = await import("./mlb-over-softball-exec.js");
+    const rows: Record<string, unknown>[] = [];
+    mod.configureMlbOverSoftballExec({ client: null, emit: (r) => rows.push(r) });
+
+    // ATL@MIN shape: near line 93¢ hits the late-high gate, rung above is 86¢.
+    const near = { ...ctxAt(5, 0.93).candidate, line: 6.5, curTotal: 6 };
+    await mod.executeMlbOverSoftball({
+      ...ctxAt(5, 0.93),
+      candidate: near,
+      deepCandidate: deepAt(5, 7.5, 0.86),
+    });
+    const sig = rows.find((r) => r.kind === "mlb_over_softball_signal");
+    expect(sig?.line).toBe(7.5);
+    expect(sig?.runsNeeded).toBe(2);
+    expect(sig?.deepFrom).toBe("ask_above_max");
+  });
+
+  it("leaves the near line alone when it is not gated", async () => {
+    process.env.MLB_OVER_SOFTBALL_LIVE = "1";
+    vi.resetModules();
+    const mod = await import("./mlb-over-softball-exec.js");
+    const rows: Record<string, unknown>[] = [];
+    mod.configureMlbOverSoftballExec({ client: null, emit: (r) => rows.push(r) });
+
+    const near = { ...ctxAt(5, 0.86).candidate, line: 5.5, curTotal: 5 };
+    await mod.executeMlbOverSoftball({
+      ...ctxAt(5, 0.86),
+      candidate: near,
+      deepCandidate: deepAt(5, 6.5, 0.74),
+    });
+    const sig = rows.find((r) => r.kind === "mlb_over_softball_signal");
+    expect(sig?.line).toBe(5.5);
+    expect(sig?.deepFrom).toBeNull();
+  });
+
+  it("declines the rung above when its edge is too thin", async () => {
+    process.env.MLB_OVER_SOFTBALL_LIVE = "1";
+    vi.resetModules();
+    const mod = await import("./mlb-over-softball-exec.js");
+    const rows: Record<string, unknown>[] = [];
+    mod.configureMlbOverSoftballExec({ client: null, emit: (r) => rows.push(r) });
+
+    // CWS@CHC shape: near 90¢ blocked at inn4, rung above 89¢ is worse, not better.
+    const near = { ...ctxAt(4, 0.9).candidate, line: 5.5, curTotal: 5 };
+    await mod.executeMlbOverSoftball({
+      ...ctxAt(4, 0.9),
+      candidate: near,
+      deepCandidate: deepAt(4, 6.5, 0.89),
+    });
+    const skip = rows.find((r) => r.kind === "mlb_over_softball_skip");
+    expect(skip?.reason).toBe("ask_above_inning_max");
+    expect(skip?.line).toBe(5.5);
+  });
+});
+
 describe("inning-4 ask cap", () => {
   afterEach(() => {
     delete process.env.MLB_OVER_SOFTBALL_INN4_MAX_ASK;
