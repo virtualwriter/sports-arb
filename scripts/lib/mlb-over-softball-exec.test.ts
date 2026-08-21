@@ -3,13 +3,17 @@ import {
   executeMlbOverSoftball,
   resetMlbOverSoftballExecForTests,
 } from "./mlb-over-softball-exec.js";
+import type { MlbOverSoftballCandidate } from "./mlb-over-softball.js";
 
 afterEach(() => {
   resetMlbOverSoftballExecForTests();
   delete process.env.MLB_OVER_SOFTBALL_LIVE;
 });
 
-function ctxAt(inning: number, ask: number) {
+function ctxAt(
+  inning: number,
+  ask: number,
+): { slug: string; t0: number; scoreAway: number; scoreHome: number; source: string; candidate: MlbOverSoftballCandidate } {
   return {
     slug: `mlb-a-b-2026-08-13-inn${inning}`,
     t0: 1,
@@ -58,6 +62,63 @@ describe("executeMlbOverSoftball shadow", () => {
     expect(await executeMlbOverSoftball(ctx)).toBe("skipped");
     expect(rows[0]?.kind).toBe("mlb_over_softball_signal");
     expect(rows[0]?.live).toBe(false);
+  });
+});
+
+describe("edge-scaled sizing", () => {
+  afterEach(() => {
+    delete process.env.MLB_OVER_SOFTBALL_SIZE_FULL_EDGE;
+    vi.resetModules();
+  });
+
+  async function fireAndReadOrder(inning: number, ask: number, size: number) {
+    vi.resetModules();
+    const mod = await import("./mlb-over-softball-exec.js");
+    const rows: Record<string, unknown>[] = [];
+    mod.configureMlbOverSoftballExec({
+      client: {
+        createOrderV2: async () => ({ fill_count: "0" }),
+      } as never,
+      emit: (r) => rows.push(r),
+    });
+    const ctx = ctxAt(inning, ask);
+    ctx.candidate.askSize = size;
+    ctx.candidate.askLevels = [[ask, size]];
+    await mod.executeMlbOverSoftball(ctx);
+    return rows.find((r) => r.kind === "mlb_over_softball_order");
+  }
+
+  it("risks less on a thin edge than on a fat one", async () => {
+    process.env.MLB_OVER_SOFTBALL_LIVE = "1";
+    // inn5 prior is 0.975, so 86c is a fat ~+10.7c and 90c a thin ~+6.9c.
+    const fat = await fireAndReadOrder(5, 0.86, 500);
+    const thin = await fireAndReadOrder(5, 0.9, 500);
+    expect(fat).toBeTruthy();
+    expect(thin).toBeTruthy();
+    const fatCt = Number(fat?.count);
+    const thinCt = Number(thin?.count);
+    expect(thinCt).toBeGreaterThan(0);
+    expect(thinCt).toBeLessThan(fatCt);
+  });
+
+  it("never sends a print at or below break-even", async () => {
+    process.env.MLB_OVER_SOFTBALL_LIVE = "1";
+    process.env.MLB_OVER_SOFTBALL_INN4_MAX_ASK = "0.99";
+    vi.resetModules();
+    const mod = await import("./mlb-over-softball-exec.js");
+    const rows: Record<string, unknown>[] = [];
+    mod.configureMlbOverSoftballExec({
+      client: { createOrderV2: async () => ({ fill_count: "0" }) } as never,
+      emit: (r) => rows.push(r),
+    });
+    // inn4 prior is 0.90, so 90c is negative once fees are paid.
+    const ctx = ctxAt(4, 0.9);
+    ctx.candidate.askLevels = [[0.9, 500]];
+    ctx.candidate.askSize = 500;
+    await mod.executeMlbOverSoftball(ctx);
+    expect(rows.find((r) => r.kind === "mlb_over_softball_order")).toBeUndefined();
+    expect(rows.find((r) => r.kind === "mlb_over_softball_skip")?.reason).toBe("no_edge");
+    delete process.env.MLB_OVER_SOFTBALL_INN4_MAX_ASK;
   });
 });
 

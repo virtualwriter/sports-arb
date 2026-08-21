@@ -97,6 +97,16 @@ const MIN_EDGE = Number(process.env.MLB_OVER_SOFTBALL_MIN_EDGE ?? -1);
 const MIN_EDGE_ON = Number.isFinite(MIN_EDGE) && MIN_EDGE > 0;
 
 /**
+ * Edge ($/ct) at which a print earns the full MAX_USD ticket. Below it the
+ * notional ramps down linearly, so a 2¢ edge risks a quarter of what an 8¢
+ * edge does instead of the same stack. Set 0 to size flat again.
+ */
+const SIZE_FULL_EDGE = Math.max(
+  0,
+  Number(process.env.MLB_OVER_SOFTBALL_SIZE_FULL_EDGE ?? 0.08),
+);
+
+/**
  * Separate, tighter ask cap for inning 4. inn4 is the one early bucket with
  * paper losses (28/31 vs 45/46 in inn5), and its overs price in the same
  * 89–93¢ band as inn5, so a shared MAX_ASK can't tell them apart. Historically
@@ -183,7 +193,8 @@ export function mlbOverSoftballExecLabel(): string {
     + `maxWalk=${MAX_WALK}@anchor${WALK_ANCHOR_SIZE} `
     + `tobMult=${TOB_SIZE_MULT} `
     + `tif=${TIF} `
-    + `minEdge=${MIN_EDGE_ON ? MIN_EDGE : "off"} `
+    + `minEdge=${MIN_EDGE_ON ? MIN_EDGE : "off(>0 always)"} `
+    + `sizeFullEdge=${SIZE_FULL_EDGE > 0 ? SIZE_FULL_EDGE : "off"} `
     + `deepMinEdge=${DEEP_MIN_EDGE > 0 ? DEEP_MIN_EDGE : "off"} `
     + `lateHigh=${LATE_HIGH_MODE}@inn≥${LATE_HIGH_MIN_INN}/ask≥${LATE_HIGH_ASK}`
   );
@@ -295,24 +306,45 @@ export async function executeMlbOverSoftball(
   }
 
   const maxAsk = maxAskForInning(c.inning);
-  const walk = planAskWalk({
-    tobAsk: c.ask,
-    tobSize: c.askSize,
-    askLevels: c.askLevels,
-    maxAsk,
-    maxContracts: MAX_CONTRACTS,
-    maxUsd: MAX_USD,
-    tobMult: TOB_SIZE_MULT,
-    fillBook: FILL_BOOK,
-    maxWalkAboveTob: MAX_WALK,
-    walkAnchorSize: WALK_ANCHOR_SIZE,
-  });
+  const runsNeeded = c.runsNeeded ?? 1;
+  const planAt = (maxUsd: number) =>
+    planAskWalk({
+      tobAsk: c.ask,
+      tobSize: c.askSize,
+      askLevels: c.askLevels,
+      maxAsk,
+      maxContracts: MAX_CONTRACTS,
+      maxUsd,
+      tobMult: TOB_SIZE_MULT,
+      fillBook: FILL_BOOK,
+      maxWalkAboveTob: MAX_WALK,
+      walkAnchorSize: WALK_ANCHOR_SIZE,
+    });
+
+  // Size on edge rather than gating on it. A thin but real edge is still worth
+  // taking, just not for the full ticket, so notional ramps linearly and only
+  // reaches MAX_USD at SIZE_FULL_EDGE. Plan once at the full budget to read the
+  // edge: the walk takes the cheapest levels first, so trimming the budget can
+  // only lower the VWAP, which makes that first pass the conservative estimate.
+  let walk = planAt(MAX_USD);
+  let modelEdge = modelEdgePerContract(walk.vwap, c.inning, runsNeeded);
+  let sizedUsd = MAX_USD;
+  if (SIZE_FULL_EDGE > 0 && modelEdge > 0) {
+    sizedUsd = MAX_USD * Math.min(1, modelEdge / SIZE_FULL_EDGE);
+    if (sizedUsd < walk.count * walk.vwap) {
+      walk = planAt(sizedUsd);
+      modelEdge = modelEdgePerContract(walk.vwap, c.inning, runsNeeded);
+    }
+  }
+
   const count = walk.count;
   const limitPrice = walk.limitPrice;
   const vwap = walk.vwap;
   const lateHigh = lateHighAskHit(c);
-  const runsNeeded = c.runsNeeded ?? 1;
-  const modelEdge = modelEdgePerContract(vwap, c.inning, runsNeeded);
+  // Positive edge is the one thing that always has to hold. MIN_EDGE stays off
+  // by default because the per-inning priors can't justify a higher bar, but
+  // nothing should ever go out at or below break-even.
+  const noEdge = modelEdge <= 1e-12;
   const flatEdge = MIN_EDGE_ON && modelEdge + 1e-12 < MIN_EDGE;
   // Two-run rungs hit ~89% vs ~97%, so they must clear their own bar no matter
   // how they were selected — as a fallback or because the next line was dark.
@@ -344,6 +376,8 @@ export async function executeMlbOverSoftball(
     maxAsk,
     runsNeeded,
     deepFrom,
+    sizedUsd,
+    maxUsd: MAX_USD,
     modelEdge,
     minEdge: MIN_EDGE_ON ? MIN_EDGE : null,
     targetSize: walk.targetSize,
@@ -371,6 +405,23 @@ export async function executeMlbOverSoftball(
     return "shadow";
   }
 
+  // Cheap, unambiguous gates first, so a skip is attributed to the specific cap
+  // that stopped it rather than to the negative edge that cap implies.
+  if (killSwitchActive()) {
+    log(`skip kill switch ${key}`);
+    publish({ ...base, kind: "mlb_over_softball_skip", reason: "kill_switch" });
+    return "skipped";
+  }
+  if (c.ask > maxAsk) {
+    const reason = maxAsk < MAX_ASK ? "ask_above_inning_max" : "ask_above_max";
+    log(
+      `skip ${reason} ${ctx.slug} inn${c.inning} over${c.line} `
+      + `@${c.ask.toFixed(2)} > max=${maxAsk.toFixed(2)}`,
+    );
+    publish({ ...base, kind: "mlb_over_softball_skip", reason });
+    return "skipped";
+  }
+
   if (lateHigh) {
     const reason =
       LATE_HIGH_MODE === "enforce"
@@ -384,6 +435,23 @@ export async function executeMlbOverSoftball(
       ...base,
       kind: "mlb_over_softball_skip",
       reason,
+      wouldHaveContracts: count,
+      wouldHaveLimit: limitPrice,
+      wouldHaveVwap: vwap,
+      wouldHaveNotional: count * limitPrice,
+    });
+    return "skipped";
+  }
+
+  if (noEdge) {
+    log(
+      `skip no_edge ${ctx.slug} inn${c.inning} over${c.line} `
+      + `vwap=${vwap.toFixed(3)} edge=${modelEdge.toFixed(3)}`,
+    );
+    publish({
+      ...base,
+      kind: "mlb_over_softball_skip",
+      reason: "no_edge",
       wouldHaveContracts: count,
       wouldHaveLimit: limitPrice,
       wouldHaveVwap: vwap,
@@ -426,20 +494,6 @@ export async function executeMlbOverSoftball(
     return "skipped";
   }
 
-  if (killSwitchActive()) {
-    log(`skip kill switch ${key}`);
-    publish({ ...base, kind: "mlb_over_softball_skip", reason: "kill_switch" });
-    return "skipped";
-  }
-  if (c.ask > maxAsk) {
-    const reason = maxAsk < MAX_ASK ? "ask_above_inning_max" : "ask_above_max";
-    log(
-      `skip ${reason} ${ctx.slug} inn${c.inning} over${c.line} `
-      + `@${c.ask.toFixed(2)} > max=${maxAsk.toFixed(2)}`,
-    );
-    publish({ ...base, kind: "mlb_over_softball_skip", reason });
-    return "skipped";
-  }
   if (count < 1) {
     publish({ ...base, kind: "mlb_over_softball_skip", reason: "size_zero" });
     return "skipped";
@@ -485,7 +539,8 @@ export async function executeMlbOverSoftball(
   log(
     `!!! LIVE FIRE ${ctx.slug} over${c.line} tob=${c.ask.toFixed(2)}x${Math.floor(c.askSize)} `
     + `→ x${count} limit=${limitPrice.toFixed(2)} vwap≈${vwap.toFixed(3)} `
-    + `(≈$${notionalCap.toFixed(2)}) tif=${tif} fillBook=${FILL_BOOK ? 1 : 0} `
+    + `(≈$${notionalCap.toFixed(2)} of $${sizedUsd.toFixed(0)} @edge=${modelEdge.toFixed(3)}) `
+    + `tif=${tif} fillBook=${FILL_BOOK ? 1 : 0} `
     + `cats=${c.cats.join(",")}`,
   );
   const started = Date.now();
