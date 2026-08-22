@@ -115,6 +115,21 @@ const SIZE_FULL_EDGE = Math.max(
 );
 
 /**
+ * Notional ceiling for a two-run rung, replacing MAX_USD on those prints.
+ *
+ * At equal notional a deep print carries ~2.3x the dollar risk of a next-line
+ * print: it is cheaper so the same money buys more contracts, and it misses
+ * ~10% of the time against ~4%. Risk parity with a full near ticket lands at
+ * ~$44 and Kelly at ~$62; this sits below both because the deep priors are
+ * synthesised by shifting the line up a rung rather than measured against
+ * observed deep quotes, so the lane has no validated price history yet.
+ */
+const DEEP_MAX_USD = Math.max(
+  1,
+  Number(process.env.MLB_OVER_SOFTBALL_DEEP_MAX_USD ?? 40),
+);
+
+/**
  * Separate, tighter ask cap for inning 4. inn4 is the one early bucket with
  * paper losses (28/31 vs 45/46 in inn5), and its overs price in the same
  * 89–93¢ band as inn5, so a shared MAX_ASK can't tell them apart. Historically
@@ -203,6 +218,7 @@ export function mlbOverSoftballExecLabel(): string {
     + `tif=${TIF} `
     + `minEdge=${MIN_EDGE_ON ? MIN_EDGE : "off(>0 always)"} `
     + `sizeFullEdge=${SIZE_FULL_EDGE > 0 ? SIZE_FULL_EDGE : "off"} `
+    + `deepMaxUsd=${DEEP_MAX_USD} `
     + `deepMinEdge=${DEEP_MIN_EDGE > 0 ? DEEP_MIN_EDGE : "off"} `
     + `lateHigh=${LATE_HIGH_MODE}@inn≥${LATE_HIGH_MIN_INN}/ask≥${LATE_HIGH_ASK}`
   );
@@ -329,16 +345,21 @@ export async function executeMlbOverSoftball(
       walkAnchorSize: WALK_ANCHOR_SIZE,
     });
 
+  // Two-run rungs get their own, smaller ticket. They are cheaper, so a given
+  // notional buys more contracts, and they miss ~10% of the time against ~4%
+  // for the next line — together that is ~2.3x the dollar swing per print.
+  const ticketUsd = runsNeeded >= 2 ? Math.min(MAX_USD, DEEP_MAX_USD) : MAX_USD;
+
   // Size on edge rather than gating on it. A thin but real edge is still worth
   // taking, just not for the full ticket, so notional ramps linearly and only
-  // reaches MAX_USD at SIZE_FULL_EDGE. Plan once at the full budget to read the
-  // edge: the walk takes the cheapest levels first, so trimming the budget can
-  // only lower the VWAP, which makes that first pass the conservative estimate.
-  let walk = planAt(MAX_USD);
+  // reaches the ticket at SIZE_FULL_EDGE. Plan once at the full budget to read
+  // the edge: the walk takes the cheapest levels first, so trimming the budget
+  // can only lower the VWAP, making that first pass the conservative estimate.
+  let walk = planAt(ticketUsd);
   let modelEdge = modelEdgePerContract(walk.vwap, c.inning, runsNeeded);
-  let sizedUsd = MAX_USD;
+  let sizedUsd = ticketUsd;
   if (SIZE_FULL_EDGE > 0 && modelEdge > 0) {
-    sizedUsd = MAX_USD * Math.min(1, modelEdge / SIZE_FULL_EDGE);
+    sizedUsd = ticketUsd * Math.min(1, modelEdge / SIZE_FULL_EDGE);
     if (sizedUsd < walk.count * walk.vwap) {
       walk = planAt(sizedUsd);
       modelEdge = modelEdgePerContract(walk.vwap, c.inning, runsNeeded);
@@ -385,6 +406,7 @@ export async function executeMlbOverSoftball(
     runsNeeded,
     deepFrom,
     sizedUsd,
+    ticketUsd,
     maxUsd: MAX_USD,
     modelEdge,
     minEdge: MIN_EDGE_ON ? MIN_EDGE : null,
@@ -547,7 +569,8 @@ export async function executeMlbOverSoftball(
   log(
     `!!! LIVE FIRE ${ctx.slug} over${c.line} tob=${c.ask.toFixed(2)}x${Math.floor(c.askSize)} `
     + `→ x${count} limit=${limitPrice.toFixed(2)} vwap≈${vwap.toFixed(3)} `
-    + `(≈$${notionalCap.toFixed(2)} of $${sizedUsd.toFixed(0)} @edge=${modelEdge.toFixed(3)}) `
+    + `(≈$${notionalCap.toFixed(2)} of $${sizedUsd.toFixed(0)}/$${ticketUsd.toFixed(0)} `
+    + `need${runsNeeded} @edge=${modelEdge.toFixed(3)}) `
     + `tif=${tif} fillBook=${FILL_BOOK ? 1 : 0} `
     + `cats=${c.cats.join(",")}`,
   );

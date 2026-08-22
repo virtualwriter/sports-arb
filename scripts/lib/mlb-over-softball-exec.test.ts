@@ -125,6 +125,43 @@ describe("edge-scaled sizing", () => {
   });
 });
 
+describe("deep-lane ticket cap", () => {
+  afterEach(() => {
+    delete process.env.MLB_OVER_SOFTBALL_DEEP_MAX_USD;
+    vi.resetModules();
+  });
+
+  it("risks less on a two-run rung than on a next line at the same price", async () => {
+    process.env.MLB_OVER_SOFTBALL_LIVE = "1";
+    process.env.MLB_OVER_SOFTBALL_DEEP_MAX_USD = "40";
+
+    async function fireAt(runsNeeded: number) {
+      vi.resetModules();
+      const mod = await import("./mlb-over-softball-exec.js");
+      const rows: Record<string, unknown>[] = [];
+      mod.configureMlbOverSoftballExec({
+        client: { createOrderV2: async () => ({ fill_count: "0" }) } as never,
+        emit: (r) => rows.push(r),
+      });
+      const ctx = ctxAt(5, 0.78);
+      ctx.candidate.askSize = 900;
+      ctx.candidate.askLevels = [[0.78, 900]];
+      ctx.candidate.runsNeeded = runsNeeded;
+      await mod.executeMlbOverSoftball(ctx);
+      return rows.find((r) => r.kind === "mlb_over_softball_order");
+    }
+
+    const near = await fireAt(1);
+    const deep = await fireAt(2);
+    expect(near).toBeTruthy();
+    expect(deep).toBeTruthy();
+    // Both clear SIZE_FULL_EDGE at 78c, so each takes its whole ticket.
+    expect(Number(near?.ticketUsd)).toBe(100);
+    expect(Number(deep?.ticketUsd)).toBe(40);
+    expect(Number(deep?.count)).toBeLessThan(Number(near?.count) / 2);
+  });
+});
+
 describe("retry after a skip", () => {
   afterEach(() => {
     delete process.env.MLB_OVER_SOFTBALL_MAX_ATTEMPTS;
