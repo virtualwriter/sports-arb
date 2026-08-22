@@ -90,9 +90,9 @@ describe("edge-scaled sizing", () => {
 
   it("risks less on a thin edge than on a fat one", async () => {
     process.env.MLB_OVER_SOFTBALL_LIVE = "1";
-    // inn5 prior is 0.975, so 86c is a fat ~+10.7c and 90c a thin ~+6.9c.
-    const fat = await fireAndReadOrder(5, 0.86, 500);
-    const thin = await fireAndReadOrder(5, 0.9, 500);
+    // inn4 prior is 0.90, so 80c is a fat ~+8.9c and 86c a thin ~+3.2c.
+    const fat = await fireAndReadOrder(4, 0.8, 500);
+    const thin = await fireAndReadOrder(4, 0.86, 500);
     expect(fat).toBeTruthy();
     expect(thin).toBeTruthy();
     const fatCt = Number(fat?.count);
@@ -103,6 +103,8 @@ describe("edge-scaled sizing", () => {
 
   it("never sends a print at or below break-even", async () => {
     process.env.MLB_OVER_SOFTBALL_LIVE = "1";
+    // Lift the price caps so the edge floor is the only thing left to catch it.
+    process.env.MLB_OVER_SOFTBALL_MAX_ASK = "0.99";
     process.env.MLB_OVER_SOFTBALL_INN4_MAX_ASK = "0.99";
     vi.resetModules();
     const mod = await import("./mlb-over-softball-exec.js");
@@ -111,13 +113,14 @@ describe("edge-scaled sizing", () => {
       client: { createOrderV2: async () => ({ fill_count: "0" }) } as never,
       emit: (r) => rows.push(r),
     });
-    // inn4 prior is 0.90, so 90c is negative once fees are paid.
-    const ctx = ctxAt(4, 0.9);
-    ctx.candidate.askLevels = [[0.9, 500]];
+    // inn4 prior is 0.90, so 93c is negative once fees are paid.
+    const ctx = ctxAt(4, 0.93);
+    ctx.candidate.askLevels = [[0.93, 500]];
     ctx.candidate.askSize = 500;
     await mod.executeMlbOverSoftball(ctx);
     expect(rows.find((r) => r.kind === "mlb_over_softball_order")).toBeUndefined();
     expect(rows.find((r) => r.kind === "mlb_over_softball_skip")?.reason).toBe("no_edge");
+    delete process.env.MLB_OVER_SOFTBALL_MAX_ASK;
     delete process.env.MLB_OVER_SOFTBALL_INN4_MAX_ASK;
   });
 });
@@ -236,7 +239,7 @@ describe("inning-4 ask cap", () => {
     vi.resetModules();
   });
 
-  it("stands inn4 down at 89¢ but lets inn5 through at the same price", async () => {
+  it("stands inn4 down at 87¢ but lets inn5 through at the same price", async () => {
     process.env.MLB_OVER_SOFTBALL_LIVE = "1";
     process.env.MLB_OVER_SOFTBALL_INN4_MAX_ASK = "0.86";
     vi.resetModules();
@@ -244,8 +247,9 @@ describe("inning-4 ask cap", () => {
     const rows: Record<string, unknown>[] = [];
     mod.configureMlbOverSoftballExec({ client: null, emit: (r) => rows.push(r) });
 
-    expect(await mod.executeMlbOverSoftball(ctxAt(4, 0.89))).toBe("skipped");
-    expect(await mod.executeMlbOverSoftball(ctxAt(5, 0.89))).toBe("skipped");
+    // 87c sits between the inn4 cap (0.86) and the general cap (0.88).
+    expect(await mod.executeMlbOverSoftball(ctxAt(4, 0.87))).toBe("skipped");
+    expect(await mod.executeMlbOverSoftball(ctxAt(5, 0.87))).toBe("skipped");
 
     const skips = rows.filter((r) => r.kind === "mlb_over_softball_skip");
     // inn4 is turned away on price; inn5 only stops for the absent client.

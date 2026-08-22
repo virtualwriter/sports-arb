@@ -46,8 +46,16 @@ const MAX_DAILY_USD = Math.max(
   1,
   Number(process.env.MLB_OVER_SOFTBALL_MAX_DAILY_USD ?? (FILL_BOOK ? 3000 : 200)),
 );
-/** Skip / don't walk above this YES ask — 0.90 avoids ~at-cost 93–94¢ chases. */
-const MAX_ASK = Math.min(0.99, Math.max(0.05, Number(process.env.MLB_OVER_SOFTBALL_MAX_ASK ?? 0.9)));
+/**
+ * Skip / don't walk above this YES ask.
+ *
+ * 0.88 rather than 0.90 because the 86–90¢ band is where the edge stops being
+ * measurable: over 113 gated prints it consumed a third of all capital, returned
+ * 1.9% on it, and its 95% CI (-1.1¢ to +11.8¢) crosses zero, while carrying the
+ * fattest losses. Dropping the last 2¢ costs nothing in simulated expectation
+ * and cuts the 5% worst drawdown by roughly a quarter.
+ */
+const MAX_ASK = Math.min(0.99, Math.max(0.05, Number(process.env.MLB_OVER_SOFTBALL_MAX_ASK ?? 0.88)));
 /**
  * Don't walk more than this above TOB (default 2¢). Stops fill-book from
  * turning an 87¢ print into a ~90¢ VWAP with almost no edge.
