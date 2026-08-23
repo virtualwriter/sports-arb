@@ -115,21 +115,6 @@ const SIZE_FULL_EDGE = Math.max(
 );
 
 /**
- * Notional ceiling for a two-run rung, replacing MAX_USD on those prints.
- *
- * At equal notional a deep print carries ~2.3x the dollar risk of a next-line
- * print: it is cheaper so the same money buys more contracts, and it misses
- * ~10% of the time against ~4%. Risk parity with a full near ticket lands at
- * ~$44 and Kelly at ~$62; this sits below both because the deep priors are
- * synthesised by shifting the line up a rung rather than measured against
- * observed deep quotes, so the lane has no validated price history yet.
- */
-const DEEP_MAX_USD = Math.max(
-  1,
-  Number(process.env.MLB_OVER_SOFTBALL_DEEP_MAX_USD ?? 40),
-);
-
-/**
  * Separate, tighter ask cap for inning 4. inn4 is the one early bucket with
  * paper losses (28/31 vs 45/46 in inn5), and its overs price in the same
  * 89–93¢ band as inn5, so a shared MAX_ASK can't tell them apart. Historically
@@ -145,16 +130,6 @@ function maxAskForInning(inning: number | null | undefined): number {
   return inning === 4 ? Math.min(MAX_ASK, INN4_MAX_ASK) : MAX_ASK;
 }
 
-/**
- * Minimum model edge ($/ct) before the rung above the next line is worth
- * taking. It hits ~89% vs ~97%, so it only earns its place when it is priced
- * well below the near strike. 0 disables the fallback entirely.
- */
-const DEEP_MIN_EDGE = Math.max(
-  0,
-  Number(process.env.MLB_OVER_SOFTBALL_DEEP_MIN_EDGE ?? 0.05),
-);
-
 export type MlbOverSoftballFireCtx = {
   slug: string;
   t0: number;
@@ -162,8 +137,6 @@ export type MlbOverSoftballFireCtx = {
   scoreHome: number;
   source: string;
   candidate: MlbOverSoftballCandidate;
-  /** Rung above the next line; taken only if the next line is gated on price. */
-  deepCandidate?: MlbOverSoftballCandidate | null;
 };
 
 type EmitFn = (row: Record<string, unknown>) => void;
@@ -218,8 +191,7 @@ export function mlbOverSoftballExecLabel(): string {
     + `tif=${TIF} `
     + `minEdge=${MIN_EDGE_ON ? MIN_EDGE : "off(>0 always)"} `
     + `sizeFullEdge=${SIZE_FULL_EDGE > 0 ? SIZE_FULL_EDGE : "off"} `
-    + `deepMaxUsd=${DEEP_MAX_USD} `
-    + `deepMinEdge=${DEEP_MIN_EDGE > 0 ? DEEP_MIN_EDGE : "off"} `
+    + `lane=next_line_only `
     + `lateHigh=${LATE_HIGH_MODE}@inn≥${LATE_HIGH_MIN_INN}/ask≥${LATE_HIGH_ASK}`
   );
 }
@@ -276,18 +248,6 @@ export function enqueueMlbOverSoftball(ctx: MlbOverSoftballFireCtx): void {
   })();
 }
 
-/** Price-only gate: which cap, if any, turns this candidate away. */
-function priceGateReason(c: MlbOverSoftballCandidate): string | null {
-  const cap = maxAskForInning(c.inning);
-  if (c.ask > cap) return cap < MAX_ASK ? "ask_above_inning_max" : "ask_above_max";
-  if (lateHighAskHit(c)) {
-    return LATE_HIGH_MODE === "enforce"
-      ? "multi_run_late_high_ask"
-      : "shadow_multi_run_late_high_ask";
-  }
-  return null;
-}
-
 export async function executeMlbOverSoftball(
   ctx: MlbOverSoftballFireCtx,
 ): Promise<"shadow" | "fired" | "skipped"> {
@@ -309,28 +269,17 @@ export async function executeMlbOverSoftball(
 
   // When the next line is turned away purely on price, the rung above it is
   // often the better trade: the book quoting 91–94¢ is what makes it so.
-  let c = ctx.candidate;
-  // The caller hands us the deep rung directly when the next line was not even
-  // quotable, so record that as its own reason for stepping up.
-  let deepFrom: string | null =
-    (ctx.candidate.runsNeeded ?? 1) >= 2 ? "near_unquotable" : null;
-  const nearGate = priceGateReason(ctx.candidate);
-  const deep = ctx.deepCandidate;
-  if (nearGate && deep && DEEP_MIN_EDGE > 0 && !priceGateReason(deep)) {
-    const deepEdge = modelEdgePerContract(deep.ask, deep.inning, deep.runsNeeded ?? 2);
-    if (deepEdge + 1e-12 >= DEEP_MIN_EDGE) {
-      c = deep;
-      deepFrom = nearGate;
-      log(
-        `deep-strike fallback ${ctx.slug} inn${deep.inning}: `
-        + `near over${ctx.candidate.line}@${ctx.candidate.ask.toFixed(2)} (${nearGate}) `
-        + `→ over${deep.line}@${deep.ask.toFixed(2)} edge=${deepEdge.toFixed(3)}`,
-      );
-    }
+  const c = ctx.candidate;
+  const runsNeeded = c.runsNeeded ?? 1;
+  // Next line only. The selector cannot produce anything else any more, but the
+  // two-run lane cost -$241 over 9 prints, so refuse it here too rather than
+  // rely on a single call site staying correct.
+  if (runsNeeded >= 2) {
+    log(`skip deep_lane_disabled ${ctx.slug} over${c.line} needs ${runsNeeded} runs`);
+    return "skipped";
   }
 
   const maxAsk = maxAskForInning(c.inning);
-  const runsNeeded = c.runsNeeded ?? 1;
   const planAt = (maxUsd: number) =>
     planAskWalk({
       tobAsk: c.ask,
@@ -345,24 +294,19 @@ export async function executeMlbOverSoftball(
       walkAnchorSize: WALK_ANCHOR_SIZE,
     });
 
-  // Two-run rungs get their own, smaller ticket. They are cheaper, so a given
-  // notional buys more contracts, and they miss ~10% of the time against ~4%
-  // for the next line — together that is ~2.3x the dollar swing per print.
-  const ticketUsd = runsNeeded >= 2 ? Math.min(MAX_USD, DEEP_MAX_USD) : MAX_USD;
-
   // Size on edge rather than gating on it. A thin but real edge is still worth
   // taking, just not for the full ticket, so notional ramps linearly and only
-  // reaches the ticket at SIZE_FULL_EDGE. Plan once at the full budget to read
-  // the edge: the walk takes the cheapest levels first, so trimming the budget
-  // can only lower the VWAP, making that first pass the conservative estimate.
-  let walk = planAt(ticketUsd);
-  let modelEdge = modelEdgePerContract(walk.vwap, c.inning, runsNeeded);
-  let sizedUsd = ticketUsd;
+  // reaches MAX_USD at SIZE_FULL_EDGE. Plan once at the full budget to read the
+  // edge: the walk takes the cheapest levels first, so trimming the budget can
+  // only lower the VWAP, which makes that first pass the conservative estimate.
+  let walk = planAt(MAX_USD);
+  let modelEdge = modelEdgePerContract(walk.vwap, c.inning);
+  let sizedUsd = MAX_USD;
   if (SIZE_FULL_EDGE > 0 && modelEdge > 0) {
-    sizedUsd = ticketUsd * Math.min(1, modelEdge / SIZE_FULL_EDGE);
+    sizedUsd = MAX_USD * Math.min(1, modelEdge / SIZE_FULL_EDGE);
     if (sizedUsd < walk.count * walk.vwap) {
       walk = planAt(sizedUsd);
-      modelEdge = modelEdgePerContract(walk.vwap, c.inning, runsNeeded);
+      modelEdge = modelEdgePerContract(walk.vwap, c.inning);
     }
   }
 
@@ -375,10 +319,6 @@ export async function executeMlbOverSoftball(
   // nothing should ever go out at or below break-even.
   const noEdge = modelEdge <= 1e-12;
   const flatEdge = MIN_EDGE_ON && modelEdge + 1e-12 < MIN_EDGE;
-  // Two-run rungs hit ~89% vs ~97%, so they must clear their own bar no matter
-  // how they were selected — as a fallback or because the next line was dark.
-  const deepThin =
-    runsNeeded >= 2 && DEEP_MIN_EDGE > 0 && modelEdge + 1e-12 < DEEP_MIN_EDGE;
   const base = {
     kind: "mlb_over_softball_signal" as const,
     observedAt: new Date().toISOString(),
@@ -404,9 +344,7 @@ export async function executeMlbOverSoftball(
     walkAnchorSize: WALK_ANCHOR_SIZE,
     maxAsk,
     runsNeeded,
-    deepFrom,
     sizedUsd,
-    ticketUsd,
     maxUsd: MAX_USD,
     modelEdge,
     minEdge: MIN_EDGE_ON ? MIN_EDGE : null,
@@ -490,23 +428,6 @@ export async function executeMlbOverSoftball(
     return "skipped";
   }
 
-  if (deepThin) {
-    log(
-      `skip deep_thin_edge ${ctx.slug} inn${c.inning} over${c.line} `
-      + `vwap=${vwap.toFixed(3)} edge=${modelEdge.toFixed(3)} < min=${DEEP_MIN_EDGE}`,
-    );
-    publish({
-      ...base,
-      kind: "mlb_over_softball_skip",
-      reason: "deep_thin_edge",
-      wouldHaveContracts: count,
-      wouldHaveLimit: limitPrice,
-      wouldHaveVwap: vwap,
-      wouldHaveNotional: count * limitPrice,
-    });
-    return "skipped";
-  }
-
   if (flatEdge) {
     log(
       `skip flat_edge ${ctx.slug} inn${c.inning} over${c.line} `
@@ -569,8 +490,7 @@ export async function executeMlbOverSoftball(
   log(
     `!!! LIVE FIRE ${ctx.slug} over${c.line} tob=${c.ask.toFixed(2)}x${Math.floor(c.askSize)} `
     + `→ x${count} limit=${limitPrice.toFixed(2)} vwap≈${vwap.toFixed(3)} `
-    + `(≈$${notionalCap.toFixed(2)} of $${sizedUsd.toFixed(0)}/$${ticketUsd.toFixed(0)} `
-    + `need${runsNeeded} @edge=${modelEdge.toFixed(3)}) `
+    + `(≈$${notionalCap.toFixed(2)} of $${sizedUsd.toFixed(0)} @edge=${modelEdge.toFixed(3)}) `
     + `tif=${tif} fillBook=${FILL_BOOK ? 1 : 0} `
     + `cats=${c.cats.join(",")}`,
   );

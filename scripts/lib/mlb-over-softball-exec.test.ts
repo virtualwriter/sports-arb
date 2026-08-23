@@ -125,40 +125,44 @@ describe("edge-scaled sizing", () => {
   });
 });
 
-describe("deep-lane ticket cap", () => {
-  afterEach(() => {
-    delete process.env.MLB_OVER_SOFTBALL_DEEP_MAX_USD;
+describe("deep lane removed", () => {
+  it("refuses a two-run rung even if one is handed to it", async () => {
+    process.env.MLB_OVER_SOFTBALL_LIVE = "1";
     vi.resetModules();
+    const mod = await import("./mlb-over-softball-exec.js");
+    const rows: Record<string, unknown>[] = [];
+    mod.configureMlbOverSoftballExec({
+      client: { createOrderV2: async () => ({ fill_count: "0" }) } as never,
+      emit: (r) => rows.push(r),
+    });
+
+    // 78c on a two-run rung is what the old lane loved; it went 4 of 9 for -$241.
+    const ctx = ctxAt(5, 0.78);
+    ctx.candidate.askSize = 900;
+    ctx.candidate.askLevels = [[0.78, 900]];
+    ctx.candidate.runsNeeded = 2;
+    expect(await mod.executeMlbOverSoftball(ctx)).toBe("skipped");
+    expect(rows.find((r) => r.kind === "mlb_over_softball_order")).toBeUndefined();
+    // Refused before it is even scored, so nothing is published.
+    expect(rows).toHaveLength(0);
   });
 
-  it("risks less on a two-run rung than on a next line at the same price", async () => {
+  it("still takes the same price on the next line", async () => {
     process.env.MLB_OVER_SOFTBALL_LIVE = "1";
-    process.env.MLB_OVER_SOFTBALL_DEEP_MAX_USD = "40";
+    vi.resetModules();
+    const mod = await import("./mlb-over-softball-exec.js");
+    const rows: Record<string, unknown>[] = [];
+    mod.configureMlbOverSoftballExec({
+      client: { createOrderV2: async () => ({ fill_count: "0" }) } as never,
+      emit: (r) => rows.push(r),
+    });
 
-    async function fireAt(runsNeeded: number) {
-      vi.resetModules();
-      const mod = await import("./mlb-over-softball-exec.js");
-      const rows: Record<string, unknown>[] = [];
-      mod.configureMlbOverSoftballExec({
-        client: { createOrderV2: async () => ({ fill_count: "0" }) } as never,
-        emit: (r) => rows.push(r),
-      });
-      const ctx = ctxAt(5, 0.78);
-      ctx.candidate.askSize = 900;
-      ctx.candidate.askLevels = [[0.78, 900]];
-      ctx.candidate.runsNeeded = runsNeeded;
-      await mod.executeMlbOverSoftball(ctx);
-      return rows.find((r) => r.kind === "mlb_over_softball_order");
-    }
-
-    const near = await fireAt(1);
-    const deep = await fireAt(2);
-    expect(near).toBeTruthy();
-    expect(deep).toBeTruthy();
-    // Both clear SIZE_FULL_EDGE at 78c, so each takes its whole ticket.
-    expect(Number(near?.ticketUsd)).toBe(100);
-    expect(Number(deep?.ticketUsd)).toBe(40);
-    expect(Number(deep?.count)).toBeLessThan(Number(near?.count) / 2);
+    const ctx = ctxAt(5, 0.78);
+    ctx.candidate.askSize = 900;
+    ctx.candidate.askLevels = [[0.78, 900]];
+    expect(await mod.executeMlbOverSoftball(ctx)).toBe("fired");
+    const order = rows.find((r) => r.kind === "mlb_over_softball_order");
+    expect(Number(order?.count)).toBeGreaterThan(0);
   });
 });
 
@@ -189,84 +193,6 @@ describe("retry after a skip", () => {
     await mod.executeMlbOverSoftball(ctx);
     await mod.executeMlbOverSoftball(ctx);
     expect(rows.filter((r) => r.kind === "mlb_over_softball_skip").length).toBe(3);
-  });
-});
-
-describe("deep-strike fallback", () => {
-  afterEach(() => {
-    delete process.env.MLB_OVER_SOFTBALL_DEEP_MIN_EDGE;
-    vi.resetModules();
-  });
-
-  function deepAt(inning: number, line: number, ask: number) {
-    return {
-      line,
-      ask,
-      askSize: 40,
-      ticker: `T-deep-${line}`,
-      cats: ["multi_run_early" as const],
-      curTotal: line - 1.5,
-      inning,
-      runsDelta: 2,
-      runsNeeded: 2,
-    };
-  }
-
-  it("steps up a rung when the near line is gated on price", async () => {
-    process.env.MLB_OVER_SOFTBALL_LIVE = "1";
-    vi.resetModules();
-    const mod = await import("./mlb-over-softball-exec.js");
-    const rows: Record<string, unknown>[] = [];
-    mod.configureMlbOverSoftballExec({ client: null, emit: (r) => rows.push(r) });
-
-    // ATL@MIN shape: near line 93¢ hits the late-high gate, rung above is 86¢.
-    const near = { ...ctxAt(5, 0.93).candidate, line: 6.5, curTotal: 6 };
-    await mod.executeMlbOverSoftball({
-      ...ctxAt(5, 0.93),
-      candidate: near,
-      deepCandidate: deepAt(5, 7.5, 0.86),
-    });
-    const sig = rows.find((r) => r.kind === "mlb_over_softball_signal");
-    expect(sig?.line).toBe(7.5);
-    expect(sig?.runsNeeded).toBe(2);
-    expect(sig?.deepFrom).toBe("ask_above_max");
-  });
-
-  it("leaves the near line alone when it is not gated", async () => {
-    process.env.MLB_OVER_SOFTBALL_LIVE = "1";
-    vi.resetModules();
-    const mod = await import("./mlb-over-softball-exec.js");
-    const rows: Record<string, unknown>[] = [];
-    mod.configureMlbOverSoftballExec({ client: null, emit: (r) => rows.push(r) });
-
-    const near = { ...ctxAt(5, 0.86).candidate, line: 5.5, curTotal: 5 };
-    await mod.executeMlbOverSoftball({
-      ...ctxAt(5, 0.86),
-      candidate: near,
-      deepCandidate: deepAt(5, 6.5, 0.74),
-    });
-    const sig = rows.find((r) => r.kind === "mlb_over_softball_signal");
-    expect(sig?.line).toBe(5.5);
-    expect(sig?.deepFrom).toBeNull();
-  });
-
-  it("declines the rung above when its edge is too thin", async () => {
-    process.env.MLB_OVER_SOFTBALL_LIVE = "1";
-    vi.resetModules();
-    const mod = await import("./mlb-over-softball-exec.js");
-    const rows: Record<string, unknown>[] = [];
-    mod.configureMlbOverSoftballExec({ client: null, emit: (r) => rows.push(r) });
-
-    // CWS@CHC shape: near 90¢ blocked at inn4, rung above 89¢ is worse, not better.
-    const near = { ...ctxAt(4, 0.9).candidate, line: 5.5, curTotal: 5 };
-    await mod.executeMlbOverSoftball({
-      ...ctxAt(4, 0.9),
-      candidate: near,
-      deepCandidate: deepAt(4, 6.5, 0.89),
-    });
-    const skip = rows.find((r) => r.kind === "mlb_over_softball_skip");
-    expect(skip?.reason).toBe("ask_above_inning_max");
-    expect(skip?.line).toBe(5.5);
   });
 });
 

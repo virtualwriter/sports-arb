@@ -263,42 +263,23 @@ export const MULTI_RUN_EARLY_WR_BY_INNING: Readonly<Record<number, number>> = {
 
 export const MULTI_RUN_EARLY_WR_DEFAULT = 0.97;
 
-/**
- * Same samples, but for the strike one rung above the next line — i.e. two more
- * runs rather than one. Measured 159/178 overall; rounded down, and inn 1 is
- * held at 0.93 because it is only 7 samples. Inn 4 stays the weak bucket.
- */
-export const MULTI_RUN_EARLY_WR2_BY_INNING: Readonly<Record<number, number>> = {
-  1: 0.93,
-  2: 0.89,
-  3: 0.90,
-  4: 0.82,
-  5: 0.92,
-};
-
-export const MULTI_RUN_EARLY_WR2_DEFAULT = 0.89;
-
-export function multiRunEarlyWinRate(
-  inning: number | null | undefined,
-  runsNeeded = 1,
-): number {
-  const deep = runsNeeded >= 2;
-  const table = deep ? MULTI_RUN_EARLY_WR2_BY_INNING : MULTI_RUN_EARLY_WR_BY_INNING;
-  const fallback = deep ? MULTI_RUN_EARLY_WR2_DEFAULT : MULTI_RUN_EARLY_WR_DEFAULT;
-  if (inning == null) return fallback;
-  return table[inning] ?? fallback;
+export function multiRunEarlyWinRate(inning: number | null | undefined): number {
+  if (inning == null) return MULTI_RUN_EARLY_WR_DEFAULT;
+  return MULTI_RUN_EARLY_WR_BY_INNING[inning] ?? MULTI_RUN_EARLY_WR_DEFAULT;
 }
 
 /**
  * Model edge $/contract for a YES buy at `ask`, using the multi_run_early
  * inning prior (fee-adjusted). Negative ⇒ paying above fair.
+ *
+ * Only ever valid for the next line. A two-run rung priced off these numbers
+ * lost 5 of 9 live; see selectEarlyOverSoftball for why that lane is gone.
  */
 export function modelEdgePerContract(
   ask: number,
   inning: number | null | undefined,
-  runsNeeded = 1,
 ): number {
-  const p = multiRunEarlyWinRate(inning, runsNeeded);
+  const p = multiRunEarlyWinRate(inning);
   return p * (1 - ask) + (1 - p) * (-ask) - kalshiYesFee(ask);
 }
 
@@ -309,15 +290,14 @@ type OverSelectInput = {
   kalshiYesTob: ReadonlyMap<number, KalshiYesTobEntry> | Iterable<[number, KalshiYesTobEntry]>;
 };
 
-/** Cheapest qualifying YES rung whose distance from curTotal is in (minDist, maxDist]. */
-function selectOverAtDistance(
+/** Cheapest qualifying YES rung sitting within one run of curTotal. */
+function selectNextLineOver(
   input: OverSelectInput,
-  minDist: number,
-  maxDist: number,
-  runsNeeded: number,
 ): MlbOverSoftballCandidate | null {
   const { inning, runsDelta, curTotal } = input;
   if (inning == null || !(runsDelta > 0)) return null;
+  const minDist = 0;
+  const maxDist = 1;
 
   const entries =
     input.kalshiYesTob instanceof Map
@@ -360,7 +340,7 @@ function selectOverAtDistance(
     curTotal,
     inning,
     runsDelta,
-    runsNeeded,
+    runsNeeded: 1,
     ...(best.askLevels ? { askLevels: best.askLevels } : {}),
   };
 }
@@ -368,24 +348,20 @@ function selectOverAtDistance(
 /**
  * Cheapest Kalshi total YES with 0 < line − curTotal ≤ 1 and ask in (0.05, 0.95).
  * Returns null unless at least one early softball category matches.
+ *
+ * This is the only lane. A "deep" variant that stepped up to the rung two runs
+ * away ran 21–23 Aug and went 4 of 9 for -$241, against a 0.896 prior that
+ * gives such a run a 0.1% chance — while the next line over the same period
+ * went 35 of 36 for +$75. That prior was synthesised by shifting next-line
+ * samples up a rung, so it was a blanket per-inning average; the book was
+ * quoting those rungs near 77¢ and was pricing game context the average
+ * cannot see. Do not reintroduce it without a prior measured from real
+ * two-run quotes.
  */
 export function selectEarlyOverSoftball(
   input: OverSelectInput,
 ): MlbOverSoftballCandidate | null {
-  return selectOverAtDistance(input, 0, 1, 1);
-}
-
-/**
- * The rung above the next line (needs two more runs). Used only as a fallback
- * when the next line is gated on price: a next line quoted at 91–94¢ is the
- * book calling it near-certain, which is what makes the rung above it the
- * value. Hits 89% overall vs 97% for the next line, so it needs a real edge
- * bar before it is worth taking.
- */
-export function selectDeepOverSoftball(
-  input: OverSelectInput,
-): MlbOverSoftballCandidate | null {
-  return selectOverAtDistance(input, 1, 2, 2);
+  return selectNextLineOver(input);
 }
 
 /** Build line → YES TOB map from paper keys like `total_7.5:yes`. */
