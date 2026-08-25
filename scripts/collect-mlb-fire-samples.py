@@ -559,6 +559,25 @@ def main():
     if pending == 0 and os.environ.get("COLLECT_COMPRESS", "1") != "0":
         compress_day(day)
 
+    try:
+        import subprocess
+        sb = ROOT / "scripts" / "collect-mlb-softballs.py"
+        # Two price bases, each to its own file. 7000 is the historical
+        # pre-score quote, kept for continuity; 0 is the price actually
+        # reachable when the score reaches us, and is the one to trade against.
+        leads = [s.strip() for s
+                 in os.environ.get("SOFTBALL_LEAD_SET", "7000,0").split(",")
+                 if s.strip()]
+        for lead in leads:
+            subprocess.run(
+                [sys.executable, str(sb), day],
+                check=False,
+                timeout=900,
+                env={**os.environ, "SOFTBALL_LEAD_MS": lead},
+            )
+    except Exception as e:
+        print(f"softball collect failed for {day}: {e}")
+
 
 def compress_day(day: str) -> None:
     """Gzip the collected day's raw JSONL and prune old archives (disk hygiene)."""
