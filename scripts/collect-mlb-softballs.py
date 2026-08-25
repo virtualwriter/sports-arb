@@ -1,16 +1,25 @@
 #!/usr/bin/env python3
 """Nightly collector: append profitable softball patterns to the backtest repo.
 
-Replays ladder recordings at t0-7s (pre-move quote) for each scoring event:
+Replays ladder recordings at a configurable offset from each scoring event
+(default t0-7s, the pre-move quote):
   - over softballs: cheapest Kalshi next-line over with category filters
-  - middle softballs: late delta-anchored packages repriced at t0-7s
+  - middle softballs: late delta-anchored packages repriced at the same offset
 
 Appends rows to data/backtest/mlb-softball-samples.jsonl (idempotent) and a
 per-day summary to data/backtest/mlb-softball-days.jsonl.
 
+The 7s lead prices the book *before* the run scores, which is only reachable
+if you know the run is coming — measured against the real book at the tap it
+runs a median 11.5c cheap. Set SOFTBALL_LEAD_MS to reprice: 0 fills at the
+tap, negative values fill after it (e.g. -250 for a quarter-second of
+reaction). Any non-default lead writes to its own suffixed file so the two
+price bases never mix.
+
 Usage:
   python3 scripts/collect-mlb-softballs.py            # yesterday (ET)
   python3 scripts/collect-mlb-softballs.py 2026-07-19
+  SOFTBALL_LEAD_MS=0 python3 scripts/collect-mlb-softballs.py 2026-07-19
 """
 import importlib.util
 import json
@@ -30,10 +39,17 @@ spec.loader.exec_module(c)
 
 DATA_DIR = c.DATA_DIR
 REPO_DIR = DATA_DIR / "backtest"
-SAMPLES = REPO_DIR / "mlb-softball-samples.jsonl"
-DAYS = REPO_DIR / "mlb-softball-days.jsonl"
 ET = ZoneInfo("America/New_York")
-LEAD_MS = 7_000
+DEFAULT_LEAD_MS = 7_000
+LEAD_MS = int(os.environ.get("SOFTBALL_LEAD_MS", DEFAULT_LEAD_MS))
+if LEAD_MS == DEFAULT_LEAD_MS:
+    SUFFIX = ""
+elif LEAD_MS >= 0:
+    SUFFIX = f"-lead{LEAD_MS}ms"
+else:
+    SUFFIX = f"-lag{-LEAD_MS}ms"
+SAMPLES = REPO_DIR / f"mlb-softball-samples{SUFFIX}.jsonl"
+DAYS = REPO_DIR / f"mlb-softball-days{SUFFIX}.jsonl"
 MIDDLE_MAX_COST = 1.35
 
 # Known-bad recordings (phantom scores from feed misbinding, fixed 2026-07-29):
@@ -335,7 +351,7 @@ def process_day(day, finals, recs, existing):
                 if not (0 < dist <= 1):
                     continue
                 ask, ask_sz = quote_at(arr, t_fill)
-                # The fill is the book state at t0-7s; a >=0.95 quote means no
+                # The fill is the book state at t_fill; a >=0.95 quote means no
                 # trade (do NOT fall back to older cheaper ticks).
                 if ask is None or ask >= 0.95 or ask <= 0.05:
                     continue
@@ -460,6 +476,7 @@ def summarize(day, games, score_events, rows):
     }
     return {
         "day": day,
+        "leadMs": LEAD_MS,
         "games": games,
         "scoreEvents": score_events,
         "softballs": softballs,
@@ -469,7 +486,7 @@ def summarize(day, games, score_events, rows):
 
 def print_summary(summary, added):
     day = summary["day"]
-    print(f"\n{day} softball summary ({added} new rows):")
+    print(f"\n{day} softball summary, lead {LEAD_MS}ms ({added} new rows):")
     print(f"  games={summary['games']} scoreEvents={summary['scoreEvents']}")
     for cat in (CAT_A, CAT_B, CAT_C, CAT_M, "overUnion"):
         s = summary["softballs"][cat]
