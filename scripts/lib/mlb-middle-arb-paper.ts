@@ -72,7 +72,10 @@ import {
   paChainTable,
 } from "./mlb-pa-chain.js";
 import {
+  EARLY_OVER_MAX_INNING,
   kalshiYesTobFromPaperMap,
+  modelEdgePerContract,
+  nearestOverRung,
   parseMlbInning,
   selectEarlyOverSoftball,
   yesAskLevelsFromNoBids,
@@ -89,6 +92,7 @@ type TobSide = {
   askSize: number;
   t: number;
   ticker?: string;
+  bid?: number;
   askLevels?: Array<[number, number]>;
 };
 type Venue = "pm" | "kalshi";
@@ -277,6 +281,10 @@ export class MlbMiddleArbPaperSidecar {
   private feedId: string | null = null;
   private latestFeed: FeedSnapshot | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private stateTimer: ReturnType<typeof setInterval> | null = null;
+  /** Last shadow row emitted, so a rung resting cheap for minutes logs a
+   *  handful of rows rather than one per heartbeat. */
+  private lastShadow: { line: number; ask: number; t: number } | null = null;
   private track: ActiveScoreTrack | null = null;
   /** Latest balls/strikes from the bwin scoreboard push (display only). */
   private lastCount: { balls: number; strikes: number; t: number } | null = null;
@@ -495,6 +503,17 @@ export class MlbMiddleArbPaperSidecar {
     this.pollTimer = setInterval(() => {
       void this.pollStatsApi("interval");
     }, Number(process.env.PLR_MLB_STATSAPI_POLL_MS ?? 2000));
+
+    const heartbeatMs = Number(process.env.MLB_GAME_STATE_HEARTBEAT_MS ?? 1000);
+    if (heartbeatMs > 0) {
+      this.stateTimer = setInterval(() => {
+        try {
+          this.emitGameState();
+        } catch (err) {
+          log(`mlb-paper: heartbeat failed — ${String(err)}`);
+        }
+      }, heartbeatMs);
+    }
   }
 
   onLadder(row: {
@@ -551,6 +570,7 @@ export class MlbMiddleArbPaperSidecar {
     side: string;
     bestAsk?: number | null;
     bestAskSize?: number | null;
+    bestBid?: number | null;
     ticker?: string | null;
     depthNo?: Array<[number, number]> | null;
     t?: number;
@@ -565,6 +585,7 @@ export class MlbMiddleArbPaperSidecar {
     const ask = Number(row.bestAsk);
     const askSize = Number(row.bestAskSize);
     const ticker = row.ticker ? String(row.ticker) : prev?.ticker;
+    const bid = row.bestBid != null && row.bestBid > 0 ? Number(row.bestBid) : undefined;
     const askLevels = row.side === "yes"
       ? yesAskLevelsFromNoBids(row.depthNo ?? null, ask, askSize)
       : prev?.askLevels;
@@ -573,6 +594,7 @@ export class MlbMiddleArbPaperSidecar {
       askSize,
       t,
       ...(ticker ? { ticker } : {}),
+      ...(bid != null ? { bid } : {}),
       ...(askLevels?.length ? { askLevels } : {}),
     });
 
@@ -773,6 +795,7 @@ export class MlbMiddleArbPaperSidecar {
 
   end(): void {
     if (this.pollTimer) clearInterval(this.pollTimer);
+    if (this.stateTimer) clearInterval(this.stateTimer);
     if (this.trackTimer) clearTimeout(this.trackTimer);
     this.finishTrack("end");
     this.opts.emit({
@@ -931,6 +954,88 @@ export class MlbMiddleArbPaperSidecar {
       branches: menus,
       topExpectedEdgePa: packageShadow.slice(0, 8),
       confirmPath: "strat2_on_realized_rbi",
+    });
+  }
+
+  /**
+   * Dense game-state sample, once a second, plus the near rung inline.
+   *
+   * Score events alone are far too sparse to reconstruct state offline: a quiet
+   * stretch leaves the last known inning standing for minutes, so a 9th-inning
+   * quote replays as "inning 5". That wrecked the 24 Aug attempt to measure how
+   * many cheap near-line quotes we never look at. Carrying inning, score and
+   * the near rung on a fixed clock makes that question answerable directly.
+   *
+   * Observation only — nothing here can place an order.
+   */
+  private emitGameState(): void {
+    const live = this.latestFeed;
+    const feed = live ?? this.cache?.feed ?? null;
+    if (!feed) return;
+    const period = feed.period ?? null;
+    const inning = parseMlbInning(period);
+    const curTotal = this.scoreAway + this.scoreHome;
+    const near = nearestOverRung(curTotal, kalshiYesTobFromPaperMap(this.kalshiTob));
+    const bid = near
+      ? this.kalshiTob.get(`total_${formatStrikeKey(near.line)}:yes`)?.bid ?? null
+      : null;
+    const t = Date.now();
+
+    this.opts.emit({
+      kind: "mlb_game_state",
+      t,
+      slug: this.opts.eventSlug,
+      inning,
+      period,
+      outs: feed.outs ?? null,
+      live: feed.live,
+      status: feed.status ?? null,
+      final: this.gameFinal,
+      // "cache" means the pregame snapshot — the clock is not trustworthy then.
+      feedSource: live ? "statsapi_poll" : "cache",
+      statsapiPolls: this.statsapiPolls,
+      scoreAway: this.scoreAway,
+      scoreHome: this.scoreHome,
+      curTotal,
+      nearLine: near?.line ?? null,
+      nearAsk: near?.entry.ask ?? null,
+      nearSize: near?.entry.askSize ?? null,
+      nearBid: bid,
+      rungs: this.kalshiTob.size,
+    });
+
+    if (!near || inning == null || inning > EARLY_OVER_MAX_INNING) return;
+    if (!live || !feed.live || this.gameFinal) return;
+    const maxAsk = Number(process.env.MLB_OVER_SOFTBALL_SHADOW_MAX_ASK ?? 0.9);
+    const minSize = Number(process.env.MLB_OVER_SOFTBALL_SHADOW_MIN_SIZE ?? 10);
+    const repeatMs = Number(process.env.MLB_OVER_SOFTBALL_SHADOW_REPEAT_MS ?? 15000);
+    const { ask, askSize } = near.entry;
+    if (!(ask < maxAsk) || !(askSize >= minSize)) return;
+
+    const last = this.lastShadow;
+    if (
+      last
+      && last.line === near.line
+      && Math.abs(last.ask - ask) < 0.01
+      && t - last.t < repeatMs
+    ) return;
+    this.lastShadow = { line: near.line, ask, t };
+
+    this.opts.emit({
+      kind: "mlb_over_softball_shadow",
+      t,
+      slug: this.opts.eventSlug,
+      inning,
+      period,
+      curTotal,
+      line: near.line,
+      ticker: near.entry.ticker,
+      ask,
+      askSize,
+      bid,
+      spread: bid != null ? Number((ask - bid).toFixed(4)) : null,
+      modelEdge: modelEdgePerContract(ask, inning),
+      ...(near.entry.askLevels ? { askLevels: near.entry.askLevels } : {}),
     });
   }
 

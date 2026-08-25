@@ -264,3 +264,132 @@ describe("mlb middle arb paper", () => {
     expect(tob.has("total_4.5:yes")).toBe(true);
   });
 });
+
+describe("game-state heartbeat and shadow scan", () => {
+  function earlyFeed(period: string): FeedSnapshot {
+    return {
+      source: "statsapi",
+      feedId: "1",
+      live: true,
+      scoreHome: 2,
+      scoreAway: 2,
+      period,
+      outs: 1,
+      clock: null,
+      status: "In Progress",
+      rawScoreKey: "2-2",
+      runnersOn: 0,
+      onFirst: false,
+      onSecond: false,
+      onThird: false,
+      battingSide: "away",
+    };
+  }
+
+  function setup(period = "3rd Inning") {
+    const cache = buildMlbMiddleArbEventCache({
+      eventSlug: "mlb-sea-tb-2026-07-16",
+      eventTitle: "Mariners vs. Rays",
+      candidates: [totalCandidate(7.5, 8.5)],
+      shapes: new Map(),
+      feed: earlyFeed(period),
+    });
+    const rows: Record<string, unknown>[] = [];
+    const paper = new MlbMiddleArbPaperSidecar({
+      eventSlug: "mlb-sea-tb-2026-07-16",
+      eventTitle: "Mariners vs. Rays",
+      emit: (r) => rows.push(r),
+    });
+    paper.hydrateForTests(cache, { away: 2, home: 2 });
+    return { paper, rows };
+  }
+
+  const beat = (paper: MlbMiddleArbPaperSidecar) => (paper as any).emitGameState();
+  const kinds = (rows: Record<string, unknown>[], k: string) => rows.filter((r) => r.kind === k);
+
+  it("samples inning, score and the near rung even when nothing is happening", () => {
+    const { paper, rows } = setup();
+    paper.onKalshiLadder({
+      market: "total_4.5", side: "yes", bestAsk: 0.82, bestAskSize: 40, bestBid: 0.8, ticker: "T-4",
+    });
+    beat(paper);
+
+    const state = kinds(rows, "mlb_game_state")[0] as any;
+    expect(state).toMatchObject({
+      inning: 3,
+      curTotal: 4,
+      nearLine: 4.5,
+      nearAsk: 0.82,
+      nearSize: 40,
+      nearBid: 0.8,
+      feedSource: "statsapi_poll",
+    });
+  });
+
+  it("flags a cheap near rung without placing anything", () => {
+    const { paper, rows } = setup();
+    paper.onKalshiLadder({
+      market: "total_4.5", side: "yes", bestAsk: 0.82, bestAskSize: 40, bestBid: 0.8, ticker: "T-4",
+    });
+    beat(paper);
+
+    const shadow = kinds(rows, "mlb_over_softball_shadow")[0] as any;
+    expect(shadow).toMatchObject({ line: 4.5, ask: 0.82, askSize: 40, inning: 3 });
+    expect(shadow.spread).toBeCloseTo(0.02, 6);
+    expect(shadow.modelEdge).toBeGreaterThan(0);
+    expect(kinds(rows, "mlb_over_softball_order")).toHaveLength(0);
+  });
+
+  it("does not repeat a rung that just sits there, but reports a real move", () => {
+    const { paper, rows } = setup();
+    const quoteAt = (ask: number) => paper.onKalshiLadder({
+      market: "total_4.5", side: "yes", bestAsk: ask, bestAskSize: 40, bestBid: ask - 0.02, ticker: "T-4",
+    });
+    quoteAt(0.82);
+    beat(paper);
+    beat(paper);
+    beat(paper);
+    expect(kinds(rows, "mlb_over_softball_shadow")).toHaveLength(1);
+    // Heartbeats keep coming regardless — that is the clock.
+    expect(kinds(rows, "mlb_game_state")).toHaveLength(3);
+
+    quoteAt(0.7);
+    beat(paper);
+    expect(kinds(rows, "mlb_over_softball_shadow")).toHaveLength(2);
+  });
+
+  it("stays quiet on a rich rung, a thin one, and past the fifth", () => {
+    const rich = setup();
+    rich.paper.onKalshiLadder({
+      market: "total_4.5", side: "yes", bestAsk: 0.96, bestAskSize: 900, bestBid: 0.95, ticker: "T-4",
+    });
+    beat(rich.paper);
+    expect(kinds(rich.rows, "mlb_over_softball_shadow")).toHaveLength(0);
+
+    const thin = setup();
+    thin.paper.onKalshiLadder({
+      market: "total_4.5", side: "yes", bestAsk: 0.7, bestAskSize: 2, bestBid: 0.68, ticker: "T-4",
+    });
+    beat(thin.paper);
+    expect(kinds(thin.rows, "mlb_over_softball_shadow")).toHaveLength(0);
+
+    const late = setup("8th Inning");
+    late.paper.onKalshiLadder({
+      market: "total_4.5", side: "yes", bestAsk: 0.7, bestAskSize: 400, bestBid: 0.68, ticker: "T-4",
+    });
+    beat(late.paper);
+    expect(kinds(late.rows, "mlb_over_softball_shadow")).toHaveLength(0);
+    // The clock still ticks in the 8th; only the shadow is gated on inning.
+    expect((kinds(late.rows, "mlb_game_state")[0] as any).inning).toBe(8);
+  });
+
+  it("ignores a rung more than one run above the current total", () => {
+    const { paper, rows } = setup();
+    paper.onKalshiLadder({
+      market: "total_6.5", side: "yes", bestAsk: 0.6, bestAskSize: 500, bestBid: 0.58, ticker: "T-6",
+    });
+    beat(paper);
+    expect((kinds(rows, "mlb_game_state")[0] as any).nearLine).toBeNull();
+    expect(kinds(rows, "mlb_over_softball_shadow")).toHaveLength(0);
+  });
+});

@@ -23,6 +23,9 @@ export type KalshiYesTobEntry = {
   askSize: number;
   ticker: string;
   t?: number;
+  /** Best YES bid, when the feed carried one. A rung quoted with no bid, or a
+   *  spread of tens of cents, is a one-sided book rather than a real price. */
+  bid?: number;
   /** YES ask ladder from depthNo: [yesAskPrice, size], best→worse. */
   askLevels?: Array<[number, number]>;
 };
@@ -290,6 +293,27 @@ type OverSelectInput = {
   kalshiYesTob: ReadonlyMap<number, KalshiYesTobEntry> | Iterable<[number, KalshiYesTobEntry]>;
 };
 
+/**
+ * The YES rung sitting one run or less above `curTotal`, whatever it is priced
+ * at. Deliberately unfiltered: the shadow scanner needs to observe the whole
+ * price distribution, including the 95¢+ quotes the live selector refuses, so
+ * the price policy stays in `selectNextLineOver` rather than here.
+ */
+export function nearestOverRung(
+  curTotal: number,
+  kalshiYesTob: ReadonlyMap<number, KalshiYesTobEntry> | Iterable<[number, KalshiYesTobEntry]>,
+): { line: number; entry: KalshiYesTobEntry } | null {
+  const entries = kalshiYesTob instanceof Map ? kalshiYesTob.entries() : kalshiYesTob;
+  let best: { line: number; entry: KalshiYesTobEntry } | null = null;
+  for (const [line, q] of entries) {
+    const dist = line - curTotal;
+    if (!(dist > 0 && dist <= 1)) continue;
+    if (!q.ticker || !(q.ask > 0) || !(q.askSize > 0)) continue;
+    if (best == null || q.ask < best.entry.ask) best = { line, entry: q };
+  }
+  return best;
+}
+
 /** Cheapest qualifying YES rung sitting within one run of curTotal. */
 function selectNextLineOver(
   input: OverSelectInput,
@@ -371,6 +395,7 @@ export function kalshiYesTobFromPaperMap(
     askSize: number;
     t: number;
     ticker?: string;
+    bid?: number;
     askLevels?: Array<[number, number]>;
   }>,
 ): Map<number, KalshiYesTobEntry> {
@@ -385,6 +410,7 @@ export function kalshiYesTobFromPaperMap(
       askSize: q.askSize,
       ticker: q.ticker,
       t: q.t,
+      ...(q.bid != null ? { bid: q.bid } : {}),
       ...(q.askLevels ? { askLevels: q.askLevels } : {}),
     });
   }

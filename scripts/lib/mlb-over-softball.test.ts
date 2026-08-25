@@ -3,11 +3,61 @@ import {
   earlyOverCategories,
   isMultiRunLateHighAsk,
   kalshiYesTobFromPaperMap,
+  nearestOverRung,
   parseMlbInning,
   planAskWalk,
   selectEarlyOverSoftball,
   yesAskLevelsFromNoBids,
 } from "./mlb-over-softball.js";
+
+describe("nearestOverRung", () => {
+  const rung = (ask: number, askSize = 100, bid?: number) => ({
+    ask,
+    askSize,
+    ticker: `T-${ask}`,
+    ...(bid != null ? { bid } : {}),
+  });
+
+  it("takes the rung within one run and ignores the ones beyond it", () => {
+    const got = nearestOverRung(4, new Map([
+      [3.5, rung(0.99)],
+      [4.5, rung(0.96)],
+      [5.5, rung(0.72)],
+      [6.5, rung(0.55)],
+    ]));
+    expect(got?.line).toBe(4.5);
+    expect(got?.entry.ask).toBe(0.96);
+  });
+
+  it("reports rich quotes the live selector would refuse", () => {
+    // The whole point of the shadow scan is measuring the real distribution,
+    // and 62% of observed rungs sit above 95c.
+    const got = nearestOverRung(7, new Map([[7.5, rung(0.97)]]));
+    expect(got?.entry.ask).toBe(0.97);
+    // ...while the live selector still declines it.
+    expect(selectEarlyOverSoftball({
+      inning: 3,
+      runsDelta: 2,
+      curTotal: 7,
+      kalshiYesTob: new Map([[7.5, rung(0.97)]]),
+    })).toBeNull();
+  });
+
+  it("skips rungs with no size, no ticker or no ask", () => {
+    expect(nearestOverRung(4, new Map([[4.5, rung(0.8, 0)]]))).toBeNull();
+    expect(nearestOverRung(4, new Map([[4.5, { ask: 0.8, askSize: 10, ticker: "" }]]))).toBeNull();
+    expect(nearestOverRung(4, new Map([[4.5, rung(0, 10)]]))).toBeNull();
+  });
+
+  it("carries the bid through so one-sided books are filterable", () => {
+    const got = nearestOverRung(4, new Map([[4.5, rung(0.44, 500, 0.05)]]));
+    expect(got?.entry.bid).toBe(0.05);
+  });
+
+  it("returns nothing when the rung above is unquoted", () => {
+    expect(nearestOverRung(4, new Map([[6.5, rung(0.6)]]))).toBeNull();
+  });
+});
 
 describe("parseMlbInning", () => {
   it("parses common period strings", () => {
