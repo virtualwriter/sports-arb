@@ -8,6 +8,8 @@ min_buy_mid), plus two NYC-only Oleg columns:
              first prediction snapshot; buy $STAKE at same-row mid, hold.
   oleg-edge: at the same snapshot, buy the bin with max (oleg_prob - mid) if
              the edge >= --oleg-edge (else pass). Hold to settle.
+  olegR-*:   same two strategies but with Oleg-R (walk-forward monthly refit
+             + per-month sigma) supplying the forecast distribution.
 
 Oleg conditioning uses official KNYC highs strictly *before* each trade day
 (no lookahead). Requires the central-park-daily-highs store.
@@ -26,7 +28,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from lib.diurnal_got import DiurnalGotTracker
-from lib.oleg import DEFAULT_HIGHS_STORE, forecast_conditioned, load_highs
+from lib.oleg import DEFAULT_HIGHS_STORE, OlegForecast, forecast_conditioned, load_highs
+from lib.oleg_r import OlegRCache
 from lib.weather_cities import get_city, list_cities
 from lib.weather_hourly_hedge_filter import (
     MIN_BUY_MID,
@@ -164,24 +167,23 @@ def open_snapshot(preds: list[dict]) -> dict | None:
 
 
 def oleg_day(
-    day: str,
+    fc: OlegForecast,
     preds: list[dict],
     settle: float | None,
-    highs: dict[date, float],
     *,
     stake: float,
-    sigma: float | None,
     edge_min: float,
     min_buy_mid: float,
 ) -> tuple[float | None, str, float | None, str]:
-    """Return (hold_pnl, hold_desc, edge_pnl, edge_desc). None pnl = no trade."""
+    """Score hold/edge for one forecast distribution.
+
+    Returns (hold_pnl, hold_desc, edge_pnl, edge_desc). None pnl = no trade.
+    """
     snap = open_snapshot(preds)
     if snap is None or settle is None:
         return None, "no_snapshot", None, "no_snapshot"
     di: dict = snap["daily_implied"]
     bins = list(di)
-    d = day_key_to_date(day)
-    fc = forecast_conditioned(d, {k: v for k, v in highs.items() if k < d}, sigma_f=sigma)
     probs = fc.bin_probs(bins)
 
     def settle_hit(b: str) -> bool:
@@ -242,24 +244,31 @@ def main() -> int:
     except FileNotFoundError:
         highs = {}
         print(f"[warn] no highs store at {args.highs_store}; Oleg columns disabled")
+    oleg_r_cache = OlegRCache(highs) if highs else None
 
     stake = args.stake
     print(
         f"PAPER scoreboard {args.frm}..{args.to} stake=${stake:.0f}/city "
         f"min_buy_mid={MIN_BUY_MID} oleg_sigma={args.oleg_sigma or 'model'} "
-        f"oleg_edge>={args.oleg_edge}"
+        f"oleg_edge>={args.oleg_edge} (olegR: monthly refit + monthly sigma)"
     )
     print("(settle = official if present else provisional obs high; Oleg = NYC only)")
     print()
     hdr = (
         f"{'day':>8} {'city':>8} {'set':>5} {'live$':>8} {'aware$':>8} {'GOT$':>8} "
-        f"{'olegH$':>8} {'olegE$':>8}  oleg detail"
+        f"{'olegH$':>8} {'olegE$':>8} {'olgRH$':>8} {'olgRE$':>8}  oleg detail"
     )
     print(hdr)
     print("-" * len(hdr))
 
-    tot = {k: 0.0 for k in ("live", "aware", "got", "oleg_hold", "oleg_edge")}
-    n_oleg_hold = n_oleg_edge = 0
+    tot = {
+        k: 0.0
+        for k in (
+            "live", "aware", "got",
+            "oleg_hold", "oleg_edge", "oleg_r_hold", "oleg_r_edge",
+        )
+    }
+    n_trades = dict.fromkeys(("oleg_hold", "oleg_edge", "oleg_r_hold", "oleg_r_edge"), 0)
     by_day = {d: dict.fromkeys(tot, 0.0) for d in days}
     missing: list[tuple[str, str, str]] = []
 
@@ -287,24 +296,40 @@ def main() -> int:
                 tot[k] += r.pnl
                 by_day[day][k] += r.pnl
 
-            oleg_cols = f"{'':>8} {'':>8}  "
+            oleg_cols = f"{'':>8} {'':>8} {'':>8} {'':>8}  "
             if city_key == "nyc" and highs:
-                hp, hd, ep, ed = oleg_day(
-                    day, preds, settle, highs,
-                    stake=stake, sigma=args.oleg_sigma,
-                    edge_min=args.oleg_edge, min_buy_mid=MIN_BUY_MID,
+                d_date = day_key_to_date(day)
+                prior = {k: v for k, v in highs.items() if k < d_date}
+                fc_o = forecast_conditioned(d_date, prior, sigma_f=args.oleg_sigma)
+                results = {}
+                fcs = {"oleg": fc_o}
+                if oleg_r_cache is not None:
+                    try:
+                        fcs["oleg_r"] = oleg_r_cache.forecast(d_date)
+                    except ValueError:
+                        pass
+                for name, fc in fcs.items():
+                    hp, hd, ep, ed = oleg_day(
+                        fc, preds, settle,
+                        stake=stake, edge_min=args.oleg_edge, min_buy_mid=MIN_BUY_MID,
+                    )
+                    results[name] = (hp, hd, ep, ed)
+                    for suffix, pnl in (("hold", hp), ("edge", ep)):
+                        key = f"{name}_{suffix}"
+                        if pnl is not None:
+                            tot[key] += pnl
+                            by_day[day][key] += pnl
+                            n_trades[key] += 1
+
+                def fmt(v: float | None) -> str:
+                    return f"{v:8.2f}" if v is not None else f"{'—':>8}"
+
+                hp, hd, ep, ed = results["oleg"]
+                rhp, rhd, rep, red = results.get("oleg_r", (None, "-", None, "-"))
+                oleg_cols = (
+                    f"{fmt(hp)} {fmt(ep)} {fmt(rhp)} {fmt(rep)}  "
+                    f"H:{hd} E:{ed} | R H:{rhd} E:{red}"
                 )
-                if hp is not None:
-                    tot["oleg_hold"] += hp
-                    by_day[day]["oleg_hold"] += hp
-                    n_oleg_hold += 1
-                if ep is not None:
-                    tot["oleg_edge"] += ep
-                    by_day[day]["oleg_edge"] += ep
-                    n_oleg_edge += 1
-                hp_s = f"{hp:8.2f}" if hp is not None else f"{'—':>8}"
-                ep_s = f"{ep:8.2f}" if ep is not None else f"{'—':>8}"
-                oleg_cols = f"{hp_s} {ep_s}  H:{hd} E:{ed}"
 
             sett_s = f"{settle:.0f}" if settle is not None else "?"
             print(
@@ -316,17 +341,22 @@ def main() -> int:
     print(
         f"{'TOTAL':>8} {'':>8} {'':>5} "
         f"{tot['live']:8.2f} {tot['aware']:8.2f} {tot['got']:8.2f} "
-        f"{tot['oleg_hold']:8.2f} {tot['oleg_edge']:8.2f}"
-        f"  (oleg-hold n={n_oleg_hold}, oleg-edge trades={n_oleg_edge})"
+        f"{tot['oleg_hold']:8.2f} {tot['oleg_edge']:8.2f} "
+        f"{tot['oleg_r_hold']:8.2f} {tot['oleg_r_edge']:8.2f}"
+        f"  (trades: " + ", ".join(f"{k}={v}" for k, v in n_trades.items()) + ")"
     )
     print()
     print("By day:")
-    print(f"{'day':>8} {'live$':>8} {'aware$':>8} {'GOT$':>8} {'olegH$':>8} {'olegE$':>8}")
+    print(
+        f"{'day':>8} {'live$':>8} {'aware$':>8} {'GOT$':>8} "
+        f"{'olegH$':>8} {'olegE$':>8} {'olgRH$':>8} {'olgRE$':>8}"
+    )
     for day in days:
         d = by_day[day]
         print(
             f"{day:>8} {d['live']:8.2f} {d['aware']:8.2f} {d['got']:8.2f} "
-            f"{d['oleg_hold']:8.2f} {d['oleg_edge']:8.2f}"
+            f"{d['oleg_hold']:8.2f} {d['oleg_edge']:8.2f} "
+            f"{d['oleg_r_hold']:8.2f} {d['oleg_r_edge']:8.2f}"
         )
     if missing:
         print()

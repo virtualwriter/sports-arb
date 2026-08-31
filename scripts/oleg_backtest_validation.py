@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Validate Oleg frozen vs one-step-ahead conditioned mode on real KNYC highs.
+"""Validate Oleg variants against real KNYC highs.
 
 Replays Jan 1 2026 .. latest obs, comparing:
   - frozen:      bare Fourier curve (what the workbook backtest measured)
   - conditioned: ARMA(1,2) one-step-ahead on official daily highs
+  - oleg_r:      walk-forward monthly refit (Fourier+ARMA on all prior obs)
+                 with per-month sigma
 
 Usage:
   PYTHONPATH=scripts python3 scripts/oleg_backtest_validation.py
@@ -23,6 +25,7 @@ from lib.oleg import (
     forecast_frozen,
     load_highs,
 )
+from lib.oleg_r import OlegRCache
 
 
 def _mae(errs: list[float]) -> float:
@@ -33,16 +36,19 @@ def _rmse(errs: list[float]) -> float:
     return math.sqrt(sum(e * e for e in errs) / len(errs))
 
 
-def score(days: list[date], highs: dict[date, float], label: str) -> None:
-    fro, con = [], []
+def score(
+    days: list[date], highs: dict[date, float], cache: OlegRCache, label: str
+) -> None:
+    fro, con, olr = [], [], []
     for d in days:
         actual = highs[d]
         fro.append(forecast_frozen(d).mean_f - actual)
         con.append(forecast_conditioned(d, highs).mean_f - actual)
+        olr.append(cache.forecast(d).mean_f - actual)
     n = len(days)
     print(f"\n{label} (n={n})")
     print(f"  {'':>12} {'MAE':>6} {'RMSE':>6} {'bias':>6} {'<=1F':>6} {'<=2F':>6} {'<=5F':>6}")
-    for name, errs in (("frozen", fro), ("conditioned", con)):
+    for name, errs in (("frozen", fro), ("conditioned", con), ("oleg_r", olr)):
         w1 = sum(1 for e in errs if abs(e) <= 1.0) / n
         w2 = sum(1 for e in errs if abs(e) <= 2.0) / n
         w5 = sum(1 for e in errs if abs(e) <= 5.0) / n
@@ -64,13 +70,14 @@ def main() -> int:
         return 1
 
     print(f"store: {args.store} ({len(highs)} days, latest {max(highs)})")
-    score(days_2026, highs, "Jan 1 2026 .. latest")
+    cache = OlegRCache(highs)
+    score(days_2026, highs, cache, "Jan 1 2026 .. latest")
     summer = [d for d in days_2026 if d >= date(2026, 6, 1)]
     if summer:
-        score(summer, highs, "Jun 1 2026 .. latest")
+        score(summer, highs, cache, "Jun 1 2026 .. latest")
     aug = [d for d in days_2026 if d >= date(2026, 8, 1)]
     if aug:
-        score(aug, highs, "Aug 2026")
+        score(aug, highs, cache, "Aug 2026")
 
     # Empirical conditioned-innovation sigma (useful to calibrate bin probs
     # tighter than the model's full-year sigma≈6.7).
