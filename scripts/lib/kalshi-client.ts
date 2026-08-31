@@ -53,12 +53,41 @@ export type KalshiEvent = {
   no_sub_title?: string;
   expected_expiration_time?: string;
   status?: string;
+  exchange_index?: number;
   markets?: KalshiMarket[];
 };
+
+/**
+ * Ticker → matching-engine shard, learned from market data as we discover
+ * rungs. Collateral lives per shard and an order sent to the wrong one is
+ * rejected outright (`market_not_found` on 0, `user_not_found` on an unfunded
+ * shard), so orders must name their shard. Passing `-1` makes Kalshi resolve
+ * it from the ticker, which costs a round of internal routing — worth avoiding
+ * on a path where the whole edge is measured in milliseconds.
+ */
+const marketShards = new Map<string, number>();
+
+export function rememberMarketShard(ticker: string, exchangeIndex: number | undefined): void {
+  if (ticker && Number.isInteger(exchangeIndex)) marketShards.set(ticker, exchangeIndex as number);
+}
+
+/** Known shard for `ticker`, or `-1` to let Kalshi auto-route. */
+export function shardForTicker(ticker: string): number {
+  return marketShards.get(ticker) ?? -1;
+}
+
+function noteEventShards(event: KalshiEvent): void {
+  for (const market of event.markets ?? []) {
+    rememberMarketShard(market.ticker, market.exchange_index ?? event.exchange_index);
+  }
+}
 
 export type KalshiMarket = {
   ticker: string;
   event_ticker: string;
+  /** Matching-engine shard holding this market. Baseball and tennis events
+   *  created from 24 Aug 2026 live on shard 3; everything older is on 0. */
+  exchange_index?: number;
   market_type?: string;
   title?: string;
   subtitle?: string;
@@ -269,7 +298,9 @@ export class KalshiClient {
     if (params.with_nested_markets) qs.set("with_nested_markets", "true");
     if (params.limit) qs.set("limit", String(params.limit));
     if (params.cursor) qs.set("cursor", params.cursor);
-    return this.get<{ events: KalshiEvent[]; cursor?: string }>(`/events?${qs.toString()}`);
+    const resp = await this.get<{ events: KalshiEvent[]; cursor?: string }>(`/events?${qs.toString()}`);
+    for (const event of resp.events ?? []) noteEventShards(event);
+    return resp;
   }
 
   async listMarkets(params: {
@@ -285,7 +316,9 @@ export class KalshiClient {
     if (params.status) qs.set("status", params.status);
     if (params.limit) qs.set("limit", String(params.limit));
     if (params.cursor) qs.set("cursor", params.cursor);
-    return this.get<{ markets: KalshiMarket[]; cursor?: string }>(`/markets?${qs.toString()}`);
+    const resp = await this.get<{ markets: KalshiMarket[]; cursor?: string }>(`/markets?${qs.toString()}`);
+    for (const market of resp.markets ?? []) rememberMarketShard(market.ticker, market.exchange_index);
+    return resp;
   }
 
   async getOrderbook(ticker: string, depth: number = 10): Promise<KalshiOrderbook> {
@@ -299,6 +332,7 @@ export class KalshiClient {
     if (withNestedMarkets) qs.set("with_nested_markets", "true");
     try {
       const resp = await this.get<{ event?: KalshiEvent }>(`/events/${encodeURIComponent(eventTicker)}?${qs.toString()}`);
+      if (resp.event) noteEventShards(resp.event);
       return resp.event ?? null;
     } catch (err: any) {
       const msg = err?.message ?? String(err);
@@ -324,6 +358,7 @@ export class KalshiClient {
     self_trade_prevention_type?: "taker_at_cross" | "maker";
     client_order_id?: string;
     post_only?: boolean;
+    exchange_index?: number;
   }): Promise<{
     order_id: string;
     client_order_id?: string;
@@ -344,6 +379,7 @@ export class KalshiClient {
       self_trade_prevention_type: order.self_trade_prevention_type ?? "taker_at_cross",
       ...(order.client_order_id ? { client_order_id: order.client_order_id } : {}),
       ...(order.post_only !== undefined ? { post_only: order.post_only } : {}),
+      exchange_index: order.exchange_index ?? shardForTicker(order.ticker),
     });
   }
 

@@ -11,7 +11,7 @@
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import type { KalshiClient } from "./kalshi-client.js";
+import { shardForTicker, type KalshiClient } from "./kalshi-client.js";
 import { killSwitchActive } from "./orphan-monitor.js";
 import {
   isMultiRunLateHighAsk,
@@ -486,6 +486,7 @@ export async function executeMlbOverSoftball(
     price: Number(limitPrice.toFixed(4)),
     time_in_force: tif,
     client_order_id: clientOrderId,
+    exchange_index: shardForTicker(c.ticker),
   };
   log(
     `!!! LIVE FIRE ${ctx.slug} over${c.line} tob=${c.ask.toFixed(2)}x${Math.floor(c.askSize)} `
