@@ -241,6 +241,28 @@ export class KalshiClient {
     return this.request<T>("GET", path);
   }
 
+  async delete<T>(path: string): Promise<T> {
+    return this.request<T>("DELETE", path);
+  }
+
+  /** Per-shard cash. `balance_breakdown` always lists every shard. */
+  async getBalance(exchangeIndex?: number): Promise<{
+    balance: number;
+    balance_breakdown?: Array<{ balance: string; exchange_index: number }>;
+  }> {
+    const qs = exchangeIndex == null ? "" : `?exchange_index=${exchangeIndex}`;
+    return this.get(`/portfolio/balance${qs}`);
+  }
+
+  /** V2 cancel. The v1 `DELETE /portfolio/orders/{id}` now answers 410. */
+  async cancelOrderV2(orderId: string, exchangeIndex?: number): Promise<{
+    order_id: string;
+    reduced_by?: string;
+  }> {
+    const qs = exchangeIndex == null ? "" : `?exchange_index=${exchangeIndex}`;
+    return this.delete(`/portfolio/events/orders/${encodeURIComponent(orderId)}${qs}`);
+  }
+
   private async request<T>(method: string, path: string, body?: unknown, attempt = 0): Promise<T> {
     // Per Kalshi docs ("Request Signing"): sign the full request path from the
     // API root WITHOUT query parameters. So for
