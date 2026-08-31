@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Central Park high fetch (07:10 UTC, after NWS CLI issuance)
+
+[Timer]
+OnCalendar=*-*-* 07:10:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
