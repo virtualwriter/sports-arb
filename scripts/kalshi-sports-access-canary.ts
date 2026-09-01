@@ -31,7 +31,14 @@ const DATA_DIR = resolve(
     ?? process.env.SPORTS_ARB_STATE_DIR
     ?? join(process.cwd(), "data"),
 );
-const LOG_PATH = join(DATA_DIR, "kalshi-sports-access-canary.jsonl");
+/**
+ * Pinned separately from SPORTS_ARB_DATA_DIR on purpose. This runs with two
+ * EnvironmentFiles that both define that variable, and systemd lets the file
+ * win over the unit's own `Environment=`, so the health history silently split
+ * across two directories — one of which is swept by the daily logrotate.
+ */
+const LOG_PATH = process.env.KALSHI_CANARY_LOG
+  ?? join(DATA_DIR, "kalshi-sports-access-canary.jsonl");
 
 type Verdict = "tradeable" | "blocked" | "unknown";
 
