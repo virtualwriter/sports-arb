@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily weather scoreboard at 08:05 UTC (after highs fetch, post-LA close)
+
+[Timer]
+OnCalendar=*-*-* 08:05:00 UTC
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

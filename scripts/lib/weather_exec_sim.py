@@ -48,6 +48,9 @@ class ExecOpts:
     # Distrust books whose top-of-book is further than this from the
     # same-row GOT mid (stale far-OTM snapshots vs fresh NBBO). 0 disables.
     coherence_slack: float = 0.15
+    # Require this many contracts of resting YES bid on the *target* bin
+    # before opening/rolling into it (exit-ability gate). 0 disables.
+    min_entry_bid_depth: float = 0.0
 
 
 def fee_per_contract(price: float, rate: float = 0.07) -> float:
@@ -331,6 +334,11 @@ def simulate_exec_roll(
         ):
             res.skip("book_incoherent_vs_mid")
             continue
+        if o.min_entry_bid_depth > 0:
+            tgt_bids = books.yes_bids(ticker, recv, o.book_max_age_s)
+            if sum(s for _, s in tgt_bids) + 1e-9 < o.min_entry_bid_depth:
+                res.skip("entry_bid_depth_thin")
+                continue
 
         if held_bin is None:
             # ---- open

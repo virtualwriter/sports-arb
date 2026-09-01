@@ -273,7 +273,7 @@ def main() -> int:
     print()
     hdr = (
         f"{'day':>8} {'city':>8} {'set':>5} {'live$':>8} {'aware$':>8} {'GOT$':>8} "
-        f"{'gotX$':>8} "
+        f"{'gotX$':>8} {'gotC$':>8} "
         f"{'olegH$':>8} {'olegE$':>8} {'olgRH$':>8} {'olgRE$':>8}  oleg detail"
     )
     print(hdr)
@@ -282,7 +282,7 @@ def main() -> int:
     tot = {
         k: 0.0
         for k in (
-            "live", "aware", "got", "got_exec",
+            "live", "aware", "got", "got_exec", "got_cand",
             "oleg_hold", "oleg_edge", "oleg_r_hold", "oleg_r_edge",
         )
     }
@@ -315,7 +315,9 @@ def main() -> int:
                 by_day[day][k] += r.pnl
 
             # Exec-aware GOT: real books, spreads, fees, poll cadence.
-            gx_s = "        "
+            # gotX = deployed daemon defaults; gotC = grid-winner candidate
+            # (Aug15-31 grid: mid>=0.20, max 1 roll/day, roll notional >=$15).
+            gx_s = gc_s = "        "
             gtp = got_tape_path(city_key, day)
             if gtp is not None:
                 city = get_city(city_key)
@@ -329,6 +331,18 @@ def main() -> int:
                     tot["got_exec"] += gx.pnl
                     by_day[day]["got_exec"] += gx.pnl
                     gx_s = f"{gx.pnl:8.2f}"
+                    gc = simulate_exec_roll(
+                        gstream, gbooks, city.daily_series, day, settle,
+                        ExecOpts(
+                            stake_usd=stake,
+                            min_buy_mid=0.20,
+                            max_rolls_per_day=1,
+                            min_roll_notional_usd=15.0,
+                        ),
+                    )
+                    tot["got_cand"] += gc.pnl
+                    by_day[day]["got_cand"] += gc.pnl
+                    gc_s = f"{gc.pnl:8.2f}"
 
             oleg_cols = f"{'':>8} {'':>8} {'':>8} {'':>8}  "
             if city_key == "nyc" and highs:
@@ -368,14 +382,14 @@ def main() -> int:
             sett_s = f"{settle:.0f}" if settle is not None else "?"
             print(
                 f"{day:>8} {city_key:>8} {sett_s:>5} "
-                f"{rl.pnl:8.2f} {ra.pnl:8.2f} {rg.pnl:8.2f} {gx_s} {oleg_cols}"
+                f"{rl.pnl:8.2f} {ra.pnl:8.2f} {rg.pnl:8.2f} {gx_s} {gc_s} {oleg_cols}"
             )
 
     print("-" * len(hdr))
     print(
         f"{'TOTAL':>8} {'':>8} {'':>5} "
         f"{tot['live']:8.2f} {tot['aware']:8.2f} {tot['got']:8.2f} "
-        f"{tot['got_exec']:8.2f} "
+        f"{tot['got_exec']:8.2f} {tot['got_cand']:8.2f} "
         f"{tot['oleg_hold']:8.2f} {tot['oleg_edge']:8.2f} "
         f"{tot['oleg_r_hold']:8.2f} {tot['oleg_r_edge']:8.2f}"
         f"  (trades: " + ", ".join(f"{k}={v}" for k, v in n_trades.items()) + ")"
@@ -383,14 +397,14 @@ def main() -> int:
     print()
     print("By day:")
     print(
-        f"{'day':>8} {'live$':>8} {'aware$':>8} {'GOT$':>8} {'gotX$':>8} "
+        f"{'day':>8} {'live$':>8} {'aware$':>8} {'GOT$':>8} {'gotX$':>8} {'gotC$':>8} "
         f"{'olegH$':>8} {'olegE$':>8} {'olgRH$':>8} {'olgRE$':>8}"
     )
     for day in days:
         d = by_day[day]
         print(
             f"{day:>8} {d['live']:8.2f} {d['aware']:8.2f} {d['got']:8.2f} "
-            f"{d['got_exec']:8.2f} "
+            f"{d['got_exec']:8.2f} {d['got_cand']:8.2f} "
             f"{d['oleg_hold']:8.2f} {d['oleg_edge']:8.2f} "
             f"{d['oleg_r_hold']:8.2f} {d['oleg_r_edge']:8.2f}"
         )

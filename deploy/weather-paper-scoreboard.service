@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily weather paper scoreboard (live/aware/GOT/gotX/Oleg shadow)
+Wants=network-online.target
+After=network-online.target central-park-daily-high.service
+
+[Service]
+Type=oneshot
+User=sports-arb
+Group=sports-arb
+WorkingDirectory=/opt/sports-arb
+ExecStart=/usr/bin/bash /opt/sports-arb/scripts/run-daily-weather-scoreboard.sh
