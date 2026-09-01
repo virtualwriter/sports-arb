@@ -30,6 +30,12 @@ from zoneinfo import ZoneInfo
 from lib.diurnal_got import DiurnalGotTracker
 from lib.oleg import DEFAULT_HIGHS_STORE, OlegForecast, forecast_conditioned, load_highs
 from lib.oleg_r import OlegRCache
+from lib.weather_exec_sim import (
+    BookTape,
+    ExecOpts,
+    got_stream_from_tape,
+    simulate_exec_roll,
+)
 from lib.weather_cities import get_city, list_cities
 from lib.weather_hourly_hedge_filter import (
     MIN_BUY_MID,
@@ -157,6 +163,17 @@ def rebuild_got(city_key: str, tape: dict) -> list[dict]:
     return stream
 
 
+def got_tape_path(city_key: str, day: str) -> Path | None:
+    city = get_city(city_key)
+    fk = "chi" if city.key == "chicago" else city.key
+    name = f"{fk}-diurnal-got-{day.lower()}-monitor.jsonl"
+    for d in (Path("/opt/sports-arb/.tmp"), Path(".tmp")):
+        for cand in (d / name, d / (name + ".gz")):
+            if cand.exists():
+                return cand
+    return None
+
+
 def open_snapshot(preds: list[dict]) -> dict | None:
     """First prediction row with a usable daily_implied strip."""
     for p in preds:
@@ -256,6 +273,7 @@ def main() -> int:
     print()
     hdr = (
         f"{'day':>8} {'city':>8} {'set':>5} {'live$':>8} {'aware$':>8} {'GOT$':>8} "
+        f"{'gotX$':>8} "
         f"{'olegH$':>8} {'olegE$':>8} {'olgRH$':>8} {'olgRE$':>8}  oleg detail"
     )
     print(hdr)
@@ -264,7 +282,7 @@ def main() -> int:
     tot = {
         k: 0.0
         for k in (
-            "live", "aware", "got",
+            "live", "aware", "got", "got_exec",
             "oleg_hold", "oleg_edge", "oleg_r_hold", "oleg_r_edge",
         )
     }
@@ -295,6 +313,22 @@ def main() -> int:
             for k, r in (("live", rl), ("aware", ra), ("got", rg)):
                 tot[k] += r.pnl
                 by_day[day][k] += r.pnl
+
+            # Exec-aware GOT: real books, spreads, fees, poll cadence.
+            gx_s = "        "
+            gtp = got_tape_path(city_key, day)
+            if gtp is not None:
+                city = get_city(city_key)
+                gstream = got_stream_from_tape(gtp, poll_ms=2000)
+                if gstream:
+                    gbooks = BookTape.from_weather_tape(p, city.daily_series)
+                    gx = simulate_exec_roll(
+                        gstream, gbooks, city.daily_series, day, settle,
+                        ExecOpts(stake_usd=stake),
+                    )
+                    tot["got_exec"] += gx.pnl
+                    by_day[day]["got_exec"] += gx.pnl
+                    gx_s = f"{gx.pnl:8.2f}"
 
             oleg_cols = f"{'':>8} {'':>8} {'':>8} {'':>8}  "
             if city_key == "nyc" and highs:
@@ -334,13 +368,14 @@ def main() -> int:
             sett_s = f"{settle:.0f}" if settle is not None else "?"
             print(
                 f"{day:>8} {city_key:>8} {sett_s:>5} "
-                f"{rl.pnl:8.2f} {ra.pnl:8.2f} {rg.pnl:8.2f} {oleg_cols}"
+                f"{rl.pnl:8.2f} {ra.pnl:8.2f} {rg.pnl:8.2f} {gx_s} {oleg_cols}"
             )
 
     print("-" * len(hdr))
     print(
         f"{'TOTAL':>8} {'':>8} {'':>5} "
         f"{tot['live']:8.2f} {tot['aware']:8.2f} {tot['got']:8.2f} "
+        f"{tot['got_exec']:8.2f} "
         f"{tot['oleg_hold']:8.2f} {tot['oleg_edge']:8.2f} "
         f"{tot['oleg_r_hold']:8.2f} {tot['oleg_r_edge']:8.2f}"
         f"  (trades: " + ", ".join(f"{k}={v}" for k, v in n_trades.items()) + ")"
@@ -348,13 +383,14 @@ def main() -> int:
     print()
     print("By day:")
     print(
-        f"{'day':>8} {'live$':>8} {'aware$':>8} {'GOT$':>8} "
+        f"{'day':>8} {'live$':>8} {'aware$':>8} {'GOT$':>8} {'gotX$':>8} "
         f"{'olegH$':>8} {'olegE$':>8} {'olgRH$':>8} {'olgRE$':>8}"
     )
     for day in days:
         d = by_day[day]
         print(
             f"{day:>8} {d['live']:8.2f} {d['aware']:8.2f} {d['got']:8.2f} "
+            f"{d['got_exec']:8.2f} "
             f"{d['oleg_hold']:8.2f} {d['oleg_edge']:8.2f} "
             f"{d['oleg_r_hold']:8.2f} {d['oleg_r_edge']:8.2f}"
         )
