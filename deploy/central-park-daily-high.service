@@ -1,0 +1,11 @@
+[Unit]
+Description=Fetch NYC Central Park official daily highs (IEM CLI) for Oleg
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=sports-arb
+Group=sports-arb
+WorkingDirectory=/opt/sports-arb
+ExecStart=/usr/bin/python3 /opt/sports-arb/scripts/fetch_central_park_daily_high.py
