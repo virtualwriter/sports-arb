@@ -4,6 +4,16 @@ Reasoning about glob prefixes is not enough: `football-ladder-race-*` and
 `ladder-lag-race-*` are one careless wildcard apart, and MLB is live money.
 This plants decoys of both kinds in a temp dir and asserts each pipeline's
 real globs match only its own.
+
+Three consumers share the recorder data dir and all use the same fnmatch
+whole-basename semantics, so the patterns below cover every one:
+  collect-mlb-fire-samples.py / collect-mlb-softballs.py  (Python glob)
+  collect-football-samples.py / compact-football-captures.py  (Python glob)
+  /usr/local/bin/sports-arb-compress-recorder.sh  (shell `find -name`,
+      every 3h — a false match there would gzip a football capture
+      mid-game, since games run past its 180-minute threshold)
+
+Re-run this after touching any of those patterns.
 """
 import glob
 import os
