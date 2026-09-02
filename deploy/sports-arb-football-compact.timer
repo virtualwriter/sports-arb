@@ -1,0 +1,11 @@
+[Unit]
+Description=Compact football captures daily
+
+[Timer]
+# 09:30 UTC (5:30 ET): after the MLB fire-collect at 08:30 and well clear of
+# any west-coast night game still recording.
+OnCalendar=*-*-* 09:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

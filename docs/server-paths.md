@@ -25,6 +25,27 @@ sports-arb daemon governance script must not disable these units.
 - Hourly trader timer: `polymarket-trader.timer`
 - Production wrapper path: `/usr/local/bin/run-polymarket-trader`
 
+## Kalshi NYC weather recorder (VPS)
+
+Always-on WS + REST tape for `KXTEMPNYCH` hourlies and `KXHIGHNY` /
+`KXLOWNY` dailies (books with quote sizes, taker/maker trades, METAR, TWC):
+
+- Script: `scripts/kalshi-nyc-weather-tracker.ts` (`npm run weather:kalshi-nyc`)
+- Unit: `deploy/kalshi-nyc-weather-tracker.service` → `kalshi-nyc-weather-tracker.service`
+- Data: `/var/lib/sports-arb/data/weather/weather-kalshi-nyc-YYYY-MM-DD.jsonl`
+- Env: `/etc/sports-arb.env` + `/etc/kalshi.env` (WS needs Kalshi API key)
+
+Interactive **current-hour desk** (SSH/tmux — live books, METAR/TWC/:51
+alerts, thermometer → +EV recos, confirm-to-trade):
+
+- Script: `scripts/kalshi-nyc-hourly-desk.ts` (`npm run weather:hourly-desk`)
+- Launch (root loads `/etc/sports-arb.env`, then drops to `sports-arb`):
+  `sudo bash /opt/sports-arb/scripts/launch-hourly-desk.sh`
+- Live orders: `sudo WEATHER_HOURLY_LIVE=1 bash /opt/sports-arb/scripts/launch-hourly-desk.sh`
+  (still prompts `y/N` before each send; default is dry-run)
+- Order log: `/var/lib/sports-arb/data/weather/hourly-desk-orders-YYYY-MM-DD.jsonl`
+- Commands: `temp 74.2`, `books`, `buy 1`, `size 10`, `sigma 0.7`, `bias 0`, `status`
+
 ## MLB daily recorder pipeline (VPS)
 
 Runs on the Dublin VPS (`root@72.11.157.79`), isolated from the live daemon
@@ -45,6 +66,30 @@ checkout so deploys/restarts don't interact:
   `deploy/sports-arb-mlb-fire-collect.*`
 - Redeploy: rsync `scripts/`, `package.json`, and the two model JSONs, then
   `npm install --omit=dev` in `/opt/sports-arb-recorder`
+
+## Football recorder pipeline (VPS)
+
+NFL + college football total-points ladders, recorded to find a football
+analogue of the MLB next-line over. Shares the recorder checkout and data dir
+with the MLB pipeline.
+
+- Recorder: `scripts/football-ladder-race.ts`, one process per game
+  (`FLR_LEAGUE=nfl|ncaaf`, `FLR_ESPN_EVENT=<espn id>`)
+- Kalshi series: `KXNFLTOTAL` / `KXNCAAFTOTAL`, matched to a game by event
+  title; football sits on **exchange shard 0**, not the sports shard 3
+- Game state: ESPN scoreboard (no key). Its edge 403s unknown user agents, so
+  callers claim to be `curl/8.7.1`; responses are cached to
+  `$TMPDIR/sports-arb-espn` for 2.5s so co-located recorders share one fetch
+- Odds/fast score: bwin **sportId 11** (American Football)
+- Data: `/var/lib/sports-arb-recorder/data/football-ladder-race-<slug>-<ts>.jsonl`,
+  slug `<league>-<away>-<home>-<date>` (e.g. `ncaaf-uapb-miz-2026-09-03`)
+- `sports-arb-football-slate-sweep.timer` — every 15 min, launches one
+  `flr-<slug>.service` per game within 45 min of kickoff. Capped by
+  `FB_SWEEP_MAX_CONCURRENT` (12) and a `FB_SWEEP_MIN_FREE_MB` (700) floor that
+  protects the MLB daemon; recorders run with a 96 MB Node heap (~56 MB RSS)
+- `sports-arb-football-compact.timer` — 09:30 UTC, gzips finished captures and
+  prunes archives older than `FOOTBALL_RETAIN_DAYS` (45)
+- Recorders self-exit ~2 min after the final whistle; the sweep reaps stragglers
 
 ## Dublin / Ireland
 

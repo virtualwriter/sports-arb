@@ -74,20 +74,30 @@ function classifyBwinMarket(name: string): "moneyline" | "total" | "spread" | "o
   return "other";
 }
 
-/** Cheapest quoted rung strictly above the running total, within `window` points. */
+type NearRung = { line: number; dist: number; ask: number; askSize: number; bid: number; ticker: string };
+
+/**
+ * The lowest quoted strike strictly above the running total — the next line
+ * the game actually has to cross, and the direct analogue of the MLB
+ * next-line over.
+ *
+ * Selecting by distance rather than by price matters here. Over-prices fall
+ * monotonically as the strike rises, so the *cheapest* rung above the total is
+ * always the furthest one out: on a 0-0 game that would record the 82.5
+ * lottery ticket instead of the 40.5 near-certainty we care about.
+ */
 function nearestOverRung(
   curTotal: number,
   quotes: Map<number, { yesAsk: number; yesAskSize: number; yesBid: number }>,
   rungs: Map<number, string>,
-  window: number,
-): { line: number; ask: number; askSize: number; bid: number; ticker: string } | null {
-  let best: { line: number; ask: number; askSize: number; bid: number; ticker: string } | null = null;
+): NearRung | null {
+  let best: NearRung | null = null;
   for (const [line, q] of quotes) {
     const dist = line - curTotal;
-    if (!(dist > 0 && dist <= window)) continue;
+    if (!(dist > 0)) continue;
     if (!(q.yesAsk > 0) || !(q.yesAskSize > 0)) continue;
-    if (best == null || q.yesAsk < best.ask) {
-      best = { line, ask: q.yesAsk, askSize: q.yesAskSize, bid: q.yesBid, ticker: rungs.get(line) ?? "" };
+    if (best == null || dist < best.dist) {
+      best = { line, dist, ask: q.yesAsk, askSize: q.yesAskSize, bid: q.yesBid, ticker: rungs.get(line) ?? "" };
     }
   }
   return best;
@@ -261,7 +271,7 @@ async function main(): Promise<void> {
     if (!snap) return;
     const curTotal = snap.scoreAway + snap.scoreHome;
     const quotes = feed.getQuotes();
-    const near = nearestOverRung(curTotal, quotes as any, rungs, Number(process.env.FLR_NEAR_WINDOW ?? 10));
+    const near = nearestOverRung(curTotal, quotes as any, rungs);
     emit({
       kind: "football_game_state",
       live: snap.live,
@@ -278,6 +288,7 @@ async function main(): Promise<void> {
       down: snap.down,
       distance: snap.distance,
       nearLine: near?.line ?? null,
+      nearDist: near?.dist ?? null,
       nearAsk: near?.ask ?? null,
       nearSize: near?.askSize ?? null,
       nearBid: near?.bid ?? null,

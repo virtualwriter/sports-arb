@@ -36,7 +36,15 @@ LOG_DIR = DATA_DIR / "slate-logs"
 PID_DIR = RUNTIME_DIR / "slate-pids"
 LEAD_MIN = int(os.environ.get("FB_SWEEP_LEAD_MIN", "45"))
 STAGGER_SEC = int(os.environ.get("FB_SWEEP_STAGGER_SEC", "10"))
-MAX_CONCURRENT = int(os.environ.get("FB_SWEEP_MAX_CONCURRENT", "24"))
+# The VPS has ~3.8 GB and a capped recorder measures ~56 MB RSS. A full
+# college Saturday collides with a full MLB slate, and MLB is the one making
+# money, so football takes what is left rather than the other way round.
+# MIN_FREE_MB is the real limiter; this is a backstop against a slate so large
+# that the sweep thrashes. Recorders exit shortly after their game ends, so
+# these slots turn over across the day's kickoff waves.
+MAX_CONCURRENT = int(os.environ.get("FB_SWEEP_MAX_CONCURRENT", "12"))
+# Hard floor that protects the live MLB daemon from an OOM kill.
+MIN_FREE_MB = int(os.environ.get("FB_SWEEP_MIN_FREE_MB", "700"))
 LEAGUES = [x for x in (os.environ.get("FB_SWEEP_LEAGUES") or "nfl,ncaaf").split(",") if x]
 ET = ZoneInfo("America/New_York")
 SYSTEMD = os.environ.get("SWEEP_SYSTEMD", "1" if sys.platform == "linux" else "0") == "1"
@@ -100,6 +108,18 @@ def discover(league: str) -> list:
     return games
 
 
+def available_mb() -> int:
+    """MemAvailable in MB, or a large number where /proc is unavailable."""
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) // 1024
+    except OSError:
+        pass
+    return 1 << 20
+
+
 def unit_name(slug: str) -> str:
     return f"flr-{slug}.service"
 
@@ -141,6 +161,9 @@ def launch(game: dict) -> None:
     flr_env = {
         "FLR_LEAGUE": game["league"],
         "FLR_ESPN_EVENT": game["espn_id"],
+        # Nineteen tickers and a write stream need nowhere near Node's default
+        # heap, and the ceiling keeps a full slate inside the memory budget.
+        "NODE_OPTIONS": "--max-old-space-size=96",
     }
     local_tsx = ROOT / "node_modules" / ".bin" / "tsx"
     recorder_cmd = ([str(local_tsx)] if local_tsx.exists() else ["npx", "tsx"]) \
@@ -155,8 +178,8 @@ def launch(game: dict) -> None:
                f"--property=StandardError=append:{log_file}",
                # A full Saturday slate must not starve the MLB live daemon.
                "--property=CPUWeight=30",
-               "--property=MemoryHigh=250M",
-               "--property=MemoryMax=400M",
+               "--property=MemoryHigh=200M",
+               "--property=MemoryMax=320M",
                "--property=Nice=10"]
         for k, v in flr_env.items():
             cmd.append(f"--setenv={k}={v}")
@@ -210,6 +233,10 @@ def main() -> None:
             continue
         if running >= MAX_CONCURRENT:
             log(f"at MAX_CONCURRENT={MAX_CONCURRENT}, deferring {slug}")
+            continue
+        free_mb = available_mb()
+        if free_mb < MIN_FREE_MB:
+            log(f"only {free_mb} MB available (floor {MIN_FREE_MB}), deferring {slug}")
             continue
 
         try:

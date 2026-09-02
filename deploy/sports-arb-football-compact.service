@@ -1,0 +1,10 @@
+[Unit]
+Description=Gzip finished football captures and prune old archives
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=sports-arb
+WorkingDirectory=/opt/sports-arb-recorder
+EnvironmentFile=/etc/sports-arb-recorder.env
+ExecStart=/usr/bin/python3 scripts/compact-football-captures.py

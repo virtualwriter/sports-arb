@@ -1,0 +1,11 @@
+[Unit]
+Description=Run football slate sweep every 15 minutes
+
+[Timer]
+# Tighter than the MLB sweep: college kickoffs cluster on the half hour and a
+# 30-minute cadence would routinely miss the launch window for some of them.
+OnCalendar=*-*-* *:00,15,30,45:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

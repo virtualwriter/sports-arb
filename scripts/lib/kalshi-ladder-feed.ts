@@ -53,8 +53,9 @@ type SideTop = {
   bestAskSize: number | null;
 };
 
+/** Kalshi prices are whole cents; `1 - 0.93` is not, so round off the noise. */
 function positiveOrNull(value: number): number | null {
-  return value > 0 ? value : null;
+  return value > 0 ? Math.round(value * 10_000) / 10_000 : null;
 }
 
 export function sideTop(quotes: Quotes, side: KalshiSide): SideTop {
