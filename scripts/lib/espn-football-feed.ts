@@ -66,15 +66,39 @@ export type FootballGame = {
   home: string;
   awayAbbr: string;
   homeAbbr: string;
+  /** Every name ESPN carries for the side, for matching other venues' titles. */
+  awayAliases: string[];
+  homeAliases: string[];
   state: "pre" | "in" | "post";
 };
 
-function cachePath(league: FootballLeague): string {
-  return join(CACHE_DIR, `${league}-scoreboard.json`);
+function aliasesOf(team: any): string[] {
+  const fields = ["location", "shortDisplayName", "displayName", "name", "nickname", "abbreviation"];
+  const out = fields.map((f) => team?.[f]).filter((v) => typeof v === "string" && v.trim());
+  return [...new Set(out as string[])];
 }
 
-async function fetchScoreboard(league: FootballLeague): Promise<any> {
-  const path = cachePath(league);
+function cachePath(league: FootballLeague, stamp: string): string {
+  return join(CACHE_DIR, `${league}-scoreboard-${stamp}.json`);
+}
+
+/** ET calendar date as ESPN's `dates=` wants it: YYYYMMDD. */
+export function etDayStamp(when: Date): string {
+  return when.toLocaleDateString("en-CA", { timeZone: "America/New_York" }).replaceAll("-", "");
+}
+
+/**
+ * ET dates a sweep or recorder should look at: yesterday through tomorrow.
+ * Yesterday covers a night game still running past ET midnight, tomorrow the
+ * kickoff we are about to launch for.
+ */
+export function slateWindow(now: Date = new Date()): string[] {
+  const day = 86_400_000;
+  return [-1, 0, 1].map((n) => etDayStamp(new Date(now.getTime() + n * day)));
+}
+
+async function fetchScoreboard(league: FootballLeague, stamp: string): Promise<any> {
+  const path = cachePath(league, stamp);
   try {
     const raw = readFileSync(path, "utf8");
     const cached = JSON.parse(raw) as { t: number; body: unknown };
@@ -82,7 +106,7 @@ async function fetchScoreboard(league: FootballLeague): Promise<any> {
   } catch {
     // No usable cache; fall through and fetch.
   }
-  const url = `https://site.api.espn.com/apis/site/v2/sports/${ESPN_PATH[league]}/scoreboard`;
+  const url = `https://site.api.espn.com/apis/site/v2/sports/${ESPN_PATH[league]}/scoreboard?dates=${stamp}`;
   const res = await fetch(url, { headers: { "user-agent": ESPN_UA } });
   if (!res.ok) throw new Error(`ESPN ${league} scoreboard ${res.status}`);
   const body = await res.json();
@@ -106,13 +130,35 @@ function sideOf(competitors: any[], which: "home" | "away"): any {
   return competitors.find((c) => c?.homeAway === which) ?? {};
 }
 
-/** Every game ESPN currently lists for the league. */
-export async function listFootballGames(league: FootballLeague): Promise<FootballGame[]> {
-  const board = await fetchScoreboard(league);
+/**
+ * Every game ESPN lists for the league on the given ET dates.
+ *
+ * The dates are not optional in spirit: a bare scoreboard call returns a
+ * curated, rolling "this week" subset that both omits games and changes what
+ * it omits during the day. On 2 Sep 2026 it advertised 25 college games and
+ * none of Thursday's eleven, while `?dates=20260903` returned all eleven and
+ * `?dates=20260905` returned 68 against the bare call's 17.
+ */
+export async function listFootballGames(
+  league: FootballLeague,
+  stamps: string[] = slateWindow(),
+): Promise<FootballGame[]> {
+  const events: any[] = [];
+  for (const stamp of stamps) {
+    try {
+      const board = await fetchScoreboard(league, stamp);
+      events.push(...(board?.events ?? []));
+    } catch {
+      // One bad day must not blank the slate; the others still count.
+    }
+  }
   const out: FootballGame[] = [];
-  for (const event of board?.events ?? []) {
+  const seen = new Set<string>();
+  for (const event of events) {
     const comp = event?.competitions?.[0];
     if (!comp) continue;
+    if (seen.has(String(event.id))) continue;
+    seen.add(String(event.id));
     const home = sideOf(comp.competitors ?? [], "home");
     const away = sideOf(comp.competitors ?? [], "away");
     out.push({
@@ -124,18 +170,35 @@ export async function listFootballGames(league: FootballLeague): Promise<Footbal
       home: String(home?.team?.location ?? home?.team?.shortDisplayName ?? ""),
       awayAbbr: String(away?.team?.abbreviation ?? ""),
       homeAbbr: String(home?.team?.abbreviation ?? ""),
+      awayAliases: aliasesOf(away?.team),
+      homeAliases: aliasesOf(home?.team),
       state: (comp?.status?.type?.state ?? "pre") as "pre" | "in" | "post",
     });
   }
   return out;
 }
 
+/**
+ * `dateEt` pins the poll to one scoreboard page. A recorder knows its game's
+ * date at startup, so passing it keeps the poll to a single cached fetch
+ * instead of walking the whole window every tick.
+ */
 export async function pollFootballFeed(
   league: FootballLeague,
   espnEventId: string,
+  dateEt?: string,
 ): Promise<FootballFeedSnapshot | null> {
-  const board = await fetchScoreboard(league);
-  const event = (board?.events ?? []).find((e: any) => String(e?.id) === String(espnEventId));
+  const stamps = dateEt ? [dateEt.replaceAll("-", "")] : slateWindow();
+  let event: any = null;
+  for (const stamp of stamps) {
+    try {
+      const board = await fetchScoreboard(league, stamp);
+      event = (board?.events ?? []).find((e: any) => String(e?.id) === String(espnEventId));
+    } catch {
+      continue;
+    }
+    if (event) break;
+  }
   if (!event) return null;
   const comp = event?.competitions?.[0];
   if (!comp) return null;

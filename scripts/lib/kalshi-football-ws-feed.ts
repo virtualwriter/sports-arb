@@ -68,21 +68,46 @@ function normalize(text: string): string {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
+/** `"UMass vs Rutgers: Total Points"` → `["umass", "rutgers"]`, away first. */
+function titleHalves(title: string): [string, string] | null {
+  const body = normalize(title.replace(/:\s*total points\s*$/i, ""));
+  const m = body.match(/^(.*?)\s+vs\s+(.*)$/);
+  return m ? [m[1]!.trim(), m[2]!.trim()] : null;
+}
+
 /**
- * Does the Kalshi title name both teams? Kalshi uses short school/city names
- * ("UMass vs Rutgers", "New England vs Seattle") while schedules carry longer
- * ones ("Rutgers Scarlet Knights"), so a containment test either way counts.
+ * How well one side of a Kalshi title names a team, given every alias the
+ * schedule knows for it. Kalshi's school names agree with no single ESPN
+ * field: it says "UMass" where ESPN's location is "Massachusetts", and
+ * "Kennesaw St." where ESPN's location is "Kennesaw State".
  */
-function titleNamesBoth(title: string, away: string, home: string): boolean {
-  const t = normalize(title);
-  const hit = (team: string) => {
-    const name = normalize(team);
-    if (!name) return false;
-    if (t.includes(name)) return true;
-    // "Rutgers Scarlet Knights" vs a title that only says "Rutgers".
-    return name.split(" ").some((word) => word.length >= 4 && t.includes(word));
-  };
-  return hit(away) && hit(home);
+function scoreSideByName(half: string, aliases: string[]): number {
+  let best = 0;
+  for (const alias of aliases) {
+    const name = normalize(alias);
+    if (!name || name.length < 3) continue;
+    if (name === half) return 3;
+    if (half.includes(name) || name.includes(half)) best = Math.max(best, 2);
+    else {
+      const words = name.split(" ").filter((w) => w.length >= 4);
+      if (words.some((w) => half.includes(w))) best = Math.max(best, 1);
+    }
+  }
+  return best;
+}
+
+/**
+ * The team blob in `KXNCAAFTOTAL-26SEP03ALBYBUFF` is away-then-home with no
+ * separator, so it cannot be split, but it can still be anchored: the away
+ * code must start it and the home code must end it. This rescues the games
+ * whose titles use a name ESPN never emits ("University at Albany").
+ */
+function scoreSideByTicker(eventTicker: string, abbr: string, side: "away" | "home"): number {
+  const m = eventTicker.toUpperCase().match(/-\d{2}[A-Z]{3}\d{2}([A-Z0-9]+)$/);
+  const blob = m?.[1];
+  const code = abbr.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (!blob || code.length < 2) return 0;
+  return (side === "away" ? blob.startsWith(code) : blob.endsWith(code)) ? 2 : 0;
 }
 
 export type FootballTotalsTarget = {
@@ -91,7 +116,30 @@ export type FootballTotalsTarget = {
   date: string;
   away: string;
   home: string;
+  /** Every name the schedule knows for each side; improves the title match. */
+  awayAliases?: string[];
+  homeAliases?: string[];
+  awayAbbr?: string;
+  homeAbbr?: string;
 };
+
+/** Combined title+ticker confidence that an event is this game, 0 when not. */
+function scoreEvent(event: KalshiEvent, target: FootballTotalsTarget): number {
+  const halves = titleHalves(event.title ?? "");
+  const awayAliases = [target.away, ...(target.awayAliases ?? [])];
+  const homeAliases = [target.home, ...(target.homeAliases ?? [])];
+
+  let away = halves ? scoreSideByName(halves[0], awayAliases) : 0;
+  let home = halves ? scoreSideByName(halves[1], homeAliases) : 0;
+  if (target.awayAbbr) {
+    away = Math.max(away, scoreSideByTicker(event.event_ticker, target.awayAbbr, "away"));
+  }
+  if (target.homeAbbr) {
+    home = Math.max(home, scoreSideByTicker(event.event_ticker, target.homeAbbr, "home"));
+  }
+  // Both ends must be identified; one strong name is not a game.
+  return away > 0 && home > 0 ? away + home : 0;
+}
 
 async function openTotalEvents(client: KalshiClient, league: FootballLeague): Promise<KalshiEvent[]> {
   const { totalPrefix } = FOOTBALL_SERIES[league];
@@ -129,21 +177,27 @@ export async function discoverFootballTotalsEvent(
     const stamp = stampOfEventTicker(e.event_ticker);
     return stamp === wantStamp || stamp === altStamp;
   });
-  const matches = sameDay.filter((e) => titleNamesBoth(e.title ?? "", target.away, target.home));
+  const scored = sameDay
+    .map((e) => ({ event: e, score: scoreEvent(e, target) }))
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score);
 
-  if (!matches.length) {
+  if (!scored.length) {
     throw new Error(
       `No open ${label} ${totalPrefix} event for ${target.away} @ ${target.home} on ${target.date} `
       + `(${sameDay.length} events carried stamp ${wantStamp})`,
     );
   }
-  if (matches.length > 1) {
+  // A tie means two events describe this game equally well; recording the
+  // wrong ladder is worse than recording nothing, so refuse to guess.
+  if (scored.length > 1 && scored[0]!.score === scored[1]!.score) {
     throw new Error(
       `Ambiguous ${label} match for ${target.away} @ ${target.home} on ${target.date}: `
-      + matches.map((e) => e.event_ticker).join(", "),
+      + scored.filter((x) => x.score === scored[0]!.score)
+        .map((x) => x.event.event_ticker).join(", "),
     );
   }
-  return { eventTicker: matches[0]!.event_ticker, title: matches[0]!.title ?? "" };
+  return { eventTicker: scored[0]!.event.event_ticker, title: scored[0]!.event.title ?? "" };
 }
 
 /** Strike → ticker for every quoted rung on a football totals event. */

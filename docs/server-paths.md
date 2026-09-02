@@ -75,18 +75,28 @@ with the MLB pipeline.
 
 - Recorder: `scripts/football-ladder-race.ts`, one process per game
   (`FLR_LEAGUE=nfl|ncaaf`, `FLR_ESPN_EVENT=<espn id>`)
-- Kalshi series: `KXNFLTOTAL` / `KXNCAAFTOTAL`, matched to a game by event
-  title; football sits on **exchange shard 0**, not the sports shard 3
+- Kalshi series: `KXNFLTOTAL` / `KXNCAAFTOTAL`; football sits on **exchange
+  shard 0**, not the sports shard 3. Games are matched by scoring the event
+  title against every name ESPN carries, plus the away/home codes anchored to
+  the start/end of the ticker blob. Neither signal alone suffices: Kalshi says
+  "UMass" where ESPN says "Massachusetts", and `ALBYBUFF` where ESPN says
+  `ALB`. A tie between two events raises rather than guessing
+- Kalshi lists a totals event roughly two days before kickoff, so a slate
+  checked earlier looks incomplete; recorders discover at launch, not ahead
 - Game state: ESPN scoreboard (no key). Its edge 403s unknown user agents, so
   callers claim to be `curl/8.7.1`; responses are cached to
   `$TMPDIR/sports-arb-espn` for 2.5s so co-located recorders share one fetch
+- **Always pass `?dates=YYYYMMDD`.** A bare scoreboard call returns a curated,
+  rolling subset that silently drops games: on 2 Sep 2026 it listed none of
+  Thursday's 11 and 17 of Saturday's 68. Callers scan yesterday→tomorrow ET
 - Odds/fast score: bwin **sportId 11** (American Football)
 - Data: `/var/lib/sports-arb-recorder/data/football-ladder-race-<slug>-<ts>.jsonl`,
   slug `<league>-<away>-<home>-<date>` (e.g. `ncaaf-uapb-miz-2026-09-03`)
 - `sports-arb-football-slate-sweep.timer` — every 15 min, launches one
   `flr-<slug>.service` per game within 45 min of kickoff. Capped by
-  `FB_SWEEP_MAX_CONCURRENT` (12) and a `FB_SWEEP_MIN_FREE_MB` (700) floor that
-  protects the MLB daemon; recorders run with a 96 MB Node heap (~56 MB RSS)
+  `FB_SWEEP_MAX_CONCURRENT` (12), a `FB_SWEEP_MIN_FREE_MB` (700) floor and a
+  `FB_SWEEP_MAX_LOAD` (2×cores) ceiling that protect the MLB daemon; recorders
+  run with a 96 MB Node heap (~56 MB RSS)
 - `sports-arb-football-collect.timer` — 10:00 UTC, settles yesterday's captures
   into `backtest/football-samples.jsonl` + `football-games.jsonl`, then gzips
   what it consumed
@@ -125,6 +135,10 @@ every axis:
   vs ~130 MB uncapped), and the sweep refuses to launch below
   `FB_SWEEP_MIN_FREE_MB` (700). The collector streams its input and measures
   ~13 MB on an 11 MB capture.
+- **CPU** — the box has one core. Measured, a recorder costs 1–6% of it and
+  four MLB recorders together cost ~10%, but the softball edge lives in the
+  milliseconds after a score, so the sweep also stops launching above
+  `FB_SWEEP_MAX_LOAD` rather than letting the run queue grow.
 - **Schedule** — MLB collects at 08:30 UTC, football at 10:00 and 10:30, so the
   batch jobs never contend.
 - **Priority** — football batch units run `Nice=15`, `IOSchedulingClass=idle`,

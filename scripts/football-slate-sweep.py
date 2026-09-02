@@ -45,6 +45,11 @@ STAGGER_SEC = int(os.environ.get("FB_SWEEP_STAGGER_SEC", "10"))
 MAX_CONCURRENT = int(os.environ.get("FB_SWEEP_MAX_CONCURRENT", "12"))
 # Hard floor that protects the live MLB daemon from an OOM kill.
 MIN_FREE_MB = int(os.environ.get("FB_SWEEP_MIN_FREE_MB", "700"))
+# The box has a single core. Measured, a recorder costs 1-6% of it, so a full
+# slate fits — but MLB's edge is measured in milliseconds after a score, and a
+# saturated run queue shows up as scheduling delay on exactly that path. Stop
+# adding football once the core is contended, even if RAM is free.
+MAX_LOAD = float(os.environ.get("FB_SWEEP_MAX_LOAD", str(2.0 * (os.cpu_count() or 1))))
 LEAGUES = [x for x in (os.environ.get("FB_SWEEP_LEAGUES") or "nfl,ncaaf").split(",") if x]
 ET = ZoneInfo("America/New_York")
 SYSTEMD = os.environ.get("SWEEP_SYSTEMD", "1" if sys.platform == "linux" else "0") == "1"
@@ -84,10 +89,34 @@ def slugify(text: str) -> str:
     return out.strip("-")
 
 
+def slate_window() -> list:
+    """ET dates worth scanning: yesterday (still-running night game) to tomorrow."""
+    today = datetime.now(ET).date()
+    return [(today + timedelta(days=n)).strftime("%Y%m%d") for n in (-1, 0, 1)]
+
+
 def discover(league: str) -> list:
-    board = fetch_json(f"https://site.api.espn.com/apis/site/v2/sports/{ESPN_PATH[league]}/scoreboard")
+    # `dates=` is load-bearing. A bare scoreboard call returns a curated,
+    # rolling subset of the week: on 2 Sep 2026 it listed 25 college games and
+    # none of Thursday's eleven, and 17 of Saturday's 68. Asking for explicit
+    # ET dates returns the full slate for each.
+    events, seen = [], set()
+    for stamp in slate_window():
+        url = (f"https://site.api.espn.com/apis/site/v2/sports/{ESPN_PATH[league]}"
+               f"/scoreboard?dates={stamp}")
+        try:
+            board = fetch_json(url)
+        except Exception as exc:  # one bad day must not blank the slate
+            log(f"{league} scoreboard {stamp} failed: {exc}")
+            continue
+        for event in board.get("events", []):
+            if str(event.get("id")) in seen:
+                continue
+            seen.add(str(event.get("id")))
+            events.append(event)
+
     games = []
-    for event in board.get("events", []):
+    for event in events:
         comp = (event.get("competitions") or [{}])[0]
         if not comp:
             continue
@@ -237,6 +266,10 @@ def main() -> None:
         free_mb = available_mb()
         if free_mb < MIN_FREE_MB:
             log(f"only {free_mb} MB available (floor {MIN_FREE_MB}), deferring {slug}")
+            continue
+        load1 = os.getloadavg()[0]
+        if load1 > MAX_LOAD:
+            log(f"load {load1:.2f} over {MAX_LOAD:.2f}, deferring {slug} to protect MLB")
             continue
 
         try:

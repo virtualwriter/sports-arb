@@ -115,7 +115,16 @@ async function main(): Promise<void> {
 
   const discovered = KALSHI_EVENT
     ? { eventTicker: KALSHI_EVENT, title: "" }
-    : await discoverFootballTotalsEvent({ league: LEAGUE, date: game.dateEt, away: game.away, home: game.home });
+    : await discoverFootballTotalsEvent({
+      league: LEAGUE,
+      date: game.dateEt,
+      away: game.away,
+      home: game.home,
+      awayAliases: game.awayAliases,
+      homeAliases: game.homeAliases,
+      awayAbbr: game.awayAbbr,
+      homeAbbr: game.homeAbbr,
+    });
   const rungs = await footballTotalRungs(discovered.eventTicker);
   const strikes = [...rungs.keys()];
   log(`kalshi ${discovered.eventTicker} — ${strikes.length} rungs ${strikes[0]}..${strikes[strikes.length - 1]}`);
@@ -237,7 +246,7 @@ async function main(): Promise<void> {
   let lastScoreKey = "";
   const pollTimer = setInterval(async () => {
     try {
-      const next = await pollFootballFeed(LEAGUE, game.espnEventId);
+      const next = await pollFootballFeed(LEAGUE, game.espnEventId, game.dateEt);
       if (!next) return;
       if (next.rawScoreKey !== lastScoreKey) {
         const prev = snap;
