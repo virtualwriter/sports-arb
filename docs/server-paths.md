@@ -87,9 +87,48 @@ with the MLB pipeline.
   `flr-<slug>.service` per game within 45 min of kickoff. Capped by
   `FB_SWEEP_MAX_CONCURRENT` (12) and a `FB_SWEEP_MIN_FREE_MB` (700) floor that
   protects the MLB daemon; recorders run with a 96 MB Node heap (~56 MB RSS)
-- `sports-arb-football-compact.timer` — 09:30 UTC, gzips finished captures and
-  prunes archives older than `FOOTBALL_RETAIN_DAYS` (45)
+- `sports-arb-football-collect.timer` — 10:00 UTC, settles yesterday's captures
+  into `backtest/football-samples.jsonl` + `football-games.jsonl`, then gzips
+  what it consumed
+- `sports-arb-football-compact.timer` — 10:30 UTC, sweeps up captures the
+  collector could not settle and prunes archives older than
+  `FOOTBALL_RETAIN_DAYS` (45)
 - Recorders self-exit ~2 min after the final whistle; the sweep reaps stragglers
+
+### Backtest sample shape
+
+Unlike the MLB collectors, which extract moments matching a known softball
+definition, the football collector is unopinionated: no football strategy
+exists yet, so it records the **whole ladder** at each sampled moment, settled
+against the final score. One row per moment, ladder as parallel arrays
+(`lines` / `bids` / `asks` / `askSizes` / `dists` / `hits`), so a game costs a
+few hundred rows rather than a few thousand.
+
+Moments: `grid` every `FOOTBALL_GRID_SEC` (30s) while live, plus `pre_score`,
+`score` and `post_score` probes at `FOOTBALL_POST_SCORE_MS`
+(250/1000/3000/10000/30000 ms) around every scoring play — the sub-second
+offsets are where the MLB work found whatever edge exists.
+
+`settleConfident: false` marks a game whose recorder died before the whistle;
+exclude those rather than settling against a partial score.
+
+### Keeping MLB untroubled
+
+MLB is the side making money and shares this 3.8 GB box, so football yields on
+every axis:
+
+- **Files** — the two pipelines' globs are disjoint (`ladder-lag-race-*` vs
+  `football-ladder-race-*`). `scripts/verify-pipeline-isolation.py` asserts
+  this against planted decoys; re-run it after touching any glob.
+- **Units** — the football sweep only ever starts/stops `flr-*`; MLB's are `plr-*`.
+- **Memory** — recorders are capped to a 96 MB Node heap (~56 MB RSS measured,
+  vs ~130 MB uncapped), and the sweep refuses to launch below
+  `FB_SWEEP_MIN_FREE_MB` (700). The collector streams its input and measures
+  ~13 MB on an 11 MB capture.
+- **Schedule** — MLB collects at 08:30 UTC, football at 10:00 and 10:30, so the
+  batch jobs never contend.
+- **Priority** — football batch units run `Nice=15`, `IOSchedulingClass=idle`,
+  `CPUWeight=20`; recorders run `Nice=10`, `CPUWeight=30` against MLB's 50.
 
 ## Dublin / Ireland
 

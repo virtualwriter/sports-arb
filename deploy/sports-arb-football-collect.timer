@@ -1,0 +1,12 @@
+[Unit]
+Description=Collect football samples daily
+
+[Timer]
+# 10:00 UTC (6:00 ET): clear of the MLB fire-collect at 08:30 so the two never
+# contend, and late enough that a west-coast night game has finished and been
+# settled by its own recorder.
+OnCalendar=*-*-* 10:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -2,9 +2,9 @@
 Description=Compact football captures daily
 
 [Timer]
-# 09:30 UTC (5:30 ET): after the MLB fire-collect at 08:30 and well clear of
-# any west-coast night game still recording.
-OnCalendar=*-*-* 09:30:00
+# 10:30 UTC, after the football collector at 10:00. The collector gzips what
+# it consumed, so this only sweeps up captures it could not settle.
+OnCalendar=*-*-* 10:30:00
 Persistent=true
 
 [Install]

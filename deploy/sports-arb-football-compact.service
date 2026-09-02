@@ -8,3 +8,8 @@ User=sports-arb
 WorkingDirectory=/opt/sports-arb-recorder
 EnvironmentFile=/etc/sports-arb-recorder.env
 ExecStart=/usr/bin/python3 scripts/compact-football-captures.py
+# Yields to live MLB trading on the shared box.
+Nice=15
+IOSchedulingClass=idle
+CPUWeight=20
+MemoryMax=256M

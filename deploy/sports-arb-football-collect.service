@@ -1,0 +1,16 @@
+[Unit]
+Description=Collect football captures into the backtest sample file
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=sports-arb
+WorkingDirectory=/opt/sports-arb-recorder
+EnvironmentFile=/etc/sports-arb-recorder.env
+ExecStart=/usr/bin/python3 scripts/collect-football-samples.py
+# This shares a 3.8 GB box with live MLB trading, so it yields on every axis.
+# The collector streams its input and measures ~13 MB, well inside this cap.
+Nice=15
+IOSchedulingClass=idle
+CPUWeight=20
+MemoryMax=256M
