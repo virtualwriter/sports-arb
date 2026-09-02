@@ -50,6 +50,10 @@ POST_SCORE_MS = [int(x) for x in os.environ.get(
     "FOOTBALL_POST_SCORE_MS", "250,1000,3000,10000,30000").split(",")]
 PRE_SCORE_MS = int(os.environ.get("FOOTBALL_PRE_SCORE_MS", "2000"))
 COMPRESS = os.environ.get("FOOTBALL_COLLECT_COMPRESS", "1") == "1"
+# A capture touched this recently may still have a recorder attached. Reading
+# one would settle a game that has not finished and then mark it collected, so
+# it would never be picked up again; gzipping one would break the live writer.
+MIN_AGE_MIN = int(os.environ.get("FOOTBALL_COLLECT_MIN_AGE_MIN", "60"))
 
 
 def log(msg: str) -> None:
@@ -288,9 +292,17 @@ def main() -> int:
 
     total_samples = 0
     collected = []
+    in_flight = 0
+    cutoff = datetime.now().timestamp() - MIN_AGE_MIN * 60
     for path in paths:
         name = Path(path).name
         if name in done or name.replace(".gz", "") in done:
+            continue
+        try:
+            if os.path.getmtime(path) > cutoff:
+                in_flight += 1
+                continue  # recorder may still be attached; collect it tomorrow
+        except OSError:
             continue
         with open(SAMPLES, "a") as fh:
             written, game = collect_capture(path, fh)
@@ -305,7 +317,8 @@ def main() -> int:
         log(f"{game['slug']}: {written} samples, final {game['finalTotal']}, "
             f"{game['scoringPlays']} scoring plays{flag}")
 
-    log(f"collected {len(collected)} games, {total_samples} samples -> {SAMPLES}")
+    skipped = f", skipped {in_flight} still in flight" if in_flight else ""
+    log(f"collected {len(collected)} games, {total_samples} samples{skipped} -> {SAMPLES}")
 
     if COMPRESS:
         for path, _ in collected:
