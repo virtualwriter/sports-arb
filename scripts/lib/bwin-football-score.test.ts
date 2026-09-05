@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { parseBwinFootballScoreboard } from "./bwin-football-score.js";
+import {
+  bwinFixtureScore,
+  bwinTeamNeedles,
+  parseBwinFootballScoreboard,
+} from "./bwin-football-score.js";
 
 /**
  * Captured verbatim from
@@ -73,5 +77,75 @@ describe("parseBwinFootballScoreboard", () => {
     expect(parseBwinFootballScoreboard('{"scoreboard":{"period":"Q1"}}')).toBeNull();
     expect(parseBwinFootballScoreboard("not json")).toBeNull();
     expect(parseBwinFootballScoreboard(null)).toBeNull();
+  });
+});
+
+/** Fixture names bwin actually printed for the 3 Sep 2026 college slate. */
+const BWIN_SLATE = [
+  "Akron Zips @ Wake Forest Demon Deacons",
+  "Arkansas-Pine Bluff Golden Lions @ Missouri Tigers",
+  "Bethune-Cookman Wildcats @ UCF Knights",
+  "Colorado Buffaloes @ Georgia Tech Yellow Jackets",
+  "Eastern Illinois Panthers @ Minnesota Golden Gophers",
+  "Idaho Vandals @ Utah Utes",
+  "Massachusetts at Rutgers",
+  "Merrimack Warriors @ Delaware Fightin´ Blue Hens",
+  "UAB Blazers @ Illinois Fighting Illini",
+  "West Georgia Wolves @ Kennesaw State Owls",
+  "Albany Great Danes @ Buffalo Bulls",
+];
+
+/** Pick the fixture the recorder would bind, or null when it would decline. */
+function bind(away: string[], home: string[]): string | null {
+  const an = bwinTeamNeedles(away);
+  const hn = bwinTeamNeedles(home);
+  const scored = BWIN_SLATE
+    .map((name) => ({ name, score: bwinFixtureScore(name, an, hn) }))
+    .filter((x) => x.score > 0)
+    .sort((x, y) => y.score - x.score);
+  if (!scored.length) return null;
+  if (scored.length > 1 && scored[0]!.score === scored[1]!.score) return null;
+  return scored[0]!.name;
+}
+
+describe("bwin fixture matching", () => {
+  it("binds UAlbany to bwin's 'Albany', which one-word matching missed", () => {
+    expect(bind(["UAlbany", "UAlbany Great Danes", "Great Danes"], ["Buffalo", "Buffalo Bulls"]))
+      .toBe("Albany Great Danes @ Buffalo Bulls");
+  });
+
+  it("binds each of Thursday's games to its own fixture", () => {
+    expect(bind(["Massachusetts", "UMass", "Minutemen"], ["Rutgers", "Scarlet Knights"]))
+      .toBe("Massachusetts at Rutgers");
+    expect(bind(["Akron", "Zips"], ["Wake Forest", "Demon Deacons"]))
+      .toBe("Akron Zips @ Wake Forest Demon Deacons");
+    expect(bind(["West Georgia", "Wolves"], ["Kennesaw State", "Kennesaw St", "Owls"]))
+      .toBe("West Georgia Wolves @ Kennesaw State Owls");
+    expect(bind(["Arkansas-Pine Bluff", "AR-Pine Bluff"], ["Missouri", "Tigers"]))
+      .toBe("Arkansas-Pine Bluff Golden Lions @ Missouri Tigers");
+  });
+
+  it("declines rather than binding a game bwin is not listing", () => {
+    // Whole-string matching bound this to "…Golden Lions @ Missouri Tigers",
+    // because "Tigers" satisfied both ends at once.
+    expect(bind(["Clemson", "Clemson Tigers"], ["LSU", "LSU Tigers"])).toBeNull();
+  });
+
+  it("will not let a shared mascot carry both ends of a match", () => {
+    // Away needles only ever see the away half of the name.
+    expect(bwinFixtureScore(
+      "Arkansas-Pine Bluff Golden Lions @ Missouri Tigers",
+      bwinTeamNeedles(["Clemson", "Clemson Tigers"]),
+      bwinTeamNeedles(["LSU", "LSU Tigers"]),
+    )).toBe(0);
+  });
+
+  it("respects home/away order rather than matching a reversed fixture", () => {
+    expect(bind(["Rutgers", "Scarlet Knights"], ["Massachusetts", "UMass"])).toBeNull();
+  });
+
+  it("does not confuse Georgia Tech with West Georgia", () => {
+    expect(bind(["Colorado", "Buffaloes"], ["Georgia Tech", "Yellow Jackets"]))
+      .toBe("Colorado Buffaloes @ Georgia Tech Yellow Jackets");
   });
 });

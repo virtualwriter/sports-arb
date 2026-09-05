@@ -23,7 +23,11 @@
 
 import { createWriteStream, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { parseBwinFootballScoreboard } from "./lib/bwin-football-score.js";
+import {
+  bwinFixtureScore,
+  bwinTeamNeedles,
+  parseBwinFootballScoreboard,
+} from "./lib/bwin-football-score.js";
 import {
   listFootballGames,
   minutesRemaining,
@@ -50,6 +54,8 @@ const POST_FINAL_MS = Number(process.env.FLR_POST_FINAL_MS ?? 120_000);
 const BWIN_SPORT = Number(process.env.FLR_BWIN_SPORT ?? 11); // 11 = American Football
 const BWIN_ENABLED = !/^(0|false|no)$/i.test(process.env.FLR_BWIN ?? "1");
 const BWIN_RETRY_MS = Number(process.env.FLR_BWIN_RETRY_MS ?? 120_000);
+/** Silence this long from a bound fixture, mid-game, means go rediscover. */
+const BWIN_STALE_MS = Number(process.env.FLR_BWIN_STALE_MS ?? 240_000);
 
 const DATA_DIR = resolve(
   process.env.SPORTS_ARB_DATA_DIR
@@ -188,13 +194,21 @@ async function main(): Promise<void> {
   let lastBwinScoreKey = "";
   let bwin: BwinPushClient | null = null;
   let bwinRetry: NodeJS.Timeout | null = null;
+  let bwinWatchdog: NodeJS.Timeout | null = null;
+  let lastBwinPushAt = 0;
   const lastOdds = new Map<string, string>();
-  const teamWords = [game.away, game.home]
-    .map((t) => t.toLowerCase().split(/\s+/).filter((w) => w.length >= 4).pop() ?? t.toLowerCase());
+  // Needles for finding this game in bwin's in-play list. One word off a
+  // single ESPN name is too brittle: bwin says "Albany" where ESPN says
+  // "UAlbany", and that game recorded 0 bwin pushes all Thursday night. Take
+  // words from every alias instead, and match either direction so a longer
+  // school name still finds the shorter one bwin prints.
+  const awayNeedles = bwinTeamNeedles([game.away, ...game.awayAliases]);
+  const homeNeedles = bwinTeamNeedles([game.home, ...game.homeAliases]);
 
   const makeBwin = () => new BwinPushClient(
     [bwinFixtureId],
     (_fx, payload, messageType) => {
+      lastBwinPushAt = now();
       if (messageType === "ScoreboardSlim") {
         // Keep the raw blob: it is the record of record if the parser changes.
         emit({ kind: "bwin_score", raw: JSON.stringify(payload).slice(0, 1600) });
@@ -259,12 +273,24 @@ async function main(): Promise<void> {
     if (bwinFixtureId || shuttingDown) return;
     try {
       // bwin only lists a fixture once it goes in-play, so this keeps retrying.
-      const hit = (await bwinLiveFixtures(BWIN_SPORT)).find((f) => {
-        const name = f.name.toLowerCase();
-        return teamWords.every((w) => name.includes(w));
-      });
+      const scored = (await bwinLiveFixtures(BWIN_SPORT))
+        .map((f) => ({ f, score: bwinFixtureScore(f.name, awayNeedles, homeNeedles) }))
+        .filter((x) => x.score > 0)
+        .sort((a, b) => b.score - a.score);
+      // Binding the wrong fixture would feed another game's scores into this
+      // capture, which is worse than having no bwin at all. Only bind a clear
+      // winner.
+      const ambiguous = scored.length > 1 && scored[0]!.score === scored[1]!.score;
+      if (ambiguous) {
+        emit({
+          kind: "bwin_ambiguous",
+          candidates: scored.slice(0, 3).map((x) => x.f.name),
+        });
+      }
+      const hit = ambiguous ? undefined : scored[0]?.f;
       if (hit) {
         bwinFixtureId = hit.id;
+        lastBwinPushAt = now();
         log(`bwin fixture ${hit.id} ${hit.name}`);
         emit({ kind: "bwin_init", fixtureId: hit.id, name: hit.name });
         bwin = makeBwin();
@@ -278,7 +304,7 @@ async function main(): Promise<void> {
   if (BWIN_ENABLED) {
     await discoverBwin();
     if (!bwinFixtureId) {
-      log(`bwin: no live fixture for [${teamWords.join(" / ")}] yet — retrying every ${BWIN_RETRY_MS / 1000}s`);
+      log(`bwin: no live fixture for [${game.away} / ${game.home}] yet — retrying every ${BWIN_RETRY_MS / 1000}s`);
       bwinRetry = setInterval(() => { void discoverBwin(); }, BWIN_RETRY_MS);
     }
   }
@@ -319,6 +345,29 @@ async function main(): Promise<void> {
     }
   }, POLL_MS);
 
+  // ---- bwin staleness watchdog ----
+  // Binding once is not enough. Two of Thursday's games bound fine and then
+  // went quiet mid-game — 34 and 67 pushes against 300-450 for a full game —
+  // and because discovery stops after the first hit, the fast feed was gone
+  // for the rest of the night. If bwin falls silent while the game is live,
+  // drop the fixture and go looking again.
+  if (BWIN_ENABLED) {
+    bwinWatchdog = setInterval(() => {
+      if (shuttingDown || !bwinFixtureId || !snap?.live) return;
+      if (now() - lastBwinPushAt < BWIN_STALE_MS) return;
+      emit({
+        kind: "bwin_stale",
+        fixtureId: bwinFixtureId,
+        silentMs: now() - lastBwinPushAt,
+      });
+      log(`bwin silent ${Math.round((now() - lastBwinPushAt) / 1000)}s — rediscovering`);
+      try { bwin?.close(); } catch { /* already closing */ }
+      bwin = null;
+      bwinFixtureId = "";
+      void discoverBwin();
+    }, BWIN_RETRY_MS);
+  }
+
   // ---- 1 Hz heartbeat: game state next to the near rung ----
   const heartbeat = setInterval(() => {
     if (!snap) return;
@@ -356,6 +405,7 @@ async function main(): Promise<void> {
     clearInterval(pollTimer);
     clearInterval(heartbeat);
     if (bwinRetry) clearInterval(bwinRetry);
+    if (bwinWatchdog) clearInterval(bwinWatchdog);
     if (endTimer) clearInterval(endTimer);
     feed.stop();
     try { bwin?.close(); } catch { /* closing */ }

@@ -44,6 +44,71 @@ export type BwinFootballScore = {
   started: boolean;
 };
 
+/**
+ * Words that identify one team in a bwin fixture name.
+ *
+ * bwin prints full names — "Akron Zips @ Wake Forest Demon Deacons",
+ * "Massachusetts at Rutgers" — so the alias list ESPN gives us lines up well.
+ * Taking one word off a single name does not: ESPN's "UAlbany" shares no word
+ * with bwin's "Albany", and that game recorded zero bwin pushes all night.
+ */
+export function bwinTeamNeedles(aliases: string[]): string[] {
+  const out = new Set<string>();
+  for (const alias of aliases) {
+    const norm = alias.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    for (const word of norm.split(" ")) if (word.length >= 4) out.add(word);
+    const joined = norm.replace(/ /g, "");
+    if (joined.length >= 4) out.add(joined);
+  }
+  return [...out];
+}
+
+/**
+ * Split "Akron Zips @ Wake Forest Demon Deacons" into away and home halves.
+ * Returns null when bwin used a separator we do not recognise.
+ */
+export function bwinFixtureSides(fixtureName: string): [string, string] | null {
+  const m = fixtureName.split(/\s+(?:@|at|vs\.?|v)\s+/i);
+  return m.length === 2 ? [m[0]!, m[1]!] : null;
+}
+
+/**
+ * How many of a team's needles the fixture name supports. Matching runs both
+ * directions so "UAlbany" still finds "Albany": either the name contains the
+ * needle, or a word of the name is contained by it.
+ *
+ * Callers should pass one **half** of the fixture name. Mascots are not
+ * unique — matching "Clemson Tigers" against a whole fixture string happily
+ * binds to "Arkansas-Pine Bluff Golden Lions @ Missouri Tigers", which would
+ * quietly record a different game's scores.
+ */
+export function bwinNameHits(fixtureName: string, needles: string[]): number {
+  const name = fixtureName.toLowerCase().replace(/[^a-z0-9]+/g, " ");
+  const nameWords = name.split(" ").filter((w) => w.length >= 4);
+  let hits = 0;
+  for (const n of needles) {
+    if (name.includes(n) || nameWords.some((w) => n.includes(w))) hits++;
+  }
+  return hits;
+}
+
+/**
+ * Confidence that a bwin fixture is this game: needles are matched against
+ * their own side of the name, so a shared mascot cannot carry both ends.
+ * Zero means "not this game" and the caller should not bind.
+ */
+export function bwinFixtureScore(
+  fixtureName: string,
+  awayNeedles: string[],
+  homeNeedles: string[],
+): number {
+  const sides = bwinFixtureSides(fixtureName);
+  if (!sides) return 0;
+  const away = bwinNameHits(sides[0], awayNeedles);
+  const home = bwinNameHits(sides[1], homeNeedles);
+  return away > 0 && home > 0 ? away + home : 0;
+}
+
 const DOWNS: Record<string, number> = { "1st": 1, "2nd": 2, "3rd": 3, "4th": 4 };
 
 /** The full-game bucket; `1` and `8` are narrower and disagree with it. */
