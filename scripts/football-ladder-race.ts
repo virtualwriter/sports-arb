@@ -23,6 +23,7 @@
 
 import { createWriteStream, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { parseBwinFootballScoreboard } from "./lib/bwin-football-score.js";
 import {
   listFootballGames,
   minutesRemaining,
@@ -168,8 +169,23 @@ async function main(): Promise<void> {
   await feed.start();
   emit({ kind: "kalshi_init", eventTicker: discovered.eventTicker, rungs: strikes.length });
 
+  // ---- score race: which feed saw a given score first ----
+  // Same idea as the MLB bwin/statsapi race. Keyed by the score itself, so the
+  // two feeds are compared on the state they report rather than on wall time.
+  const scoreFirstSeen = new Map<string, { source: "bwin" | "espn"; t: number }>();
+  const noteScore = (source: "bwin" | "espn", away: number, home: number) => {
+    const key = `${away}-${home}`;
+    const seen = scoreFirstSeen.get(key);
+    if (!seen) {
+      scoreFirstSeen.set(key, { source, t: now() });
+      return { firstSource: source, leadMs: 0 };
+    }
+    return { firstSource: seen.source, leadMs: now() - seen.t };
+  };
+
   // ---- bwin odds + fast scoreboard ----
   let bwinFixtureId = process.env.FLR_BWIN_FIXTURE ?? "";
+  let lastBwinScoreKey = "";
   let bwin: BwinPushClient | null = null;
   let bwinRetry: NodeJS.Timeout | null = null;
   const lastOdds = new Map<string, string>();
@@ -180,7 +196,33 @@ async function main(): Promise<void> {
     [bwinFixtureId],
     (_fx, payload, messageType) => {
       if (messageType === "ScoreboardSlim") {
+        // Keep the raw blob: it is the record of record if the parser changes.
         emit({ kind: "bwin_score", raw: JSON.stringify(payload).slice(0, 1600) });
+        const s = parseBwinFootballScoreboard(payload);
+        if (s) {
+          const key = `${s.scoreAway}-${s.scoreHome}`;
+          if (key !== lastBwinScoreKey) {
+            const prevTotal = lastBwinScoreKey
+              ? lastBwinScoreKey.split("-").reduce((a, b) => a + Number(b), 0)
+              : null;
+            lastBwinScoreKey = key;
+            const race = noteScore("bwin", s.scoreAway, s.scoreHome);
+            emit({
+              kind: "football_score",
+              source: "bwin",
+              scoreAway: s.scoreAway,
+              scoreHome: s.scoreHome,
+              curTotal: s.total,
+              delta: prevTotal == null ? null : s.total - prevTotal,
+              period: s.period,
+              clock: s.secondsLeftInPeriod,
+              possession: s.possession,
+              down: s.down,
+              distance: s.distance,
+              ...race,
+            });
+          }
+        }
         return;
       }
       const g = payload.game ?? payload.optionMarket ?? payload;
@@ -252,6 +294,7 @@ async function main(): Promise<void> {
         const prev = snap;
         emit({
           kind: "football_score",
+          source: "espn",
           scoreAway: next.scoreAway,
           scoreHome: next.scoreHome,
           curTotal: next.scoreAway + next.scoreHome,
@@ -262,6 +305,7 @@ async function main(): Promise<void> {
           possession: next.possession,
           lastPlay: next.lastPlay,
           minutesLeft: minutesRemaining(next),
+          ...noteScore("espn", next.scoreAway, next.scoreHome),
         });
         lastScoreKey = next.rawScoreKey;
       }
